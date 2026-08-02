@@ -1,4 +1,17 @@
-"""Evidence-led story estimation using Devvy's one shared local model runtime."""
+"""Evidence-led story estimation on Devvy's one shared local model runtime.
+
+Division of labour, and the reason for it:
+
+* ``estimation_framework`` owns every number. Base sum, adjustments, Fibonacci band,
+  maturity cap, gates, confidence, recommendation — all plain Python.
+* This module owns the *conversation* with the model: what context it sees, what
+  contract it must answer in, and how a bad answer is repaired.
+
+The model is asked for one thing only — a 1-5 score and a short reason per factor. It is
+never trusted with arithmetic or with delivery policy. When it declines to score a factor
+the application falls back to a keyword heuristic and labels that factor ``heuristic`` in
+the output, so a reader can always tell judgement apart from a guess.
+"""
 
 from __future__ import annotations
 
@@ -6,38 +19,46 @@ import csv
 import io
 import json
 import re
+from collections.abc import Callable
 from difflib import SequenceMatcher
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.config import Settings
+from backend.estimation_framework import (
+    EFFORT_DEFAULTS,
+    FACTOR_BY_ID,
+    FACTOR_IDS,
+    FACTORS,
+    FIBONACCI_POINTS,
+    FRAMEWORK_DOCUMENT,
+    FRAMEWORK_VERSION,
+    MATURITY_TAXONOMY,
+    STACK_LABELS,
+    Calculation,
+    FactorScore,
+    StackProfile,
+    calculate,
+    confidence,
+    decide,
+    policy_checks,
+    risk_flags,
+    spike_template,
+)
+from backend.harness import ContextSource, assemble_context
 from backend.model import GemmaRuntime
 from backend.structured_output import generate_structured
 
-PARAMETERS = [
-    "complexity", "volume", "uncertainty", "react_scope", "spring_scope",
-    "existing_code_scope", "dependencies", "nfrs", "testing", "compliance_audit",
-    "familiarity", "dod_overhead",
-]
+#: How many of the 16 factors the model must score before its answer is accepted.
+#: Below this the repair loop runs with the specific missing factors named.
+MIN_MODEL_SCORED_FACTORS = 8
 
-ANCHORS = [
-    {"title": "Inline validation on a React payment form", "points": 3,
-     "rationale": "React-only, established patterns, modest tests."},
-    {"title": "Entitlement-protected account preference", "points": 5,
-     "rationale": "Bounded cross-stack change with entitlement and audit coverage."},
-    {"title": "Search and filter an existing transaction endpoint", "points": 5,
-     "rationale": "Cross-stack but bounded database, UI, and performance work."},
-    {"title": "Cross-market eKYC status integration", "points": 8,
-     "rationale": "External integration, regulatory rules, failure handling, and audit."},
-    {"title": "Transaction-wide AI summary with audit", "points": 8,
-     "rationale": "Broad data work with consistency, compliance, and operational uncertainty."},
-    {"title": "New multi-market payment orchestration journey", "points": 13,
-     "rationale": "Multiple new layers and dependencies; must be split before delivery."},
-]
+#: Context budget for the assembled story evidence, in characters. Kept modest because
+#: prefill on a CPU-bound 1B model dominates wall-clock time.
+STORY_CONTEXT_BUDGET = 6000
 
 
 class Story(BaseModel):
@@ -51,6 +72,7 @@ class Story(BaseModel):
     labels: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=list)
     source: Literal["manual", "jira", "upload"] = "manual"
+    stack: StackProfile = Field(default_factory=StackProfile)
 
     @field_validator("acceptance_criteria", mode="before")
     @classmethod
@@ -71,18 +93,8 @@ class BatchEstimateRequest(BaseModel):
 
 
 class JiraWriteRequest(BaseModel):
-    points: Literal[1, 2, 3, 5, 8, 13]
+    points: Literal[1, 2, 3, 5, 8, 13, 21, 34]
     confirm: bool = False
-
-
-class ParameterScore(BaseModel):
-    parameter: Literal[
-        "complexity", "volume", "uncertainty", "react_scope", "spring_scope",
-        "existing_code_scope", "dependencies", "nfrs", "testing", "compliance_audit",
-        "familiarity", "dod_overhead",
-    ]
-    score: Literal["Low", "Medium", "High"]
-    reason: str = Field(min_length=3, max_length=240)
 
 
 class EffortRange(BaseModel):
@@ -92,9 +104,10 @@ class EffortRange(BaseModel):
 
 
 class LayerEffort(BaseModel):
-    react: str
-    spring: str
-    existing_code: str
+    frontend: str
+    backend: str
+    data: str
+    assurance: str
     person_days: EffortRange
 
 
@@ -114,53 +127,21 @@ class SplitRecommendation(BaseModel):
     proposed_stories: list[str] = Field(default_factory=list, max_length=6)
 
 
-class EstimateOutput(BaseModel):
-    scorecard: list[ParameterScore] = Field(min_length=12, max_length=12)
-    drivers: list[str] = Field(min_length=2, max_length=3)
-    drivers_explanation: str
-    anchor_comparison: str
-    anchor_titles: list[str] = Field(min_length=1, max_length=3)
-    points: Literal[1, 2, 3, 5, 8, 13]
-    points_derivation: str
-    plain_language_why: str
-    tldr: str
-    effort: LayerEffort
-    hidden_tasks: list[HiddenTask]
-    risks: list[Risk] = Field(min_length=1, max_length=3)
-    assumptions: list[str]
-    spike_recommended: bool
-    spike_reason: str | None = None
-    split_recommendation: SplitRecommendation
-
-    @model_validator(mode="after")
-    def validate_scorecard(self) -> "EstimateOutput":
-        found = {item.parameter for item in self.scorecard}
-        if found != set(PARAMETERS):
-            raise ValueError("Scorecard must contain each of the 12 parameters exactly once")
-        return self
-
-
 class EstimateDraft(BaseModel):
-    """Small, tolerant boundary contract for a resource-constrained local model.
+    """Tolerant boundary contract for a resource-constrained local model.
 
-    The model supplies semantic signals; application code below owns the stable API
-    shape and all delivery policy. This prevents harmless key casing or compact list
-    choices from turning a useful estimate into a failed request.
+    Key casing, compact list forms, and partial scorecards are all accepted here and
+    normalised below. A small model that returns nine good factor scores and skips seven
+    is far more useful than one whose response is rejected wholesale.
     """
 
     scores: Any = Field(default_factory=dict)
     drivers: Any = Field(default_factory=list)
     points: Any = None
     rationale: Any = ""
-    anchor_titles: Any = Field(default_factory=list)
-    effort: Any = Field(default_factory=dict)
     hidden_tasks: Any = Field(default_factory=list)
     risks: Any = Field(default_factory=list)
     assumptions: Any = Field(default_factory=list)
-    spike_recommended: Any = False
-    spike_reason: Any = None
-    split_recommended: Any = False
-    split_rationale: Any = ""
     proposed_stories: Any = Field(default_factory=list)
 
     @model_validator(mode="before")
@@ -169,8 +150,7 @@ class EstimateDraft(BaseModel):
         if not isinstance(value, dict):
             return value
         normalized = {
-            re.sub(r"[^a-z0-9]", "", str(key).lower()): item
-            for key, item in value.items()
+            re.sub(r"[^a-z0-9]", "", str(key).lower()): item for key, item in value.items()
         }
 
         def pick(*names: str, default: Any = None) -> Any:
@@ -183,37 +163,28 @@ class EstimateDraft(BaseModel):
         split = pick("split_recommendation", "split", default={})
         split_data = split if isinstance(split, dict) else {}
         return {
-            "scores": pick("scores", "scorecard", "parameter_scores", default={}),
-            "drivers": pick(
-                "drivers", "complexity_drivers", "key_drivers", default=[]
-            ),
-            "points": pick("points", "score", "story_points"),
-            "rationale": pick(
-                "rationale", "explanation", "plain_language_why", "reason", default=""
-            ),
-            "anchor_titles": pick("anchor_titles", "anchors", default=[]),
-            "effort": pick("effort", "effort_range", "effortrange", default={}),
+            "scores": pick("scores", "scorecard", "factors", "factor_scores", default={}),
+            "drivers": pick("drivers", "key_drivers", "complexity_drivers", default=[]),
+            "points": pick("points", "story_points", "score"),
+            "rationale": pick("rationale", "explanation", "reason", "why", default=""),
             "hidden_tasks": pick("hidden_tasks", "hiddentasks", "tasks", default=[]),
             "risks": pick("risks", "risk", default=[]),
             "assumptions": pick("assumptions", default=[]),
-            "spike_recommended": pick("spike_recommended", "spike", default=False),
-            "spike_reason": pick("spike_reason"),
-            "split_recommended": split_data.get(
-                "split_recommended", split if isinstance(split, bool) else False
-            ),
-            "split_rationale": split_data.get(
-                "rationale", pick("split_rationale", default="")
-            ),
             "proposed_stories": split_data.get(
-                "proposed_stories", pick("proposed_stories", default=[])
+                "proposed_stories", pick("proposed_stories", "split_stories", default=[])
             ),
         }
 
     @model_validator(mode="after")
     def require_useful_signal(self) -> "EstimateDraft":
-        if self.points is None and not self.drivers and not self.rationale and not self.scores:
+        if not self.scores and not self.drivers and self.points is None and not self.rationale:
             raise ValueError("At least one estimation signal is required")
         return self
+
+
+# --------------------------------------------------------------------------------------
+# Coercion helpers — every one of these exists because a 1B model shapes JSON loosely.
+# --------------------------------------------------------------------------------------
 
 
 def _items(value: Any) -> list[Any]:
@@ -223,6 +194,8 @@ def _items(value: Any) -> list[Any]:
         return value
     if isinstance(value, (tuple, set)):
         return list(value)
+    if isinstance(value, dict):
+        return list(value.values())
     return [value]
 
 
@@ -230,7 +203,7 @@ def _text(value: Any, fallback: str = "") -> str:
     if value is None:
         return fallback
     if isinstance(value, dict):
-        for key in ("reason", "rationale", "description", "text", "title", "name"):
+        for key in ("reason", "why", "rationale", "note", "description", "text", "title", "name"):
             if value.get(key):
                 return str(value[key]).strip()
         return fallback
@@ -238,182 +211,261 @@ def _text(value: Any, fallback: str = "") -> str:
     return result or fallback
 
 
-def _flag(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return str(value).strip().lower() in {"true", "yes", "y", "1", "recommended"}
-
-
-def _score(value: Any) -> Literal["Low", "Medium", "High"] | None:
+def _level(value: Any) -> int | None:
+    """Coerce a model-supplied factor score to 1-5, or ``None`` if unusable."""
     if isinstance(value, dict):
-        value = value.get("score", value.get("value", value.get("level")))
-    cleaned = str(value).strip().lower()
-    if cleaned in {"low", "l", "1", "2"}:
-        return "Low"
-    if cleaned in {"medium", "med", "m", "3"}:
-        return "Medium"
-    if cleaned in {"high", "h", "4", "5"}:
-        return "High"
+        for key in ("score", "value", "level", "rating"):
+            if key in value:
+                value = value[key]
+                break
+        else:
+            return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        words = {"none": 1, "trivial": 1, "low": 2, "minor": 2, "moderate": 3, "medium": 3,
+                 "significant": 4, "high": 4, "extreme": 5, "very high": 5}
+        cleaned = str(value).strip().lower()
+        if cleaned in words:
+            number = words[cleaned]
+        else:
+            match = re.search(r"\d+(?:\.\d+)?", cleaned)
+            if not match:
+                return None
+            number = float(match.group())
+    return max(1, min(5, round(number)))
+
+
+def _canonical_factor(name: Any) -> str | None:
+    """Map a loosely-written factor name onto a framework factor id."""
+    key = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+    if key in FACTOR_BY_ID:
+        return key
+    # Numeric keys ("1".."16") and label-ish keys ("technical complexity") both appear.
+    if key.isdigit():
+        number = int(key)
+        for factor in FACTORS:
+            if factor.number == number:
+                return factor.id
+        return None
+    aliases = {
+        "clarity": "requirements_clarity", "requirements": "requirements_clarity",
+        "complexity": "technical_complexity", "technical": "technical_complexity",
+        "integration": "integration_surface", "data_model": "data_model_change",
+        "data": "data_model_change", "frontend": "frontend_effort", "ui": "frontend_effort",
+        "backend": "backend_effort", "server": "backend_effort", "testing": "test_effort",
+        "tests": "test_effort", "compliance": "regulatory_compliance",
+        "regulatory": "regulatory_compliance", "security": "security_review",
+        "observability": "observability_operations", "operations": "observability_operations",
+        "cross_team": "cross_team_dependency", "dependencies": "cross_team_dependency",
+        "rollback": "reversibility", "unknowns": "uncertainty", "risk": "uncertainty",
+        "performance": "performance_scalability", "scalability": "performance_scalability",
+        "documentation": "documentation_knowledge_transfer",
+        "docs": "documentation_knowledge_transfer", "dod": "dod_overhead",
+        "definition_of_done": "dod_overhead",
+    }
+    if key in aliases:
+        return aliases[key]
+    for factor in FACTORS:
+        if key and (key in factor.id or factor.id in key):
+            return factor.id
     return None
+
+
+def _model_scores(draft: EstimateDraft) -> dict[str, dict[str, Any]]:
+    """Extract ``factor id -> {score, reason}`` from whatever shape the model returned."""
+    raw: dict[str, Any] = {}
+    if isinstance(draft.scores, dict):
+        raw = dict(draft.scores)
+    else:
+        for item in _items(draft.scores):
+            if isinstance(item, dict):
+                name = item.get("factor", item.get("parameter", item.get("name", "")))
+                if name:
+                    raw[str(name)] = item
+    resolved: dict[str, dict[str, Any]] = {}
+    for name, value in raw.items():
+        factor_id = _canonical_factor(name)
+        if not factor_id or factor_id in resolved:
+            continue
+        level = _level(value)
+        if level is None:
+            continue
+        # A bare number ("uncertainty": 3) carries no reason. Stringifying it would put "3"
+        # in the reason column, so only a mapping can supply explanatory text.
+        reason = _text(value) if isinstance(value, dict) else ""
+        resolved[factor_id] = {"score": level, "reason": reason}
+    return resolved
+
+
+# --------------------------------------------------------------------------------------
+# Heuristic fallback — used only for factors the model did not score.
+# --------------------------------------------------------------------------------------
+
+_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "technical_complexity": ("algorithm", "concurren", "architect", "refactor", "async",
+                             "distributed", "real-time", "realtime", "state machine"),
+    "integration_surface": ("integrat", "third-party", "third party", "vendor", "external",
+                            "webhook", "kafka", "queue", "api", "legacy"),
+    "data_model_change": ("schema", "migration", "backfill", "database", "table", "index",
+                          "entity", "persist"),
+    "frontend_effort": ("ui", "screen", "form", "component", "responsive", "accessib",
+                        "animation", "dashboard", "frontend"),
+    "backend_effort": ("endpoint", "service", "backend", "business logic", "batch job",
+                       "transaction", "worker", "cron"),
+    "test_effort": ("test", "qa", "regression", "coverage", "e2e", "contract test",
+                    "automation"),
+    "regulatory_compliance": ("gdpr", "hipaa", "pci", "sox", "compliance", "regulat",
+                              "audit trail", "retention", "consent"),
+    "security_review": ("auth", "security", "encrypt", "pii", "token", "permission",
+                        "biometric", "credential", "threat"),
+    "observability_operations": ("monitor", "metric", "alert", "logging", "trace", "slo",
+                                 "runbook", "dashboard", "on-call"),
+    "cross_team_dependency": ("other team", "platform team", "external team", "depends on",
+                              "blocked by", "provision", "shared"),
+    "reversibility": ("migration", "deprecat", "irreversible", "cutover", "one-way",
+                      "breaking change"),
+    "performance_scalability": ("performance", "latency", "throughput", "scale", "load",
+                                "cache", "concurrent users", "sla"),
+    "documentation_knowledge_transfer": ("document", "adr", "runbook", "training",
+                                         "knowledge", "handover", "public api"),
+    "dod_overhead": ("release note", "demo", "rollout", "promotion", "sign-off",
+                     "stakeholder", "launch", "deploy"),
+}
 
 
 def _story_evidence(story: Story) -> str:
     return " ".join(
         [
-            story.title,
-            story.user_story,
-            " ".join(story.acceptance_criteria),
-            story.technical_breakdown or "",
-            " ".join(story.labels),
-            " ".join(story.components),
+            story.title, story.user_story, " ".join(story.acceptance_criteria),
+            story.technical_breakdown or "", " ".join(story.labels), " ".join(story.components),
         ]
     ).lower()
 
 
-def _fallback_score(parameter: str, story: Story) -> tuple[Literal["Low", "Medium", "High"], str]:
+def _heuristic_score(factor_id: str, story: Story, evidence: str) -> tuple[int, str]:
+    """Derive a defensible 1-5 score from story text when the model skipped a factor."""
+    stack = story.stack
+    if factor_id == "requirements_clarity":
+        count = len(story.acceptance_criteria)
+        if count >= 3 and len(evidence) > 240:
+            return 2, f"{count} acceptance criteria and a substantive description are present."
+        if count >= 1:
+            return 3, f"Only {count} acceptance criterion/criteria supplied; gaps are likely."
+        return 4, "No acceptance criteria were supplied, so the requirement is not pinned down."
+
+    if factor_id == "uncertainty":
+        if not story.acceptance_criteria and len(evidence.strip()) < 160:
+            return 4, "Sparse story evidence leaves the implementation path undefined."
+        if stack.scenario in {"new_framework", "framework_upgrade"}:
+            return 4, f"The declared scenario ({stack.scenario.replace('_', ' ')}) carries unknowns."
+        return 3, "Evidence exists, but implementation unknowns have not been ruled out."
+
+    if factor_id == "frontend_effort" and stack.frontend == "none":
+        return 1, "No frontend stack is declared for this story."
+    if factor_id == "backend_effort" and stack.backend == "none":
+        return 1, "No backend stack is declared for this story."
+
+    terms = _KEYWORDS.get(factor_id, ())
+    matched = [term for term in terms if term in evidence]
+    if not matched:
+        return 2, f"No explicit {FACTOR_BY_ID[factor_id].label.lower()} evidence; scored at baseline."
+    score = min(5, 2 + len(matched))
+    sample = ", ".join(sorted(matched)[:3])
+    return score, f"Story evidence mentions {sample}."
+
+
+# --------------------------------------------------------------------------------------
+# Scorecard assembly
+# --------------------------------------------------------------------------------------
+
+
+def build_scorecard(draft: EstimateDraft, story: Story) -> list[FactorScore]:
+    """Merge model judgement with heuristic fallback into all 16 factors, in order."""
+    supplied = _model_scores(draft)
     evidence = _story_evidence(story)
-    groups = {
-        "react_scope": ("react", "frontend", "ui", "screen", "form"),
-        "spring_scope": ("spring", "backend", "api", "service", "database"),
-        "existing_code_scope": ("existing", "legacy", "migration", "refactor"),
-        "dependencies": ("vendor", "integration", "external", "dependency", "third-party"),
-        "nfrs": ("performance", "availability", "latency", "scale", "resilien"),
-        "testing": ("test", "qa", "regression", "automation"),
-        "compliance_audit": (
-            "compliance", "audit", "security", "biometric", "auth", "regulated"
-        ),
-        "dod_overhead": ("deploy", "monitor", "document", "release", "rollout"),
-    }
-    if parameter == "uncertainty":
-        sparse = not story.acceptance_criteria or len(evidence.strip()) < 120
-        return (
-            ("High", "Acceptance evidence is incomplete; uncertainty is kept explicit.")
-            if sparse
-            else ("Medium", "Story evidence exists, but implementation unknowns remain.")
-        )
-    if parameter == "complexity":
-        matched_layers = sum(
-            any(term in evidence for term in groups[name])
-            for name in ("react_scope", "spring_scope", "dependencies", "compliance_audit")
-        )
-        if matched_layers >= 3:
-            return "High", "The story crosses several technical or assurance boundaries."
-        if matched_layers >= 1:
-            return "Medium", "The story names at least one non-trivial delivery boundary."
-    if parameter == "volume":
-        if any(term in evidence for term in ("bulk", "batch", "all users", "large", "multi-")):
-            return "High", "The story indicates broad or high-volume behavior."
-    if parameter == "familiarity":
-        return "Medium", "Team familiarity is not evidenced; a neutral score is used."
-    terms = groups.get(parameter, ())
-    if terms and any(term in evidence for term in terms):
-        return "Medium", f"The story explicitly indicates {parameter.replace('_', ' ')} work."
-    return "Low", f"No explicit {parameter.replace('_', ' ')} evidence was provided."
-
-
-def _scorecard(draft: EstimateDraft, story: Story) -> list[ParameterScore]:
-    supplied: dict[str, Any] = {}
-    if isinstance(draft.scores, dict):
-        supplied = {
-            re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_"): value
-            for key, value in draft.scores.items()
-        }
-    else:
-        for item in _items(draft.scores):
-            if not isinstance(item, dict):
-                continue
-            name = item.get("parameter", item.get("name", ""))
-            key = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
-            if key:
-                supplied[key] = item
-    result = []
-    for parameter in PARAMETERS:
-        provided = supplied.get(parameter)
-        level = _score(provided)
-        if level:
-            reason = _text(provided, f"The local analysis rated {parameter} {level}.")
+    guidance = story.stack.guidance()
+    scorecard: list[FactorScore] = []
+    for factor in FACTORS:
+        provided = supplied.get(factor.id)
+        provenance: Literal["model", "heuristic"] = "model" if provided else "heuristic"
+        if provided:
+            score = int(provided["score"])
+            # Small models often answer with a bare number. Rather than showing an empty
+            # cell, fall back to the keyword evidence for the same factor — it describes
+            # the same story text, and the score stays attributed to the model.
+            reason = provided["reason"] or _heuristic_score(factor.id, story, evidence)[1]
         else:
-            level, reason = _fallback_score(parameter, story)
-        result.append(ParameterScore(parameter=parameter, score=level, reason=reason[:240]))
-    return result
+            score, reason = _heuristic_score(factor.id, story, evidence)
+        scorecard.append(
+            FactorScore(
+                factor=factor.id, number=factor.number, label=factor.label,
+                group=factor.group, score=score, reason=reason[:300], provenance=provenance,
+                stack_notes=guidance.get(factor.id, []),
+            )
+        )
+    return scorecard
 
 
-def _points(value: Any, scorecard: list[ParameterScore]) -> Literal[1, 2, 3, 5, 8, 13]:
-    if isinstance(value, dict):
-        value = value.get("points", value.get("score", value.get("value")))
-    match = re.search(r"\d+(?:\.\d+)?", str(value or ""))
-    if match:
-        number = float(match.group())
-    else:
-        weights = {"Low": 1, "Medium": 2, "High": 3}
-        number = sum(weights[item.score] for item in scorecard) / len(scorecard)
-        number = 3 if number < 1.5 else 5 if number < 2 else 8
-    allowed = (1, 2, 3, 5, 8, 13)
-    return min(allowed, key=lambda candidate: (abs(candidate - number), candidate))
-
-
-def _effort(draft: EstimateDraft, points: int, scorecard: list[ParameterScore]) -> LayerEffort:
-    raw = draft.effort
-    data = raw if isinstance(raw, dict) else {}
-    days = data.get("person_days", data.get("personDays", data))
-    if isinstance(days, dict):
-        optimistic = days.get("optimistic", days.get("min"))
-        likely = days.get("likely", days.get("expected", days.get("most_likely")))
-        pessimistic = days.get("pessimistic", days.get("max"))
-    else:
-        likely = days if isinstance(days, (int, float)) else None
-        optimistic = pessimistic = None
-    defaults = {
-        1: (0.5, 1, 2), 2: (1, 2, 3), 3: (2, 3, 5),
-        5: (3, 5, 8), 8: (5, 8, 13), 13: (8, 13, 21),
-    }[points]
-    likely = float(likely) if isinstance(likely, (int, float)) else defaults[1]
-    optimistic = (
-        float(optimistic) if isinstance(optimistic, (int, float)) else min(defaults[0], likely)
-    )
-    pessimistic = (
-        float(pessimistic) if isinstance(pessimistic, (int, float)) else max(defaults[2], likely)
-    )
-    by_parameter = {item.parameter: item.score for item in scorecard}
-
-    def layer(name: str, parameter: str) -> str:
-        value = data.get(name)
-        return _text(value, f"{by_parameter[parameter]} scope")
-
+def _effort(points: int, scores: dict[str, int]) -> LayerEffort:
+    optimistic, likely, pessimistic = EFFORT_DEFAULTS[points]
+    words = {1: "None", 2: "Small", 3: "Moderate", 4: "Significant", 5: "Extensive"}
     return LayerEffort(
-        react=layer("react", "react_scope"),
-        spring=layer("spring", "spring_scope"),
-        existing_code=layer("existing_code", "existing_code_scope"),
-        person_days=EffortRange(
-            optimistic=max(0, optimistic),
-            likely=max(0, likely),
-            pessimistic=max(0, pessimistic),
+        frontend=f"{words[scores['frontend_effort']]} frontend scope",
+        backend=f"{words[scores['backend_effort']]} backend scope",
+        data=f"{words[scores['data_model_change']]} data-model scope",
+        assurance=(
+            f"{words[max(scores['test_effort'], scores['security_review'])]} "
+            "test and security scope"
         ),
+        person_days=EffortRange(optimistic=optimistic, likely=likely, pessimistic=pessimistic),
     )
 
 
-def _normalize_draft(draft: EstimateDraft, story: Story) -> EstimateOutput:
-    scorecard = _scorecard(draft, story)
-    points = _points(draft.points, scorecard)
-    high_parameters = [item.parameter for item in scorecard if item.score == "High"]
-    drivers = [_text(item) for item in _items(draft.drivers) if _text(item)][:3]
-    for parameter in high_parameters + ["complexity", "uncertainty"]:
-        readable = parameter.replace("_", " ")
-        if len(drivers) >= 2:
-            break
-        if readable not in drivers:
-            drivers.append(readable)
-    rationale = _text(
-        draft.rationale,
-        f"The evidence and fixed calibration anchors support a {points}-point estimate.",
-    )
-    anchors = [_text(item) for item in _items(draft.anchor_titles) if _text(item)][:3]
-    if not anchors:
-        nearest = min(ANCHORS, key=lambda anchor: abs(anchor["points"] - points))
-        anchors = [nearest["title"]]
-    hidden_tasks = []
+def _drivers(draft: EstimateDraft, scorecard: list[FactorScore]) -> list[str]:
+    """The 2-3 factors actually moving the number, ranked by score then framework order."""
+    ranked = sorted(scorecard, key=lambda item: (-item.score, item.number))
+    drivers = [f"{item.label} ({item.score})" for item in ranked[:3] if item.score >= 3]
+    if len(drivers) < 2:
+        drivers = [f"{item.label} ({item.score})" for item in ranked[:2]]
+    return drivers
+
+
+def _collect(values: Any, limit: int) -> list[str]:
+    return [text for text in (_text(item) for item in _items(values)) if text][:limit]
+
+
+def build_result(draft: EstimateDraft, story: Story, context_manifest: list[dict]) -> dict[str, Any]:
+    """Turn a model draft plus the framework arithmetic into the full estimate payload."""
+    scorecard = build_scorecard(draft, story)
+    scores = {item.factor: int(item.score) for item in scorecard}
+    stack = story.stack
+
+    calculation: Calculation = calculate(scores, stack)
+    checks = policy_checks(scores, stack, calculation)
+    recommendation, recommendation_detail = decide(checks, stack, calculation, scores)
+    confidence_level, confidence_detail = confidence(scores, stack, calculation)
+    flags = risk_flags(scores, stack)
+    anchors = stack.anchors()
+    nearest = min(anchors, key=lambda anchor: abs(int(anchor["points"]) - calculation.points))
+
+    # The model's own guess is kept purely as a cross-check signal. Divergence is shown to
+    # the reader rather than resolved silently in either direction.
+    model_points_guess = None
+    if draft.points is not None:
+        match = re.search(r"\d+", str(draft.points))
+        if match:
+            candidate = int(match.group())
+            model_points_guess = min(FIBONACCI_POINTS, key=lambda p: abs(p - candidate))
+
+    spike_needed = recommendation in {"spike_first", "upgrade_framework_first", "epic_discovery"}
+    split_needed = recommendation in {"decompose", "epic_discovery"}
+    unknowns = [item.label for item in scorecard if item.score >= 4]
+    proposed = _collect(draft.proposed_stories, 6)
+
+    hidden_tasks: list[HiddenTask] = []
     for item in _items(draft.hidden_tasks)[:8]:
         data = item if isinstance(item, dict) else {}
         task = _text(data.get("task", data.get("title", item)))
@@ -421,7 +473,20 @@ def _normalize_draft(draft: EstimateDraft, story: Story) -> EstimateOutput:
             hidden_tasks.append(
                 HiddenTask(task=task, weight=_text(data.get("weight"), "Supporting work"))
             )
-    risks = []
+    for item in scorecard:
+        if len(hidden_tasks) >= 8:
+            break
+        # Assurance work at 4+ is the classic source of "we forgot that" overruns, so it
+        # is surfaced as explicit hidden work even when the model did not mention it.
+        if item.score >= 4 and item.factor in {
+            "test_effort", "documentation_knowledge_transfer", "observability_operations",
+            "dod_overhead", "regulatory_compliance",
+        } and not any(item.label.lower() in task.task.lower() for task in hidden_tasks):
+            hidden_tasks.append(
+                HiddenTask(task=item.label, weight=f"Scored {item.score}/5 — {item.reason}")
+            )
+
+    risks: list[Risk] = []
     for item in _items(draft.risks)[:3]:
         data = item if isinstance(item, dict) else {}
         risk = _text(data.get("risk", data.get("title", item)))
@@ -431,56 +496,234 @@ def _normalize_draft(draft: EstimateDraft, story: Story) -> EstimateOutput:
                     risk=risk,
                     mitigation_or_assumption=_text(
                         data.get("mitigation_or_assumption", data.get("mitigation")),
-                        "Validate this risk before delivery commitment.",
+                        "Validate this risk before the delivery commitment.",
                     ),
                 )
+            )
+    for flag in flags:
+        if len(risks) >= 4:
+            break
+        if not any(str(flag["label"]).lower() in item.risk.lower() for item in risks):
+            risks.append(
+                Risk(risk=str(flag["label"]), mitigation_or_assumption=str(flag["detail"]))
             )
     if not risks:
         risks = [
             Risk(
                 risk="Estimate uncertainty",
-                mitigation_or_assumption="Confirm assumptions and acceptance criteria before commitment.",
+                mitigation_or_assumption="Confirm assumptions and acceptance criteria first.",
             )
         ]
-    assumptions = [_text(item) for item in _items(draft.assumptions) if _text(item)][:8]
-    if not assumptions:
-        assumptions = ["The estimate uses only the supplied story evidence and fixed anchors."]
-    uncertainty = next(item.score for item in scorecard if item.parameter == "uncertainty")
-    spike = _flag(draft.spike_recommended) or points == 13 or uncertainty == "High"
-    split = _flag(draft.split_recommended) or points == 13
-    proposed = [_text(item) for item in _items(draft.proposed_stories) if _text(item)][:6]
-    split_rationale = _text(
-        draft.split_rationale,
-        "A 13-point story must be split before delivery." if points == 13
-        else "The story can remain cohesive at its current estimated size.",
+
+    assumptions = _collect(draft.assumptions, 8) or [
+        "The estimate uses only the supplied story evidence and the declared stack profile."
+    ]
+    rationale = _text(draft.rationale) or (
+        f"{calculation.base_sum} base points across 16 factors, adjusted by "
+        f"{calculation.base_adjustment_total + calculation.stack_adjustment_total}, "
+        f"lands in band {calculation.band}."
     )
-    return EstimateOutput(
-        scorecard=scorecard,
-        drivers=drivers[:3],
-        drivers_explanation=rationale,
-        anchor_comparison=f"Compared with: {', '.join(anchors)}.",
-        anchor_titles=anchors,
-        points=points,
-        points_derivation=f"Model signals were normalized to modified Fibonacci value {points}.",
-        plain_language_why=rationale,
-        tldr=f"{points} - {rationale}",
-        effort=_effort(draft, points, scorecard),
-        hidden_tasks=hidden_tasks,
-        risks=risks,
-        assumptions=assumptions,
-        spike_recommended=spike,
-        spike_reason=(
-            _text(
-                draft.spike_reason,
-                "High uncertainty or size requires discovery before commitment.",
-            )
-            if spike else None
+    drivers = _drivers(draft, scorecard)
+    tldr = (
+        f"{calculation.points} points — {', '.join(drivers[:2])} drive the estimate. "
+        f"{confidence_level} confidence."
+    )
+
+    maturity = MATURITY_TAXONOMY[int(stack.maturity_level)]
+    model_scored = sum(1 for item in scorecard if item.provenance == "model")
+
+    return {
+        "framework": {
+            "name": "Agile Story Point Estimation Framework",
+            "version": FRAMEWORK_VERSION,
+            "document": FRAMEWORK_DOCUMENT,
+            "factor_count": len(FACTORS),
+        },
+        "story": story.model_dump(),
+        "stack": {
+            **stack.model_dump(),
+            "frontend_label": STACK_LABELS.get(stack.frontend, stack.frontend),
+            "backend_label": STACK_LABELS.get(stack.backend, stack.backend),
+            "maturity_name": maturity["name"],
+            "maturity_definition": maturity["definition"],
+            "maturity_action": maturity["action"],
+        },
+        "scorecard": [item.model_dump() for item in scorecard],
+        "calculation": calculation.model_dump(),
+        "points": calculation.points,
+        "drivers": drivers,
+        "drivers_explanation": rationale,
+        "tldr": tldr,
+        "plain_language_why": (
+            f"{recommendation_detail} {confidence_detail} "
+            f"The score is driven by {', '.join(drivers[:2])}."
         ),
-        split_recommendation=SplitRecommendation(
-            split_recommended=split,
-            rationale=split_rationale,
+        "confidence": confidence_level,
+        "confidence_detail": confidence_detail,
+        "recommendation": recommendation,
+        "recommendation_detail": recommendation_detail,
+        "risk_flags": flags,
+        "anchor_comparison": (
+            f"Closest calibrated reference: \"{nearest['title']}\" "
+            f"({nearest['stack']}, {nearest['points']} points)."
+        ),
+        "anchors_considered": anchors,
+        "effort": _effort(calculation.points, scores).model_dump(),
+        "hidden_tasks": [item.model_dump() for item in hidden_tasks],
+        "risks": [item.model_dump() for item in risks],
+        "assumptions": assumptions,
+        "spike_recommended": spike_needed,
+        "spike_reason": recommendation_detail if spike_needed else None,
+        "spike_definition": spike_template(story.title, unknowns) if spike_needed else None,
+        "split_recommendation": SplitRecommendation(
+            split_recommended=split_needed,
+            rationale=(
+                recommendation_detail if split_needed
+                else "The story is cohesive at its calculated size."
+            ),
             proposed_stories=proposed,
+        ).model_dump(),
+        "evidence": {
+            "source": story.source,
+            "context_manifest": context_manifest,
+            "policy_checks": [check.model_dump() for check in checks],
+            "scoring_provenance": {
+                "model_scored": model_scored,
+                "heuristic_filled": len(scorecard) - model_scored,
+                "minimum_required": MIN_MODEL_SCORED_FACTORS,
+            },
+            "model_cross_check": {
+                "model_points": model_points_guess,
+                "calculated_points": calculation.points,
+                "agreement": (
+                    "not_offered" if model_points_guess is None
+                    else "agrees" if model_points_guess == calculation.points
+                    else "diverges"
+                ),
+                "note": (
+                    "The reported number comes from the framework arithmetic. The model's own "
+                    "guess is shown only so disagreement is visible."
+                ),
+            },
+            "determinism": (
+                "Story points are computed from the scorecard by fixed rules. Re-running the "
+                "arithmetic on the same scores always yields the same points."
+            ),
+        },
+    }
+
+
+# --------------------------------------------------------------------------------------
+# Prompt construction and the estimation service
+# --------------------------------------------------------------------------------------
+
+_SYSTEM = (
+    "You are a senior technical estimator running a calibrated multi-factor analysis. "
+    "You score evidence; you never invent requirements, and you never compute the story "
+    "points yourself. If the story does not evidence a factor, score it low and say so."
+)
+
+
+def _rubric(stack: StackProfile) -> str:
+    """Render the 16-factor rubric, injecting only the declared stack's guidance."""
+    guidance = stack.guidance()
+    lines = []
+    for factor in FACTORS:
+        line = f"{factor.number}. {factor.id} — {factor.description} 1 = {factor.low_anchor} 5 = {factor.high_anchor}"
+        notes = guidance.get(factor.id)
+        if notes:
+            line += "\n   Stack calibration: " + " | ".join(notes)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def build_prompt(story: Story) -> tuple[str, list[dict]]:
+    """Assemble the estimation prompt and return it with its provenance manifest.
+
+    Story text is marked untrusted in the context envelope: it arrives from Jira, a
+    spreadsheet, or a paste box, and must be read as evidence rather than as instructions.
+    """
+    stack = story.stack
+    anchors = "\n".join(
+        f"- {anchor['points']} points ({anchor['stack']}): {anchor['title']}"
+        for anchor in stack.anchors()
+    )
+    sources = [
+        ContextSource(
+            id="story", label="Story under estimation", priority=100, trusted=False,
+            content=json.dumps(
+                {
+                    "title": story.title,
+                    "user_story": story.user_story,
+                    "acceptance_criteria": story.acceptance_criteria,
+                    "technical_breakdown": story.technical_breakdown,
+                    "labels": story.labels,
+                    "components": story.components,
+                },
+                indent=2,
+            ),
         ),
+        ContextSource(
+            id="stack_profile", label="Declared technology stack", priority=90, trusted=True,
+            content=json.dumps(
+                {
+                    "frontend": STACK_LABELS.get(stack.frontend, stack.frontend),
+                    "backend": STACK_LABELS.get(stack.backend, stack.backend),
+                    "database": stack.database or "unspecified",
+                    "framework_maturity": f"{stack.maturity_level} "
+                    f"({MATURITY_TAXONOMY[int(stack.maturity_level)]['name']})",
+                    "team_experience": stack.team_experience,
+                    "scenario": stack.scenario,
+                },
+                indent=2,
+            ),
+        ),
+        ContextSource(
+            id="anchors", label="Calibrated reference stories", priority=80, trusted=True,
+            content=anchors,
+        ),
+    ]
+    context, manifest = assemble_context(sources, STORY_CONTEXT_BUDGET)
+    prompt = f"""Score the story below against all 16 factors of the estimation framework.
+
+{context}
+
+FACTOR RUBRIC — score every factor from 1 to 5:
+{_rubric(stack)}
+
+Rules:
+- Score all 16 factors using their exact ids. A factor with no supporting evidence scores 1 or 2.
+- Give each score a reason of at most 20 words, quoting or paraphrasing the story evidence.
+- Do not add requirements the story does not state.
+- Name the 2-3 factors that genuinely drive the size.
+- List hidden sub-tasks the story text omits but the work implies.
+
+Return one JSON object with these keys:
+  scores: object mapping each factor id to {{"score": 1-5, "why": "short reason"}}
+  drivers: array of 2-3 factor ids
+  rationale: one sentence explaining the overall size
+  hidden_tasks: array of {{"task": ..., "weight": ...}}
+  risks: array of {{"risk": ..., "mitigation_or_assumption": ...}}
+  assumptions: array of strings
+  proposed_stories: array of smaller story titles, only if this should be split
+"""
+    return prompt, manifest
+
+
+def _validate_draft(draft: EstimateDraft) -> str | None:
+    """Semantic gate for the repair loop: name exactly what is missing, not just 'invalid'.
+
+    Feeding back the specific unscored factor ids is what makes the second attempt useful
+    on a small model; a generic "try again" tends to reproduce the same omissions.
+    """
+    supplied = _model_scores(draft)
+    if len(supplied) >= MIN_MODEL_SCORED_FACTORS:
+        return None
+    missing = [factor_id for factor_id in FACTOR_IDS if factor_id not in supplied]
+    return (
+        f"Only {len(supplied)} of 16 factors were scored. Score at least "
+        f"{MIN_MODEL_SCORED_FACTORS}. These are still missing: {', '.join(missing)}. "
+        'Use the exact ids as keys, each mapping to {"score": 1-5, "why": "..."}.'
     )
 
 
@@ -494,94 +737,132 @@ class EstimateService:
         story: Story,
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        prompt, manifest = build_prompt(story)
         if progress:
             progress(
                 {
-                    "stage": "prepare_context",
+                    "stage": "assemble_context",
                     "status": "completed",
-                    "label": "Story evidence normalized",
+                    "label": "Story evidence bounded and labelled",
                     "evidence": {
-                        "source": story.source,
-                        "criteria": len(story.acceptance_criteria),
-                        "anchors": len(ANCHORS),
-                        "factors": len(PARAMETERS),
+                        "sources": len(manifest),
+                        "characters": sum(int(item["characters"]) for item in manifest),
+                        "budget": STORY_CONTEXT_BUDGET,
+                        "truncated": any(item["truncated"] for item in manifest),
+                        "untrusted_sources": sum(1 for item in manifest if not item["trusted"]),
                     },
                 }
             )
-        prompt = f"""Estimate this software story for a regulated delivery team.
-Score exactly these parameters once each: {', '.join(PARAMETERS)}.
-Identify the 2-3 true drivers, compare named fixed anchors, then derive a modified
-Fibonacci point value. A 13 must recommend a split. High uncertainty or a 13 must
-recommend a spike. Never invent requirements. Keep every explanation concise and
-evidence-based. The TLDR must begin with '<points> -'. Layer effort must cover React,
-Spring, existing-code work and optimistic/likely/pessimistic person-days.
-
-Return compact JSON using these keys: scores (parameter-to-Low/Medium/High object),
-drivers, points, rationale, anchor_titles, effort, hidden_tasks, risks, assumptions,
-spike_recommended, spike_reason, split_recommended, split_rationale, proposed_stories.
-Unknown values must be omitted or described as unknown, never invented.
-
-STORY:
-{json.dumps(story.model_dump(), indent=2)}
-
-FIXED CALIBRATION ANCHORS:
-{json.dumps(ANCHORS, indent=2)}
-"""
-        draft = await generate_structured(
-            self.runtime,
-            EstimateDraft,
-            (
-                "You are a senior full-stack agile estimator. Be cautious, concrete, "
-                "and transparent. Use modified Fibonacci points only."
-            ),
-            prompt,
-            max_new_tokens=self.settings.estimate_max_output_tokens,
-            on_attempt=(
-                lambda event: progress({"stage": "structured_loop", **event}) if progress else None
-            ),
-        )
-        output = draft if isinstance(draft, EstimateOutput) else _normalize_draft(draft, story)
-        uncertainty = next(
-            item.score for item in output.scorecard if item.parameter == "uncertainty"
-        )
-        spike = output.spike_recommended or output.points == 13 or uncertainty == "High"
-        spike_reason = output.spike_reason
-        if spike and not spike_reason:
-            spike_reason = "High uncertainty or size requires discovery before commitment."
-        split = output.split_recommendation
-        if output.points == 13 and not split.split_recommended:
-            split = split.model_copy(update={"split_recommended": True})
-        result = output.model_dump()
-        result.update(
-            {
-                "story": story.model_dump(),
-                "spike_recommended": spike,
-                "spike_reason": spike_reason,
-                "split_recommendation": split.model_dump(),
-                "evidence": {
-                    "source": story.source,
-                    "score_factors": PARAMETERS,
-                    "anchors_considered": [item["title"] for item in ANCHORS],
-                    "policy_checks": {
-                        "modified_fibonacci": True,
-                        "exact_scorecard": True,
-                        "high_uncertainty_forces_spike": True,
-                        "thirteen_forces_split": True,
+            progress(
+                {
+                    "stage": "declare_stack",
+                    "status": "completed",
+                    "label": (
+                        f"Stack calibration loaded for "
+                        f"{STACK_LABELS.get(story.stack.frontend, 'None')} / "
+                        f"{STACK_LABELS.get(story.stack.backend, 'None')}"
+                    ),
+                    "evidence": {
+                        "maturity": (
+                            f"{story.stack.maturity_level} "
+                            f"({MATURITY_TAXONOMY[int(story.stack.maturity_level)]['name']})"
+                        ),
+                        "team_experience": story.stack.team_experience,
+                        "scenario": story.stack.scenario,
+                        "reference_anchors": len(story.stack.anchors()),
                     },
-                },
-            }
-        )
+                }
+            )
+
+        try:
+            draft = await generate_structured(
+                self.runtime,
+                EstimateDraft,
+                _SYSTEM,
+                prompt,
+                max_new_tokens=self.settings.estimate_max_output_tokens,
+                validate_result=_validate_draft,
+                on_attempt=(
+                    lambda event: progress({"stage": "structured_loop", **event})
+                    if progress else None
+                ),
+            )
+        except ValueError as exc:
+            # A small local model that cannot hold the contract must not cost the user their
+            # estimate. The heuristic scorecard still produces a defensible number, and the
+            # degradation is reported rather than hidden.
+            if progress:
+                progress(
+                    {
+                        "stage": "structured_loop",
+                        "status": "failed",
+                        "label": "Model output unusable — falling back to evidence heuristics",
+                        "detail": str(exc)[:500],
+                    }
+                )
+            draft = EstimateDraft.model_construct(
+                scores={}, drivers=[], points=None, rationale="",
+                hidden_tasks=[], risks=[], assumptions=[], proposed_stories=[],
+            )
+        result = build_result(draft, story, manifest)
+
         if progress:
+            provenance = result["evidence"]["scoring_provenance"]
+            progress(
+                {
+                    "stage": "score_factors",
+                    "status": "completed",
+                    "label": f"16 factors scored ({provenance['model_scored']} by model)",
+                    "evidence": provenance,
+                }
+            )
+            calculation = result["calculation"]
+            progress(
+                {
+                    "stage": "calculate",
+                    "status": "completed",
+                    "label": (
+                        f"Base {calculation['base_sum']} "
+                        f"+{calculation['base_adjustment_total']} base "
+                        f"+{calculation['stack_adjustment_total']} stack "
+                        f"= {calculation['adjusted_score']}"
+                    ),
+                    "detail": "Computed in application code from the scorecard, not by the model.",
+                    "evidence": {
+                        "adjusted_score": calculation["adjusted_score"],
+                        "band": calculation["band"],
+                        "points": calculation["points"],
+                        "rules_fired": sum(
+                            1 for step in calculation["steps"]
+                            if step["applied"] and step["rule"] != "base_sum"
+                        ),
+                    },
+                }
+            )
+            failed = [
+                check["rule"] for check in result["evidence"]["policy_checks"]
+                if not check["passed"]
+            ]
             progress(
                 {
                     "stage": "policy_gate",
-                    "status": "completed",
-                    "label": "Deterministic estimation policy applied",
-                    "evidence": {"points": output.points, "spike": spike, "split": split.split_recommended},
+                    "status": "completed" if not failed else "waiting",
+                    "label": f"Decision: {result['recommendation'].replace('_', ' ')}",
+                    "detail": result["recommendation_detail"],
+                    "evidence": {
+                        "gates_evaluated": len(result["evidence"]["policy_checks"]),
+                        "gates_failed": failed or "none",
+                        "confidence": result["confidence"],
+                        "risk_flags": len(result["risk_flags"]),
+                    },
                 }
             )
         return result
 
+
+# --------------------------------------------------------------------------------------
+# Upload and Jira ingestion (unchanged in behaviour; stack profile rides along)
+# --------------------------------------------------------------------------------------
 
 TARGET_ALIASES = {
     "title": ["title", "summary", "story title", "issue", "name"],
@@ -647,10 +928,15 @@ def parse_upload(content: bytes, filename: str) -> dict[str, Any]:
     }
 
 
-def rows_to_stories(rows: list[dict[str, Any]], mapping: dict[str, str | None]) -> list[Story]:
+def rows_to_stories(
+    rows: list[dict[str, Any]],
+    mapping: dict[str, str | None],
+    stack: StackProfile | None = None,
+) -> list[Story]:
     title_column = mapping.get("title")
     if not title_column:
         raise ValueError("Map a source column to Title before estimating.")
+    profile = stack or StackProfile()
     stories: list[Story] = []
     for row in rows[:100]:
         title = str(row.get(title_column, "")).strip()
@@ -671,6 +957,7 @@ def rows_to_stories(rows: list[dict[str, Any]], mapping: dict[str, str | None]) 
                 ),
                 existing_points=points,
                 source="upload",
+                stack=profile,
             )
         )
     if not stories:

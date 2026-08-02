@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { ArrowLeft, Check, Code2, FileCode2, FolderOpen, LoaderCircle, Play, ShieldCheck, Sparkles } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Check, Code2, FileCode2, FolderOpen, LoaderCircle, Play, ShieldCheck, Sparkles } from 'lucide-react'
 import { api } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { SystemStatusChip } from './SystemStatusChip'
@@ -16,7 +16,8 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
   const [language, setLanguage] = useState('')
   const [framework, setFramework] = useState('')
   const [risk, setRisk] = useState<SmartCodeRequest['risk']>('medium')
-  const [stages, setStages] = useState<string[]>([])
+  // Stage → status, so a failed structural check is not painted as a completed step.
+  const [stages, setStages] = useState<Record<string, string>>({})
   const [status, setStatus] = useState('Ready')
   const [preview, setPreview] = useState<SmartCodePreview>()
   const [activeDiff, setActiveDiff] = useState('')
@@ -37,7 +38,7 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
   }
   async function run() {
     if (!workspace.trim() || !objective.trim()) return setError('Choose a workspace and describe the change.')
-    setError(''); setPreview(undefined); setResult(undefined); setStages([]); setRunEvents([]); setRunning(true)
+    setError(''); setPreview(undefined); setResult(undefined); setStages({}); setRunEvents([]); setRunning(true)
     abortRef.current = new AbortController()
     const payload: SmartCodeRequest = {
       objective: objective.trim(), workspace_root: workspace.trim(), mode, target_paths: targets,
@@ -47,9 +48,9 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
     try {
       await api.smartCodePreview(payload, (event, data) => {
         if (event === 'agent_event') setRunEvents(current => [...current, data as AgentEvent])
-        if (event === 'started') { setStages(['classify']); setStatus(data.message) }
+        if (event === 'started') { setStages({ classify: 'completed' }); setStatus(data.message) }
         if (event === 'status') setStatus(data.message)
-        if (event === 'stage') setStages(current => [...new Set([...current, data.stage])])
+        if (event === 'stage') setStages(current => ({ ...current, [data.stage]: data.status || 'completed' }))
         if (event === 'result') {
           setPreview(data); setStatus(data.can_apply ? 'Verified — review the diff' : mode === 'review' ? 'Review complete' : 'Verification failed')
           setActiveDiff(Object.keys(data.diffs || {})[0] || '')
@@ -91,7 +92,14 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
         <button className="primary-action" disabled={running || !workspace.trim() || !objective.trim()} onClick={run}>{running ? <LoaderCircle className="spin"/> : <Play/>}{running ? 'Building preview…' : mode === 'review' ? 'Run review' : 'Build verified preview'}</button>
       </aside>
       <main className="smart-workspace">
-        <section className="pipeline-panel"><div className="panel-title"><b>PIPELINE</b><span>{status}</span></div><div className="smart-pipeline">{pipeline.map((step, index) => <div key={step} className={stages.includes(step) ? 'done' : running && index === stages.length ? 'running' : ''}>{stages.includes(step) ? <Check/> : running && index === stages.length ? <LoaderCircle className="spin"/> : <i/>}<b>{step}</b><small>{step === 'gate' ? 'human approval' : step === 'verify' ? 'syntax · policy' : 'agent stage'}</small></div>)}</div></section>
+        <section className="pipeline-panel"><div className="panel-title"><b>PIPELINE</b><span>{status}</span></div><div className="smart-pipeline">{pipeline.map((step, index) => {
+          const state = stages[step]
+          const active = running && index === Object.keys(stages).length
+          return <div key={step} className={state === 'failed' ? 'failed' : state ? 'done' : active ? 'running' : ''}>
+            {state === 'failed' ? <AlertTriangle/> : state ? <Check/> : active ? <LoaderCircle className="spin"/> : <i/>}
+            <b>{step}</b><small>{step === 'gate' ? 'human approval' : step === 'verify' ? 'syntax · policy' : 'agent stage'}</small>
+          </div>
+        })}</div></section>
         <EvidencePanel events={runEvents} compact title="Engineering evidence"/>
         {error && <div className="product-error">{error}</div>}
         {!preview && !error && <section className="smart-empty"><Sparkles size={40}/><h1>Production changes start with evidence.</h1><p>Select a workspace and describe the outcome. Smart Code retrieves relevant files, plans the smallest change, generates complete code, verifies it, and waits for your approval before writing.</p></section>}

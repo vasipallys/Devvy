@@ -57,10 +57,19 @@ export function App({ onHome }: { onHome?: () => void }) {
   const [sidebar, setSidebar] = useState(true); const [error, setError] = useState(''); const [query, setQuery] = useState('')
   const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
   const endRef = useRef<HTMLDivElement>(null); const fileRef = useRef<HTMLInputElement>(null); const abortRef = useRef<AbortController | undefined>(undefined)
+  // The conversation currently being streamed into. A brand-new chat gets its id from the
+  // `start` event, which would otherwise trip the loader below and replace the optimistic
+  // messages with the server's copy — where the assistant row does not exist yet. Every
+  // subsequent token would then have no message to attach to and be dropped.
+  const streamingRef = useRef<string | undefined>(undefined)
 
   const refresh = async () => setConversations(await api.conversations())
   useEffect(() => { refresh().catch(e => setError(e.message)) }, [])
-  useEffect(() => { if (activeId) api.messages(activeId).then(setMessages).catch(e => setError(e.message)); else setMessages([]) }, [activeId])
+  useEffect(() => {
+    if (activeId === streamingRef.current) return
+    if (activeId) api.messages(activeId).then(setMessages).catch(e => setError(e.message))
+    else setMessages([])
+  }, [activeId])
   useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages])
 
   async function createChat() { const chat = await api.create(); setConversations(x => [chat, ...x]); setActiveId(chat.id); setMessages([]) }
@@ -79,11 +88,17 @@ export function App({ onHome }: { onHome?: () => void }) {
     const assistant: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', created_at: new Date().toISOString() }
     setMessages(x => [...x, user, assistant]); const uploaded = attachments; setAttachments([])
     abortRef.current = new AbortController()
+    streamingRef.current = activeId
     let receivedToken = false
     try {
       await api.stream({ conversation_id: activeId, message: text, attachment_ids: uploaded.map(x => x.id), mode }, event => {
         if (event.type === 'agent_event') setRunEvents(current => [...current, event as AgentEvent])
-        if (event.type === 'start' && !activeId) setActiveId(event.conversation_id)
+        if (event.type === 'start' && !activeId) { streamingRef.current = event.conversation_id; setActiveId(event.conversation_id) }
+        // Replace the optimistic placeholder with the persisted row so the message carries
+        // its real id and metadata, and a later reload shows exactly what is on screen.
+        if (event.type === 'done' && event.message) {
+          setMessages(x => x.map(m => m.id === assistant.id ? event.message : m))
+        }
         if (event.type === 'status' && !receivedToken) setMessages(x => x.map(m => m.id === assistant.id ? { ...m, content: `_${event.content}_` } : m))
         if (event.type === 'token') {
           const firstToken = !receivedToken
@@ -97,7 +112,7 @@ export function App({ onHome }: { onHome?: () => void }) {
       }, abortRef.current.signal)
       await refresh()
     } catch (e) { if ((e as Error).name !== 'AbortError') setError((e as Error).message) }
-    finally { setSending(false) }
+    finally { setSending(false); streamingRef.current = undefined }
   }
   const filtered = conversations.filter(x => x.title.toLowerCase().includes(query.toLowerCase()))
   return <div className="shell">

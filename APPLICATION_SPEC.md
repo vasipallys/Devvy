@@ -416,7 +416,23 @@ Explicit mode always wins. In `auto` mode, routing uses deterministic keyword/co
 - Adjacent same-role messages MUST be merged.
 - The final sequence supplied to Gemma MUST alternate user and assistant after the system message.
 - Research failure context MUST instruct the model to disclose unavailable live data and avoid
-  invention.
+  invention. This applies to **both** Chat and Talk. A search exception or an empty result set
+  MUST degrade the turn to an honest "live data unavailable" answer; it MUST NOT raise out of the
+  research node and abort an otherwise usable turn.
+
+### 10.2.1 Routing and source evidence
+
+The router MUST report *why* it chose a workflow, not only which one. `route_reason` names the
+matched trigger phrase (or states that the user selected the mode explicitly), and is surfaced as
+the `detail` of the `route` agent event.
+
+Attachments outrank the code trigger: a question about an uploaded file is a document question
+even when it names a programming language.
+
+Successful research MUST return a structured `sources` list (title, URL, retrieved character
+count), emitted as a `research` agent event. Sources are the citable basis for a research answer,
+so the UI MUST render their URLs as links rather than collapsing them to a count. A failed or
+empty search emits the same event with `status: failed`.
 
 ### 10.3 Document extraction
 
@@ -589,10 +605,22 @@ bytes are excluded from automatic scanning.
 6. A path word match adds lexical relevance; smaller files break ties.
 7. Use relevant matches when any exist, otherwise fall back to ranked source files.
 8. Select at most 40 files.
-9. Concatenate file headers and content until `SMART_CODE_MAX_CONTEXT_CHARS` is exhausted.
+9. Assemble file content through the shared context harness until `SMART_CODE_MAX_CONTEXT_CHARS`
+   is exhausted, preserving the relevance ranking as source priority.
 
 Review mode with no candidate source files MUST fail. Generate/Modify MAY seed an empty workspace
 by creating the first source file.
+
+**Repository content MUST be marked `UNTRUSTED EVIDENCE`.** A checked-in file — a README, a
+fixture, a docstring — is third-party text that can contain instructions aimed at a model. Smart
+Code therefore assembles repository evidence through the same harness Chat and Talk use, and its
+system prompt MUST carry a context policy stating that repository content is data to be read and
+edited, never a directive that can redirect the objective or widen file access.
+
+Retrieval MUST return a provenance manifest naming each included file, its included character
+count, and whether the budget truncated it. The preview response exposes this as
+`evidence.context_manifest` and `evidence.truncated_files`, so a user can see when a file the
+change depends on was silently cut.
 
 ### 12.4 Model output schema
 
@@ -670,12 +698,17 @@ minutes and are single-use at apply time. A backend restart invalidates all prev
 | --- | --- |
 | `started` | Contract accepted; classify stage starts |
 | `status` | Waiting/generation heartbeat |
-| `stage` | `retrieve`, `plan`, `code`, `verify`, `critique`, or `gate` marked complete |
+| `stage` | `retrieve`, `plan`, `code`, `verify`, `critique`, or `gate` with its status |
 | `result` | Full preview payload |
 | `error` | User-correctable or internal failure message |
 
 These stages are user-facing milestones derived around a single structured generation, not seven
 independent LLM agents.
+
+Stages MUST be emitted **as the service reaches them**, not in a burst after the generation
+returns. On a CPU-bound model the generation dominates wall-clock time, and a checklist that fills
+in all at once at the end tells the user nothing while they wait. A stage carries its real status:
+a failed structural check MUST render as failed, never as complete.
 
 ### 12.8 Apply contract
 
@@ -732,87 +765,121 @@ manual recovery for replaced files.
 | `labels` | string list |
 | `components` | string list |
 | `source` | `manual`, `jira`, or `upload` |
+| `stack` | StackProfile (13.2); defaults apply when omitted |
 
 Single estimate requests contain one Story. Batch requests contain 1-100 Stories and process them
-sequentially because the shared model is serialized.
+sequentially because the shared model is serialized. A batch applies one StackProfile to every row.
 
-### 13.2 Required scorecard
+Estimate Code implements the **Agile Story Point Estimation Framework v2.0 (Full-Stack Edition)**,
+specified in [`agile_story_point_estimation_framework_fullstack.md`](agile_story_point_estimation_framework_fullstack.md).
+Section references below (`§`) point at that document, which is the normative source. Where its
+worked examples disagree with its rule tables, the **rule tables win**; the divergences are recorded
+in `tests/test_estimation_framework.py`.
 
-The public estimate result MUST contain exactly one score for each factor, with `Low`, `Medium`,
-or `High` and a 3-240 character reason:
+### 13.2 Technology stack calibration layer
 
-1. `complexity`
-2. `volume`
-3. `uncertainty`
-4. `react_scope`
-5. `spring_scope`
-6. `existing_code_scope`
-7. `dependencies`
-8. `nfrs`
-9. `testing`
-10. `compliance_audit`
-11. `familiarity`
-12. `dod_overhead`
+`StackProfile` (§3, §7) declares the technology context that calibrates the score:
 
-The local model returns a smaller semantic draft rather than the UI-ready object. The application
-normalizer accepts harmless model variations such as case-insensitive aliases, numeric effort,
-string task/risk lists, and boolean split recommendations. It then materializes all 12 factors,
-using explicit story evidence and conservative missing-evidence defaults for omitted scores. The
-final `EstimateOutput` validation MUST reject missing, duplicate, or unknown factors. This boundary
-keeps a compact 1B model useful without allowing its formatting choices to define the API contract.
-
-### 13.3 Fixed calibration anchors
-
-| Points | Anchor | Rationale |
+| Field | Values | Effect |
 | --- | --- | --- |
-| 3 | Inline validation on a React payment form | React-only, established patterns, modest tests |
-| 5 | Entitlement-protected account preference | Bounded cross-stack change with entitlement/audit |
-| 5 | Search/filter an existing transaction endpoint | Bounded database, UI, and performance work |
-| 8 | Cross-market eKYC status integration | External integration, regulation, failure handling, audit |
-| 8 | Transaction-wide AI summary with audit | Broad data, consistency, compliance, operations |
-| 13 | New multi-market payment orchestration journey | Multiple new layers/dependencies; split before delivery |
+| `frontend` | `none`, `react`, `angular`, `other` | selects stack scoring guidance, anchors, risks |
+| `backend` | `none`, `spring_boot`, `fastapi`, `flask`, `other` | as above |
+| `database` | free text, max 80 | prompt context only |
+| `maturity_level` | 1-5 (§5) | adjustment and point cap |
+| `team_experience` | 1-5 | adjustment |
+| `scenario` | `standard`, `new_framework`, `framework_upgrade`, `framework_migration` | gate |
+| `new_testing_layer` | boolean | +1 |
+| `new_observability_signal` | boolean | +1 |
+| `build_pattern_change` | boolean | +1 |
+| `additional_stacks` | 0-6 | +1 per additional stack |
 
-The prompt MUST include these fixed anchors and require named comparisons.
+Per-stack scoring guidance (§4) is injected into the prompt for the declared stacks only, on the
+factors the framework calibrates. `GET /api/estimate-code/config` serves the factor rubric, maturity
+taxonomy, Fibonacci ladder, and stack options from the same definitions the calculation uses, so
+the UI cannot drift from the engine.
 
-### 13.4 Estimate output
+### 13.3 Required scorecard
 
-The validated result contains:
+The result MUST contain exactly one entry for each of the 16 factors (§2), scored 1-5, in the
+framework's numbered order:
 
-- exactly 12 scorecard entries;
-- 2-3 true driver names and an explanation;
-- anchor comparison and 1-3 referenced anchor titles;
-- points restricted to `1, 2, 3, 5, 8, 13`;
-- point derivation;
-- plain-language rationale;
-- TLDR beginning with `<points> -` by prompt contract;
-- effort for React, Spring, existing-code work, and optimistic/likely/pessimistic person-days;
-- hidden tasks with qualitative weight;
-- 1-3 risks with mitigation or explicit assumption;
-- assumptions;
-- spike boolean/reason;
-- split boolean/rationale and up to six proposed stories.
+| # | Factor id | # | Factor id |
+| --- | --- | --- | --- |
+| 1 | `requirements_clarity` | 9 | `security_review` |
+| 2 | `technical_complexity` | 10 | `observability_operations` |
+| 3 | `integration_surface` | 11 | `cross_team_dependency` |
+| 4 | `data_model_change` | 12 | `reversibility` |
+| 5 | `frontend_effort` | 13 | `uncertainty` |
+| 6 | `backend_effort` | 14 | `performance_scalability` |
+| 7 | `test_effort` | 15 | `documentation_knowledge_transfer` |
+| 8 | `regulatory_compliance` | 16 | `dod_overhead` |
 
-Deterministic post-processing MUST force:
+Each entry carries `score`, `reason`, `stack_notes`, and a `provenance` of `model` or `heuristic`.
 
-- `spike_recommended=true` when uncertainty is High or points are 13;
-- a default spike reason if forced and absent;
-- `split_recommended=true` when points are 13.
+**The model scores; it does not calculate.** The local model is asked only for a 1-5 score and a
+short reason per factor. It MUST NOT determine the point value. Factors it omits are filled from
+story-text keyword heuristics and marked `heuristic`, and `evidence.scoring_provenance` reports the
+split. The model's own point guess, if offered, is reported in `evidence.model_cross_check` as a
+cross-check signal only and MUST NOT influence the result.
+
+### 13.4 Deterministic calculation
+
+The engine computes, in order:
+
+1. **Base sum** — the 16 factor scores (16-80).
+2. **Base adjustments** (§8.1): uncertainty ≥ 4 → +3; cross-team ≥ 4 → +2; reversibility ≥ 4 → +2;
+   frontend and backend both ≥ 3 → +1; regulatory or security ≥ 4 → +2.
+3. **Stack adjustments** (§8.2): maturity 5 → +3; maturity 4 → +2; maturity 1 → +2; team experience
+   ≤ 2 → +2; new testing layer → +1; new observability signal → +1; build pattern change → +1;
+   +1 per additional polyglot stack.
+4. **Fibonacci map** (§9): 16-24 → 3; 25-34 → 5; 35-44 → 8; 45-54 → 13; 55-64 → 21; 65+ → 34.
+5. **Maturity cap** (§9): 5 → 5 points; 4 → 8; 3 → 13; 2 → 21; 1 → 8.
+
+Every rule MUST be recorded in `calculation.steps` **whether or not it fired**, with its spec
+reference, delta, and running total. A penalty that was evaluated and did not apply is evidence.
+The running totals MUST reconcile: summing `delta` across all steps equals `adjusted_score`.
+
+A cap breach MUST NOT silently reduce the reported points. The mapped value is reported as-is and
+the *recommendation* escalates instead.
+
+### 13.5 Gates, confidence, and decision
+
+Gates (§10, §13.4) are evaluated on every run and reported in `evidence.policy_checks` with
+`rule`, `reference`, `passed`, and `detail`: `uncertainty_max`, `maturity_max`, `knowledge_gap`,
+`multiple_extremes`, `size_ceiling`, `maturity_cap`, `not_a_migration`.
+
+The decision walks §13.4's flowchart in order and returns the first verdict: `epic_discovery`,
+`upgrade_framework_first`, `spike_first`, `decompose`, or `proceed`. Where §13.4 offers
+"DECOMPOSE or SPIKE", uncertainty ≥ 4 selects the spike.
+
+Confidence follows the §13.2 table: `Low` when any factor is 5, three or more factors are ≥ 4, or
+maturity ≥ 4; `High` only when every factor is ≤ 3 and no stack penalty applied; otherwise `Medium`.
+
+Risk flags list every factor ≥ 4 plus the declared stacks' named hazards (§4). An escalated
+recommendation MUST carry a filled-in spike definition (§10 template).
 
 The model MUST be instructed not to invent unstated requirements.
 
-The structured loop validates the compact draft and performs at most one repair when it contains
-no usable estimation signal. A semantically useful but differently shaped draft is normalized in
-one pass; formatting differences alone MUST NOT fail the request.
+### 13.6 Structured loop
 
-### 13.5 Estimate event streams
+The loop performs at most one repair. Its semantic gate requires the model to score at least 8 of
+16 factors; the repair message MUST name the specific unscored factor ids rather than reporting a
+generic failure, because a compact model reproduces the same omissions otherwise.
+
+If both attempts fail, the request MUST NOT error. The estimate degrades to a fully heuristic
+scorecard, the degradation is emitted as a `structured_loop` failure event, and
+`evidence.scoring_provenance.model_scored` reports 0.
+
+### 13.7 Estimate event streams
 
 Single estimate events:
 
 - `started`
 - recurring `status`
-- `node` for `score_parameters`, `identify_drivers`, `compare_to_anchors`, `derive_points`,
-  `spike_split_branch`, `write_plain_language_reasoning`, `detect_hidden_tasks`, `assess_risks`,
-  and `recommend_split`
+- `agent_event` for `assemble_context`, `declare_stack`, `structured_loop`, `score_factors`,
+  `calculate`, and `policy_gate`
+- `node` for `assemble_context`, `declare_stack`, `score_factors`, `apply_base_adjustments`,
+  `apply_stack_adjustments`, `map_to_fibonacci`, `evaluate_gates`, and `decide`
 - `result`
 - retryable `error`
 
@@ -829,7 +896,7 @@ Batch events:
 An item failure MUST NOT stop later batch items. Pipeline node events are presentation milestones
 emitted after the structured result is available, not separately persisted chain-of-thought.
 
-### 13.6 CSV/XLSX import
+### 13.8 CSV/XLSX import
 
 - Accepted formats: `.csv`, `.xlsx`.
 - Maximum payload: 15 MiB.
@@ -852,7 +919,7 @@ Mapping uses normalized exact/substring/similarity scores, requires a minimum 0.
 not reuse a source column. Title mapping is mandatory. Rows without a title are skipped. Existing
 points are parsed when numeric and otherwise set to null.
 
-### 13.7 Jira read
+### 13.9 Jira read
 
 Jira read requires all three credential settings. The API constructs JQL:
 
@@ -865,7 +932,7 @@ the configured story-points field. Jira description is retained as serialized JS
 Cloud may return Atlassian Document Format. HTTP timeout is 30 seconds. Upstream HTTP errors map
 to a 502 response.
 
-### 13.8 Jira write
+### 13.10 Jira write
 
 Jira write MUST require all of:
 
@@ -1165,7 +1232,8 @@ npm run build
 8. Smart Code preview leaves disk unchanged, shows diff, and rejects traversal.
 9. Smart Code detects a target modified between preview and apply.
 10. Smart Code apply creates backup/evidence and cannot reuse the token.
-11. Estimate manual entry returns all 12 factors and a valid Fibonacci value.
+11. Estimate manual entry returns all 16 factors, a replayable calculation ledger whose deltas
+    reconcile to the adjusted score, and a valid Fibonacci value.
 12. Estimate import caps execution at 100 mapped stories and keeps per-item errors visible.
 13. Jira write button is absent unless configured/enabled and prompts before write.
 14. Electron external links open in the system browser, not a new renderer window.
@@ -1201,7 +1269,8 @@ A replacement is compatible only when:
 - Chat history persists and Talk history remains connection-scoped;
 - uploads, research egress, Electron isolation, and Smart Code containment controls pass;
 - Smart Code cannot mutate during preview and requires a fresh, approved, verified token;
-- Estimate output is schema-valid, exactly scores all 12 factors, and enforces escalation rules;
+- Estimate output scores all 16 factors, computes points deterministically from that scorecard
+  rather than from the model's own guess, and enforces the framework's escalation gates;
 - optional dependencies degrade without losing completed text;
 - event names/payloads consumed by the renderer remain compatible;
 - configuration defaults remain CPU-safe;

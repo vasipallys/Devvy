@@ -31,6 +31,10 @@ class TalkState(TypedDict):
     response: str
     token_queue: asyncio.Queue[str] | None
     context_manifest: list[dict]
+    #: Which spoken phrases triggered research or animation, so the decision is inspectable.
+    route_reason: str
+    sources: list[dict]
+    research_failed: bool
 
 
 class TalkAgentGraph:
@@ -56,16 +60,29 @@ class TalkAgentGraph:
         graph.add_edge("companion", END)
         self.graph = graph.compile()
 
+    RESEARCH_TERMS = {
+        "latest", "today's news", "todays news", "current news", "breaking news",
+        "search the web", "search internet", "look up", "recent news", "weather",
+        "current price", "current events", "this week", "this month", "this year",
+    }
+
     async def _route_visual(self, state: TalkState) -> dict:
         lowered = state["voice_input"].lower()
-        research_terms = {
-            "latest", "today's news", "todays news", "current news", "breaking news",
-            "search the web", "search internet", "look up", "recent news", "weather",
-            "current price", "current events", "this week", "this month", "this year",
-        }
+        visual = sorted(term for term in self.VISUAL_TERMS if term in lowered)
+        research = sorted(term for term in self.RESEARCH_TERMS if term in lowered)
+        reasons = []
+        if research:
+            reasons.append(f"live research triggered by {', '.join(repr(x) for x in research)}")
+        if visual:
+            reasons.append(f"a visual explanation triggered by {', '.join(repr(x) for x in visual)}")
         return {
-            "requires_animation": any(term in lowered for term in self.VISUAL_TERMS),
-            "requires_research": any(term in lowered for term in research_terms),
+            "requires_animation": bool(visual),
+            "requires_research": bool(research),
+            "route_reason": (
+                "You asked for " + " and ".join(reasons) + "."
+                if reasons
+                else "No live-data or visual trigger matched, so this is a spoken conversation."
+            ),
         }
 
     async def _research(self, state: TalkState) -> dict:
@@ -73,12 +90,34 @@ class TalkAgentGraph:
             results = await web_search(state["voice_input"], limit=5)
         except Exception as exc:
             return {
+                "research_failed": True,
+                "sources": [],
                 "research_context": (
                     "LIVE WEB RESEARCH FAILED. Clearly tell the user current web data could not "
                     f"be retrieved and do not invent an answer. Technical reason: {exc}"
-                )
+                ),
             }
-        return {"research_context": "LIVE WEB SOURCES:\n" + research_context(results)}
+        if not results:
+            return {
+                "research_failed": True,
+                "sources": [],
+                "research_context": (
+                    "LIVE WEB RESEARCH RETURNED NO SOURCES. Say so plainly and do not invent "
+                    "an answer or cite sources."
+                ),
+            }
+        return {
+            "research_failed": False,
+            "sources": [
+                {
+                    "title": str(item.get("title") or "Result"),
+                    "url": str(item.get("url") or ""),
+                    "characters": len(str(item.get("content") or "")),
+                }
+                for item in results
+            ],
+            "research_context": "LIVE WEB SOURCES:\n" + research_context(results),
+        }
 
     async def _companion(self, state: TalkState) -> dict:
         current = datetime.now().astimezone()
@@ -133,5 +172,8 @@ class TalkAgentGraph:
                 "response": "",
                 "token_queue": token_queue,
                 "context_manifest": [],
+                "route_reason": "",
+                "sources": [],
+                "research_failed": False,
             }
         )

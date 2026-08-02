@@ -9,20 +9,47 @@ function StatusIcon({ status }: { status: string }) {
   return <Check />
 }
 
-function valueText(value: unknown): string {
-  if (Array.isArray(value)) return value.length > 3 ? `${value.length} items` : value.join(', ')
-  if (typeof value === 'object' && value !== null) return JSON.stringify(value)
-  return String(value)
+const isUrl = (value: unknown): value is string =>
+  typeof value === 'string' && /^https?:\/\//i.test(value)
+
+/** Render one evidence value. Lists stay legible instead of collapsing to "N items":
+ *  retrieved source URLs are the citable basis for an answer, so they are shown in full
+ *  and made clickable rather than counted. */
+function EvidenceValue({ value }: { value: unknown }) {
+  if (Array.isArray(value)) {
+    if (!value.length) return <b>none</b>
+    if (value.every(isUrl)) {
+      return <b className="evidence-links">{value.map(url =>
+        <a key={url} href={url} target="_blank" rel="noreferrer noopener" title={url}>
+          {new URL(url).hostname.replace(/^www\./, '')}
+        </a>)}</b>
+    }
+    if (value.every(item => typeof item === 'string' || typeof item === 'number')) {
+      return <b className="evidence-list">{value.map((item, index) =>
+        <span key={`${item}-${index}`}>{String(item)}</span>)}</b>
+    }
+    return <b>{value.length} items</b>
+  }
+  if (isUrl(value)) {
+    return <b><a href={value} target="_blank" rel="noreferrer noopener">{value}</a></b>
+  }
+  if (typeof value === 'boolean') return <b>{value ? 'yes' : 'no'}</b>
+  if (typeof value === 'object' && value !== null) return <b>{JSON.stringify(value)}</b>
+  return <b>{String(value)}</b>
 }
 
 export function EvidencePanel({ events, title = 'Run evidence', compact = false }: { events: AgentEvent[]; title?: string; compact?: boolean }) {
   const runId = events[0]?.run_id
+  const failed = events.filter(event => event.status === 'failed').length
   return <aside className={`evidence-panel ${compact ? 'compact' : ''}`} aria-label="Agent run evidence">
-    <div className="evidence-heading"><div><ShieldCheck/><span><b>{title}</b><small>{runId ? `Run ${runId.slice(0, 8)}` : 'Starts with your next request'}</small></span></div><span className="evidence-local"><Database/> Local</span></div>
+    <div className="evidence-heading">
+      <div><ShieldCheck/><span><b>{title}</b><small>{runId ? `Run ${runId.slice(0, 8)}${failed ? ` · ${failed} issue(s)` : ''}` : 'Starts with your next request'}</small></span></div>
+      <span className="evidence-local"><Database/> Local</span>
+    </div>
     {!events.length ? <div className="evidence-empty"><ShieldCheck/><p>Actions, context sources, validation loops, and approval gates will appear here. Hidden chain-of-thought is never shown or stored.</p></div>
       : <div className="evidence-timeline">{events.map((event, index) => <details key={`${event.stage}-${index}`} open={event.status === 'running' || event.status === 'failed' || index === events.length - 1}>
         <summary><span className={`evidence-icon ${event.status}`}><StatusIcon status={event.status}/></span><span><b>{event.label}</b><small>{event.stage.replaceAll('_', ' ')} · {(event.elapsed_ms / 1000).toFixed(1)}s</small></span><ChevronDown/></summary>
-        {(event.detail || event.evidence) && <div className="evidence-detail">{event.detail && <p>{event.detail}</p>}{event.evidence && Object.entries(event.evidence).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{valueText(value)}</b></div>)}</div>}
+        {(event.detail || event.evidence) && <div className="evidence-detail">{event.detail && <p>{event.detail}</p>}{event.evidence && Object.entries(event.evidence).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><EvidenceValue value={value}/></div>)}</div>}
       </details>)}</div>}
   </aside>
 }

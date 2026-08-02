@@ -10,8 +10,10 @@ Gemma 3 1B runtime. It combines four workspaces in a single Electron application
 - **Smart Code** - repository-aware generation, modification, and review with diff preview,
   structural checks, explicit approval, atomic writes, backups, and run evidence.
 - **Estimate Code** - evidence-led modified-Fibonacci estimation from manual stories,
-  CSV/XLSX batches, or Jira, including a 12-factor scorecard, fixed anchors, hidden work,
-  risks, and spike/split guidance.
+  CSV/XLSX batches, or Jira, implementing the 16-factor Agile Story Point Estimation
+  Framework v2.0 with its technology stack calibration layer: stack-specific scoring
+  guidance, framework maturity caps, a replayable adjustment ledger, calibrated reference
+  anchors, hidden work, risk flags, and spike/split gates.
 
 The default profile is designed for CPU laptops. Model inference, chat history, uploaded
 documents, generated media, code previews, and estimation all remain on the machine. Network
@@ -147,9 +149,13 @@ validation, persistence, and side effects:
   evidence-based rationale instead of private chain-of-thought.
 - **Loop engineering:** structured workflows use a maximum two-attempt generate/validate/repair
   loop. Attempts and failures are visible in the Evidence panel; they cannot continue indefinitely.
-- **Stable estimation boundary:** Estimate Code asks the 1B model for a compact semantic draft,
-  then deterministic code normalizes aliases and materializes the strict 12-factor/Fibonacci API
-  result. Harmless formatting variance cannot bypass policy or fail an otherwise useful estimate.
+- **Stable estimation boundary:** Estimate Code asks the 1B model for one thing only - a 1-5
+  score and a short reason per factor. Every number the user sees (base sum, each adjustment,
+  the Fibonacci band, the maturity cap, confidence, and the recommendation) is computed in
+  application code from that scorecard, so the estimate is replayable by hand and cannot be
+  changed by a persuasive model response. Factors the model declines to score are filled from
+  story-text heuristics and labelled `inferred`, and the model's own point guess is reported
+  beside the calculated one purely as a cross-check.
 - **Human control:** Smart Code writes and Jira updates remain deterministic, separately authorized
   actions outside the model loop.
 

@@ -35,6 +35,11 @@ class AgentState(TypedDict):
     artifact_url: str | None
     context_manifest: list[dict]
     token_queue: asyncio.Queue[str] | None
+    #: Why the router chose this mode, so the UI can show the decision rather than assert it.
+    route_reason: str
+    #: Retrieved public sources, surfaced as citable evidence instead of an opaque blob.
+    sources: list[dict]
+    research_failed: bool
 
 
 class ChatAgent:
@@ -55,27 +60,84 @@ class ChatAgent:
         graph.add_edge("respond", END)
         self.graph = graph.compile()
 
+    #: Auto-routing triggers, in priority order. Kept as data so the matched phrase can be
+    #: reported back to the user as the reason for the decision.
+    ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("image", ("generate an image", "create an image", "draw ", "illustrate ")),
+        ("research", ("search web", "research ", "latest ", "current ", "look up")),
+        ("code", ("write code", "implement ", "debug ", "python", "typescript")),
+    )
+
     async def _route(self, state: AgentState) -> dict:
         if state["mode"] != "auto":
-            return {}
-        text = state["messages"][-1].content.lower()
-        if any(x in text for x in ("generate an image", "create an image", "draw ", "illustrate ")):
-            return {"mode": "image"}
-        if any(x in text for x in ("search web", "research ", "latest ", "current ", "look up")):
-            return {"mode": "research"}
+            return {"route_reason": f"You selected {state['mode']} mode explicitly."}
+        text = str(state["messages"][-1].content).lower()
+        for mode, triggers in self.ROUTES:
+            matched = [trigger.strip() for trigger in triggers if trigger in text]
+            if matched:
+                # Attachments outrank the code trigger: a question about an uploaded file is
+                # a document question even when it mentions a language.
+                if mode == "code" and state.get("attachment_context"):
+                    break
+                return {
+                    "mode": mode,
+                    "route_reason": f"Your message contains {', '.join(repr(x) for x in matched)}.",
+                }
+            if mode == "research" and state.get("attachment_context"):
+                return {
+                    "mode": "document",
+                    "route_reason": "You attached documents, so Devvy answers from them.",
+                }
         if state.get("attachment_context"):
-            return {"mode": "document"}
-        if any(x in text for x in ("write code", "implement ", "debug ", "python", "typescript")):
-            return {"mode": "code"}
-        return {"mode": "chat"}
+            return {
+                "mode": "document",
+                "route_reason": "You attached documents, so Devvy answers from them.",
+            }
+        return {"mode": "chat", "route_reason": "No tool trigger matched, so this is a conversation."}
 
     def _next(self, state: AgentState) -> Literal["research", "image", "respond"]:
         return state["mode"] if state["mode"] in {"research", "image"} else "respond"
 
     async def _research(self, state: AgentState) -> dict:
+        """Retrieve public sources, degrading honestly when the network or a site fails.
+
+        A research failure must never become an invented answer, and it must never abort an
+        otherwise usable turn: the model is told plainly that live data was unavailable.
+        """
         query = str(state["messages"][-1].content)
-        results = await web_search(query)
-        return {"tool_context": "WEB RESEARCH RESULTS:\n" + research_context(results)}
+        try:
+            results = await web_search(query)
+        except Exception as exc:
+            return {
+                "research_failed": True,
+                "sources": [],
+                "tool_context": (
+                    "LIVE WEB RESEARCH FAILED. Tell the user clearly that current web data "
+                    "could not be retrieved, and do not invent an answer or cite sources. "
+                    f"Technical reason: {exc}"
+                ),
+            }
+        if not results:
+            return {
+                "research_failed": True,
+                "sources": [],
+                "tool_context": (
+                    "LIVE WEB RESEARCH RETURNED NO SOURCES. Say so plainly and do not invent "
+                    "an answer or cite sources."
+                ),
+            }
+        return {
+            "research_failed": False,
+            "sources": [
+                {
+                    "title": str(item.get("title") or "Result"),
+                    "url": str(item.get("url") or ""),
+                    "characters": len(str(item.get("content") or "")),
+                }
+                for item in results
+            ],
+            "tool_context": "WEB RESEARCH RESULTS:\n" + research_context(results),
+        }
 
     async def _image(self, state: AgentState) -> dict:
         prompt = str(state["messages"][-1].content)
@@ -141,5 +203,8 @@ class ChatAgent:
                 "artifact_url": None,
                 "context_manifest": [],
                 "token_queue": token_queue,
+                "route_reason": "",
+                "sources": [],
+                "research_failed": False,
             }
         )

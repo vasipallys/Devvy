@@ -31,6 +31,14 @@ from backend.estimate_code import (
     rows_to_stories,
     write_jira_points,
 )
+from backend.estimation_framework import (
+    FACTORS,
+    FIBONACCI_POINTS,
+    FRAMEWORK_DOCUMENT,
+    FRAMEWORK_VERSION,
+    MATURITY_TAXONOMY,
+    StackProfile,
+)
 from backend.harness import RunLedger
 from backend.model import GemmaRuntime
 from backend.observability import configure_observability
@@ -286,9 +294,29 @@ async def chat(payload: ChatRequest):
                 "route",
                 "completed",
                 f"{str(result.get('mode') or payload.mode).title()} workflow selected",
+                detail=result.get("route_reason") or None,
                 evidence={"mode": result.get("mode") or payload.mode},
             )
             yield f"data: {json.dumps({'type': 'agent_event', **completed_route})}\n\n"
+            # Research sources are the citable basis for the answer, so they are reported
+            # individually rather than collapsed into a character count.
+            sources = result.get("sources") or []
+            if sources or result.get("research_failed"):
+                research_event = run.event(
+                    "research",
+                    "failed" if result.get("research_failed") else "completed",
+                    (
+                        "Live research unavailable — the answer must say so"
+                        if result.get("research_failed")
+                        else f"{len(sources)} public source(s) retrieved"
+                    ),
+                    evidence={
+                        "sources": [item["url"] for item in sources if item.get("url")],
+                        "titles": [item["title"] for item in sources],
+                        "retrieved_characters": sum(int(item["characters"]) for item in sources),
+                    },
+                )
+                yield f"data: {json.dumps({'type': 'agent_event', **research_event})}\n\n"
             answer = str(result["messages"][-1].content)
             # Tool-only responses (for example image errors) do not pass through the LLM stream.
             if not streamed:
@@ -394,6 +422,38 @@ async def talk_socket(websocket: WebSocket):
         response = result["response"] if mode == "talk" else str(result["messages"][-1].content)
         history = list(result["messages"])[-settings.model_context_messages:]
         await send("text_complete", content=response)
+        if result.get("route_reason"):
+            await send(
+                "agent_event",
+                **active_run.event(
+                    "route",
+                    "completed",
+                    "Turn routed",
+                    detail=str(result["route_reason"]),
+                    evidence={
+                        "research": bool(result.get("requires_research")),
+                        "animation": bool(result.get("requires_animation")),
+                    },
+                ),
+            )
+        talk_sources = result.get("sources") or []
+        if talk_sources or result.get("research_failed"):
+            await send(
+                "agent_event",
+                **active_run.event(
+                    "research",
+                    "failed" if result.get("research_failed") else "completed",
+                    (
+                        "Live research unavailable — the answer must say so"
+                        if result.get("research_failed")
+                        else f"{len(talk_sources)} public source(s) retrieved"
+                    ),
+                    evidence={
+                        "sources": [item["url"] for item in talk_sources if item.get("url")],
+                        "titles": [item["title"] for item in talk_sources],
+                    },
+                ),
+            )
         await send(
             "agent_event",
             **active_run.event(
@@ -499,6 +559,11 @@ async def talk_socket(websocket: WebSocket):
             pass
 
 
+#: Pipeline checkpoints the Smart Code screen renders, in order. `classify` is satisfied by
+#: request validation and `gate` by the human-approval step, so neither comes from the service.
+SMART_CODE_STAGES = ("classify", "retrieve", "plan", "code", "verify", "critique", "gate")
+
+
 @app.post("/api/smart-code/preview")
 async def smart_code_preview(payload: SmartCodeRequest):
     async def events():
@@ -521,6 +586,7 @@ async def smart_code_preview(payload: SmartCodeRequest):
 
         task = asyncio.create_task(smart_code_service.preview(payload, progress))
         elapsed = 0
+        emitted: set[str] = {"classify"}
         try:
             while not task.done() or not progress_queue.empty():
                 try:
@@ -534,8 +600,12 @@ async def smart_code_preview(payload: SmartCodeRequest):
                         evidence=event.get("evidence"),
                     )
                     yield sse("agent_event", run_event)
-                    if stage in {"retrieve", "verify"}:
+                    # Forward pipeline stages the moment the service reaches them, so a
+                    # multi-minute CPU generation shows real movement instead of a frozen
+                    # checklist that fills in all at once at the end.
+                    if stage in SMART_CODE_STAGES and event.get("status") != "running":
                         yield sse("stage", {"stage": stage, "status": event.get("status")})
+                        emitted.add(stage)
                     if stage == "structured_loop":
                         yield sse("loop", event)
                 except TimeoutError:
@@ -544,12 +614,17 @@ async def smart_code_preview(payload: SmartCodeRequest):
                         "status",
                         {
                             "stage": "generate",
-                            "message": f"Devvy is planning and coding locally ({elapsed}s)",
+                            "message": (
+                                f"Devvy is planning and coding locally ({elapsed}s)"
+                                if "plan" not in emitted
+                                else f"Devvy is verifying the proposed change ({elapsed}s)"
+                            ),
                         },
                     )
             result = await task
-            for stage in ("plan", "code", "critique", "gate"):
-                yield sse("stage", {"stage": stage, "status": "completed"})
+            for stage in SMART_CODE_STAGES:
+                if stage not in emitted:
+                    yield sse("stage", {"stage": stage, "status": "completed"})
             gate_event = run.event(
                 "gate",
                 "waiting" if result.get("can_apply") else "completed",
@@ -590,13 +665,63 @@ def smart_code_apply(payload: SmartCodeApplyRequest):
 
 @app.get("/api/estimate-code/config")
 def estimate_code_config():
+    """Everything the estimation UI needs to render the framework without hardcoding it.
+
+    The factor rubric, maturity taxonomy, and Fibonacci bands are served from the same
+    definitions the calculation uses, so the screen can never drift from the engine.
+    """
     return {
         "model": settings.model_id,
         "jira_configured": bool(
             settings.jira_base_url and settings.jira_email and settings.jira_api_token
         ),
         "jira_write_enabled": settings.jira_write_enabled,
+        "framework": {
+            "name": "Agile Story Point Estimation Framework",
+            "version": FRAMEWORK_VERSION,
+            "document": FRAMEWORK_DOCUMENT,
+            "fibonacci": list(FIBONACCI_POINTS),
+        },
+        "factors": [factor.model_dump() for factor in FACTORS],
+        "maturity_levels": [
+            {"level": level, **{key: value for key, value in data.items()}}
+            for level, data in sorted(MATURITY_TAXONOMY.items(), reverse=True)
+        ],
+        "stacks": {
+            "frontend": [
+                {"id": "none", "label": "None"},
+                {"id": "react", "label": "ReactJS"},
+                {"id": "angular", "label": "Angular"},
+                {"id": "other", "label": "Other"},
+            ],
+            "backend": [
+                {"id": "none", "label": "None"},
+                {"id": "spring_boot", "label": "Spring Boot"},
+                {"id": "fastapi", "label": "FastAPI"},
+                {"id": "flask", "label": "Flask"},
+                {"id": "other", "label": "Other"},
+            ],
+            "scenarios": [
+                {"id": "standard", "label": "Existing framework"},
+                {"id": "new_framework", "label": "New framework (first 3 sprints)"},
+                {"id": "framework_upgrade", "label": "Major framework upgrade"},
+                {"id": "framework_migration", "label": "Framework migration"},
+            ],
+        },
     }
+
+
+#: Which pipeline checkpoints each service progress stage completes. Emitting these as the
+#: work happens — rather than in a burst at the end — is what makes the several-minute CPU
+#: generation legible: the user watches context and calibration tick off immediately, then
+#: sees the arithmetic land the moment the model returns.
+ESTIMATE_NODES: dict[str, tuple[str, ...]] = {
+    "assemble_context": ("assemble_context",),
+    "declare_stack": ("declare_stack",),
+    "score_factors": ("score_factors",),
+    "calculate": ("apply_base_adjustments", "apply_stack_adjustments", "map_to_fibonacci"),
+    "policy_gate": ("evaluate_gates", "decide"),
+}
 
 
 async def estimate_events(story):
@@ -611,37 +736,58 @@ async def estimate_events(story):
 
     task = asyncio.create_task(estimate_service.estimate(story, progress))
     elapsed = 0
+    emitted: set[str] = set()
     try:
         while not task.done() or not progress_queue.empty():
             try:
                 event = await asyncio.wait_for(progress_queue.get(), timeout=2)
+                stage = str(event.get("stage", "estimate"))
+                status = str(event.get("status", "running"))
                 run_event = run.event(
-                    str(event.get("stage", "estimate")),
-                    str(event.get("status", "running")),
+                    stage,
+                    status,
                     str(event.get("label", "Estimation workflow update")),
                     detail=event.get("detail"),
                     evidence=event.get("evidence"),
                 )
                 yield sse("agent_event", run_event)
-                if event.get("stage") == "structured_loop":
+                if stage == "structured_loop":
                     yield sse("loop", event)
+                if status in {"completed", "validated"}:
+                    for node in ESTIMATE_NODES.get(stage, ()):
+                        emitted.add(node)
+                        yield sse("node", {"node": node, "status": "completed"})
             except TimeoutError:
                 elapsed += 2
                 yield sse(
                     "status",
-                    {"message": f"Devvy is building the evidence-led estimate ({elapsed}s)"},
+                    {
+                        "message": (
+                            "Devvy is scoring the 16 factors on CPU"
+                            if "score_factors" not in emitted
+                            else "Devvy is applying the framework arithmetic"
+                        )
+                        + f" ({elapsed}s)"
+                    },
                 )
         result = await task
-        stages = [
-            "score_parameters", "identify_drivers", "compare_to_anchors", "derive_points",
-            "write_plain_language_reasoning", "detect_hidden_tasks", "assess_risks",
-            "recommend_split",
-        ]
-        if result.get("spike_recommended"):
-            stages.insert(4, "spike_split_branch")
-        for stage in stages:
-            yield sse("node", {"node": stage, "status": "completed"})
-        run.finish("completed", summary={"points": result.get("points"), "source": story.source})
+        # Backstop: any checkpoint the service did not report is still closed out, so the
+        # checklist can never finish in a half-ticked state.
+        for stage in (
+            "assemble_context", "declare_stack", "score_factors", "apply_base_adjustments",
+            "apply_stack_adjustments", "map_to_fibonacci", "evaluate_gates", "decide",
+        ):
+            if stage not in emitted:
+                yield sse("node", {"node": stage, "status": "completed"})
+        run.finish(
+            "completed",
+            summary={
+                "points": result.get("points"),
+                "source": story.source,
+                "recommendation": result.get("recommendation"),
+                "confidence": result.get("confidence"),
+            },
+        )
         yield sse("result", result)
     except Exception as exc:
         logger.exception("Estimate Code failed")
@@ -707,7 +853,8 @@ async def estimate_upload(file: UploadFile = File(...)):
 @app.post("/api/estimate-code/upload/estimate")
 async def estimate_upload_rows(payload: dict = Body(...)):
     try:
-        stories = rows_to_stories(payload.get("rows") or [], payload.get("mapping") or {})
+        stack = StackProfile.model_validate(payload.get("stack") or {})
+        stories = rows_to_stories(payload.get("rows") or [], payload.get("mapping") or {}, stack)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return await estimate_code_batch(BatchEstimateRequest(stories=stories))

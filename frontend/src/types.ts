@@ -51,6 +51,104 @@ export interface SystemStatus {
   limits: Record<string, number>
 }
 
+/* Estimate Code — Agile Story Point Estimation Framework v2.0 (16 factors + stack layer).
+   Shapes mirror backend/estimation_framework.py; the config endpoint serves the rubric. */
+
+export type Level = 1 | 2 | 3 | 4 | 5
+export type FrontendStack = 'react' | 'angular' | 'none' | 'other'
+export type BackendStack = 'spring_boot' | 'flask' | 'fastapi' | 'none' | 'other'
+export type Scenario = 'standard' | 'new_framework' | 'framework_upgrade' | 'framework_migration'
+export type Recommendation = 'proceed' | 'decompose' | 'spike_first' | 'upgrade_framework_first' | 'epic_discovery'
+export type Points = 3 | 5 | 8 | 13 | 21 | 34
+
+export interface StackProfile {
+  frontend: FrontendStack
+  backend: BackendStack
+  database: string
+  maturity_level: Level
+  team_experience: Level
+  scenario: Scenario
+  new_testing_layer: boolean
+  new_observability_signal: boolean
+  build_pattern_change: boolean
+  additional_stacks: number
+}
+
+export interface FactorDefinition {
+  id: string
+  number: number
+  label: string
+  description: string
+  low_anchor: string
+  high_anchor: string
+  group: 'scope' | 'delivery' | 'assurance' | 'risk'
+}
+
+export interface FactorScore {
+  factor: string
+  number: number
+  label: string
+  group: 'scope' | 'delivery' | 'assurance' | 'risk'
+  score: Level
+  reason: string
+  /** `heuristic` means the model skipped this factor and the app derived it from story text. */
+  provenance: 'model' | 'heuristic'
+  stack_notes: string[]
+}
+
+/** One line of the replayable audit trail. `applied: false` rules are shown too — a
+    penalty that was considered and did not fire is evidence in its own right. */
+export interface CalculationStep {
+  rule: string
+  reference: string
+  label: string
+  applied: boolean
+  delta: number
+  running_total: number
+}
+
+export interface Calculation {
+  base_sum: number
+  base_adjustment_total: number
+  stack_adjustment_total: number
+  adjusted_score: number
+  band: string
+  mapped_points: Points
+  maturity_cap: number
+  cap_exceeded: boolean
+  points: Points
+  steps: CalculationStep[]
+}
+
+export interface PolicyCheck {
+  rule: string
+  reference: string
+  label: string
+  passed: boolean
+  detail: string
+}
+
+export interface RiskFlag {
+  source: 'factor' | 'stack'
+  label: string
+  score: number | null
+  detail: string
+}
+
+export interface EstimateConfig {
+  model: string
+  jira_configured: boolean
+  jira_write_enabled: boolean
+  framework: { name: string; version: string; document: string; fibonacci: Points[] }
+  factors: FactorDefinition[]
+  maturity_levels: { level: Level; name: string; definition: string; cap: number; action: string }[]
+  stacks: {
+    frontend: { id: FrontendStack; label: string }[]
+    backend: { id: BackendStack; label: string }[]
+    scenarios: { id: Scenario; label: string }[]
+  }
+}
+
 export interface Story {
   title: string
   user_story: string
@@ -59,23 +157,64 @@ export interface Story {
   existing_points?: number
   key?: string
   source: 'manual' | 'jira' | 'upload'
+  stack?: StackProfile
 }
+
 export interface EstimateResult extends Record<string, unknown> {
+  framework: { name: string; version: string; document: string; factor_count: number }
   story: Story
-  points: 1 | 2 | 3 | 5 | 8 | 13
-  tldr: string
-  plain_language_why: string
+  stack: StackProfile & {
+    frontend_label: string
+    backend_label: string
+    maturity_name: string
+    maturity_definition: string
+    maturity_action: string
+  }
+  scorecard: FactorScore[]
+  calculation: Calculation
+  points: Points
   drivers: string[]
   drivers_explanation: string
+  tldr: string
+  plain_language_why: string
+  confidence: 'High' | 'Medium' | 'Low'
+  confidence_detail: string
+  recommendation: Recommendation
+  recommendation_detail: string
+  risk_flags: RiskFlag[]
   anchor_comparison: string
-  points_derivation: string
-  scorecard: { parameter: string; score: 'Low' | 'Medium' | 'High'; reason: string }[]
+  anchors_considered: { points: number; title: string; stack: string }[]
+  effort: {
+    frontend: string
+    backend: string
+    data: string
+    assurance: string
+    person_days: { optimistic: number; likely: number; pessimistic: number }
+  }
   hidden_tasks: { task: string; weight: string }[]
   risks: { risk: string; mitigation_or_assumption: string }[]
   assumptions: string[]
   spike_recommended: boolean
   spike_reason?: string
+  spike_definition?: {
+    title: string
+    objective: string
+    timebox: string
+    success_criteria: string[]
+    deliverable: string
+  }
   split_recommendation: { split_recommended: boolean; rationale: string; proposed_stories: string[] }
-  effort: { react: string; spring: string; existing_code: string; person_days: { optimistic: number; likely: number; pessimistic: number } }
-  evidence?: { source: string; score_factors: string[]; anchors_considered: string[]; policy_checks: Record<string, boolean> }
+  evidence: {
+    source: string
+    context_manifest: { id: string; label: string; characters: number; truncated: boolean; trusted: boolean }[]
+    policy_checks: PolicyCheck[]
+    scoring_provenance: { model_scored: number; heuristic_filled: number; minimum_required: number }
+    model_cross_check: {
+      model_points: number | null
+      calculated_points: Points
+      agreement: 'agrees' | 'diverges' | 'not_offered'
+      note: string
+    }
+    determinism: string
+  }
 }
