@@ -3,6 +3,7 @@ import json
 import logging
 import mimetypes
 import shutil
+from importlib.util import find_spec
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -30,6 +31,7 @@ from backend.estimate_code import (
     rows_to_stories,
     write_jira_points,
 )
+from backend.harness import RunLedger
 from backend.model import GemmaRuntime
 from backend.observability import configure_observability
 from backend.schemas import ChatRequest, RenameRequest
@@ -47,6 +49,7 @@ voice_engine = VoiceEngine(settings)
 animation_engine = AnimationEngine(settings)
 smart_code_service = SmartCodeService(runtime, settings)
 estimate_service = EstimateService(runtime, settings)
+run_ledger = RunLedger(settings.app_data_dir, settings.agent_run_retention_days)
 
 
 @asynccontextmanager
@@ -82,7 +85,53 @@ def message_dict(item: Message) -> dict:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "model": settings.model_id, "model_loaded": runtime.loaded, "model_error": runtime.load_error}
+    return {
+        "status": "ok",
+        "model": settings.model_id,
+        "model_loaded": runtime.loaded,
+        "model_error": runtime.load_error,
+    }
+
+
+@app.get("/api/system/status")
+def system_status():
+    """Public, secret-free capability and trust metadata for evidence-led UI."""
+    return {
+        "app": {"name": settings.app_name, "version": app.version, "deployment": "local-desktop"},
+        "model": {
+            "id": settings.model_id,
+            "loaded": runtime.loaded,
+            "error": runtime.load_error,
+            "device": settings.model_device,
+            "dtype": settings.model_dtype,
+            "generation": "serialized",
+        },
+        "capabilities": {
+            "chat": True,
+            "research": True,
+            "image": bool(settings.image_model_id and find_spec("diffusers")),
+            "speech_to_text": bool(find_spec("faster_whisper")),
+            "text_to_speech": bool(find_spec("pyttsx3")),
+            "visual_explanations": bool(shutil.which(settings.manim_executable)),
+            "jira_read": bool(
+                settings.jira_base_url and settings.jira_email and settings.jira_api_token
+            ),
+            "jira_write": bool(settings.jira_write_enabled),
+        },
+        "trust": {
+            "privacy": "Local-first",
+            "data_dir": str(settings.app_data_dir.resolve()),
+            "network": ["Explicit web research", "Optional Jira", "Optional Phoenix traces"],
+            "run_ledger": str(run_ledger.directory.resolve()),
+            "run_retention_days": settings.agent_run_retention_days,
+        },
+        "limits": {
+            "upload_mb": 25,
+            "attachments": 10,
+            "context_characters": settings.document_max_chars,
+            "smart_code_context_characters": settings.smart_code_max_context_chars,
+        },
+    }
 
 
 @app.get("/api/conversations")
@@ -140,11 +189,17 @@ async def upload(file: UploadFile = File(...)):
         raise HTTPException(415, "Unsupported file type")
     upload_id = str(uuid4())
     destination = settings.uploads_dir / f"{upload_id}{extension}"
-    with destination.open("wb") as target:
-        shutil.copyfileobj(file.file, target)
-    if destination.stat().st_size > 25 * 1024 * 1024:
+    size = 0
+    try:
+        with destination.open("wb") as target:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 25 * 1024 * 1024:
+                    raise HTTPException(413, "File exceeds 25 MB")
+                target.write(chunk)
+    except Exception:
         destination.unlink(missing_ok=True)
-        raise HTTPException(413, "File exceeds 25 MB")
+        raise
     return {"id": upload_id, "name": file.filename, "content_type": file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream", "size": destination.stat().st_size}
 
 
@@ -183,10 +238,30 @@ async def chat(payload: ChatRequest):
         session.commit()
         prior = list_messages(session, conversation_id)[:-1]
     history = [AIMessage(content=x.content) if x.role == "assistant" else HumanMessage(content=x.content) for x in prior[-20:]]
+    run = run_ledger.start(
+        "chat",
+        metadata={"requested_mode": payload.mode, "attachments": len(attachments), "model": settings.model_id},
+    )
 
     async def events():
-        yield f"data: {json.dumps({'type': 'start', 'conversation_id': str(conversation_id), 'message_id': str(user_message.id)})}\n\n"
+        yield f"data: {json.dumps({'type': 'start', 'run_id': run.id, 'conversation_id': str(conversation_id), 'message_id': str(user_message.id), 'model': settings.model_id, 'local': True})}\n\n"
         try:
+            context_event = run.event(
+                "context",
+                "completed",
+                "Context assembled",
+                evidence={
+                    "history_messages": len(history),
+                    "attachments": len(attachments),
+                    "characters": len(context),
+                    "budget": settings.document_max_chars,
+                },
+            )
+            yield f"data: {json.dumps({'type': 'agent_event', **context_event})}\n\n"
+            route_event = run.event(
+                "route", "running", "Selecting the safest workflow", detail=f"Requested mode: {payload.mode}"
+            )
+            yield f"data: {json.dumps({'type': 'agent_event', **route_event})}\n\n"
             token_queue: asyncio.Queue[str] = asyncio.Queue()
             generation = asyncio.create_task(
                 agent.invoke(history, payload.message, payload.mode, context, token_queue)
@@ -207,6 +282,13 @@ async def chat(payload: ChatRequest):
                     )
                     yield f"data: {json.dumps({'type': 'status', 'content': detail})}\n\n"
             result = await generation
+            completed_route = run.event(
+                "route",
+                "completed",
+                f"{str(result.get('mode') or payload.mode).title()} workflow selected",
+                evidence={"mode": result.get("mode") or payload.mode},
+            )
+            yield f"data: {json.dumps({'type': 'agent_event', **completed_route})}\n\n"
             answer = str(result["messages"][-1].content)
             # Tool-only responses (for example image errors) do not pass through the LLM stream.
             if not streamed:
@@ -216,9 +298,23 @@ async def chat(payload: ChatRequest):
                 session.add(saved)
                 session.commit()
                 session.refresh(saved)
-            yield f"data: {json.dumps({'type': 'done', 'message': message_dict(saved)})}\n\n"
+            final_event = run.event(
+                "finalize",
+                "completed",
+                "Response persisted locally",
+                evidence={
+                    "response_characters": len(answer),
+                    "context_sources": result.get("context_manifest", []),
+                    "artifact": bool(result.get("artifact_url")),
+                },
+            )
+            yield f"data: {json.dumps({'type': 'agent_event', **final_event})}\n\n"
+            run.finish("completed", summary={"mode": result.get("mode"), "artifact": bool(result.get("artifact_url"))})
+            yield f"data: {json.dumps({'type': 'done', 'run_id': run.id, 'message': message_dict(saved)})}\n\n"
         except Exception as exc:
             logging.exception("Chat failed")
+            run.event("error", "failed", "The run could not complete", detail=str(exc)[:500])
+            run.finish("failed", summary={"error_type": type(exc).__name__})
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -230,6 +326,7 @@ async def talk_socket(websocket: WebSocket):
     audio_buffer = bytearray()
     history: list = []
     preferences: dict[str, str] = {}
+    active_run = None
 
     async def send(event_type: str, **data):
         await websocket.send_json({"type": event_type, **data})
@@ -239,13 +336,37 @@ async def talk_socket(websocket: WebSocket):
         mode: str = "chat",
         attachment_ids: list[str] | None = None,
     ):
-        nonlocal history
+        nonlocal history, active_run
         if not transcript.strip():
             await send("error", message="I could not hear any speech. Please try again.")
             await send("state", value="idle")
             return
         await send("transcript", content=transcript)
         await send("state", value="thinking")
+        active_run = run_ledger.start(
+            "talk",
+            metadata={
+                "mode": mode,
+                "attachments": len(attachment_ids or []),
+                "model": settings.model_id,
+            },
+        )
+        await send(
+            "agent_event",
+            **active_run.event(
+                "context",
+                "completed",
+                "Turn context prepared locally",
+                evidence={
+                    "history_messages": len(history),
+                    "attachments": len(attachment_ids or []),
+                },
+            ),
+        )
+        await send(
+            "agent_event",
+            **active_run.event("generate", "running", "Gemma is composing a grounded response"),
+        )
         token_queue: asyncio.Queue[str] = asyncio.Queue()
         if mode == "talk":
             generation = asyncio.create_task(
@@ -273,6 +394,18 @@ async def talk_socket(websocket: WebSocket):
         response = result["response"] if mode == "talk" else str(result["messages"][-1].content)
         history = list(result["messages"])[-settings.model_context_messages:]
         await send("text_complete", content=response)
+        await send(
+            "agent_event",
+            **active_run.event(
+                "generate",
+                "completed",
+                "Response completed",
+                evidence={
+                    "response_characters": len(response),
+                    "context_sources": result.get("context_manifest", []),
+                },
+            ),
+        )
         if result.get("artifact_url"):
             await send("image_ready", url=result["artifact_url"])
         await send("state", value="speaking")
@@ -298,6 +431,14 @@ async def talk_socket(websocket: WebSocket):
                 logger.warning("Talk animation failed: %s", exc)
                 await send("media_warning", message=str(exc))
         await send("state", value="idle")
+        active_run.event(
+            "media",
+            "completed",
+            "Optional media processing finished",
+            evidence={"audio_requested": True, "animation_requested": bool(animation_task)},
+        )
+        active_run.finish("completed", summary={"mode": mode})
+        active_run = None
 
     try:
         await send("state", value="idle")
@@ -347,6 +488,10 @@ async def talk_socket(websocket: WebSocket):
         raise
     except Exception as exc:
         logger.exception("Talk session failed")
+        if active_run is not None:
+            active_run.event("error", "failed", "The Talk turn could not complete", detail=str(exc)[:500])
+            active_run.finish("failed", summary={"error_type": type(exc).__name__})
+            active_run = None
         try:
             await send("error", message=str(exc))
             await send("state", value="error")
@@ -357,29 +502,75 @@ async def talk_socket(websocket: WebSocket):
 @app.post("/api/smart-code/preview")
 async def smart_code_preview(payload: SmartCodeRequest):
     async def events():
-        yield sse("started", {"stage": "classify", "message": "Task contract accepted"})
-        task = asyncio.create_task(smart_code_service.preview(payload))
+        run = run_ledger.start(
+            "smart-code",
+            metadata={"mode": payload.mode, "risk": payload.risk, "targets": len(payload.target_paths)},
+        )
+        yield sse(
+            "started",
+            {
+                "run_id": run.id,
+                "stage": "classify",
+                "message": "Task contract accepted; no files will be written during preview",
+            },
+        )
+        progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        def progress(event: dict):
+            progress_queue.put_nowait(event)
+
+        task = asyncio.create_task(smart_code_service.preview(payload, progress))
         elapsed = 0
         try:
-            while not task.done():
-                await asyncio.sleep(2)
-                elapsed += 2
-                yield sse(
-                    "status",
-                    {
-                        "stage": "generate",
-                        "message": f"Gemma is planning and coding locally ({elapsed}s)",
-                    },
-                )
+            while not task.done() or not progress_queue.empty():
+                try:
+                    event = await asyncio.wait_for(progress_queue.get(), timeout=2)
+                    stage = str(event.get("stage", "generate"))
+                    run_event = run.event(
+                        stage,
+                        str(event.get("status", "running")),
+                        str(event.get("label", "Agent workflow update")),
+                        detail=event.get("detail"),
+                        evidence=event.get("evidence"),
+                    )
+                    yield sse("agent_event", run_event)
+                    if stage in {"retrieve", "verify"}:
+                        yield sse("stage", {"stage": stage, "status": event.get("status")})
+                    if stage == "structured_loop":
+                        yield sse("loop", event)
+                except TimeoutError:
+                    elapsed += 2
+                    yield sse(
+                        "status",
+                        {
+                            "stage": "generate",
+                            "message": f"Gemma is planning and coding locally ({elapsed}s)",
+                        },
+                    )
             result = await task
-            for stage in ("retrieve", "plan", "code", "verify", "critique", "gate"):
+            for stage in ("plan", "code", "critique", "gate"):
                 yield sse("stage", {"stage": stage, "status": "completed"})
+            gate_event = run.event(
+                "gate",
+                "waiting" if result.get("can_apply") else "completed",
+                "Waiting for explicit human approval" if result.get("can_apply") else "No write action available",
+                evidence={"can_apply": result.get("can_apply"), "edits": len(result.get("edits", []))},
+            )
+            yield sse("agent_event", gate_event)
+            run.finish(
+                "completed",
+                summary={"can_apply": result.get("can_apply"), "edits": len(result.get("edits", []))},
+            )
             yield sse("result", result)
         except ValueError as exc:
             logger.warning("Smart Code preview rejected: %s", exc)
+            run.event("error", "failed", "Preview rejected safely", detail=str(exc)[:500])
+            run.finish("failed", summary={"error_type": type(exc).__name__})
             yield sse("error", {"message": str(exc)})
         except Exception as exc:
             logger.exception("Smart Code preview failed")
+            run.event("error", "failed", "Preview failed safely", detail=str(exc)[:500])
+            run.finish("failed", summary={"error_type": type(exc).__name__})
             yield sse("error", {"message": str(exc)})
 
     return StreamingResponse(
@@ -409,17 +600,37 @@ def estimate_code_config():
 
 
 async def estimate_events(story):
-    yield sse("started", {"title": story.title})
-    task = asyncio.create_task(estimate_service.estimate(story))
+    run = run_ledger.start(
+        "estimate-code", metadata={"source": story.source, "model": settings.model_id}
+    )
+    yield sse("started", {"run_id": run.id, "title": story.title})
+    progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    def progress(event: dict):
+        progress_queue.put_nowait(event)
+
+    task = asyncio.create_task(estimate_service.estimate(story, progress))
     elapsed = 0
     try:
-        while not task.done():
-            await asyncio.sleep(2)
-            elapsed += 2
-            yield sse(
-                "status",
-                {"message": f"Gemma is building the evidence-led estimate ({elapsed}s)"},
-            )
+        while not task.done() or not progress_queue.empty():
+            try:
+                event = await asyncio.wait_for(progress_queue.get(), timeout=2)
+                run_event = run.event(
+                    str(event.get("stage", "estimate")),
+                    str(event.get("status", "running")),
+                    str(event.get("label", "Estimation workflow update")),
+                    detail=event.get("detail"),
+                    evidence=event.get("evidence"),
+                )
+                yield sse("agent_event", run_event)
+                if event.get("stage") == "structured_loop":
+                    yield sse("loop", event)
+            except TimeoutError:
+                elapsed += 2
+                yield sse(
+                    "status",
+                    {"message": f"Gemma is building the evidence-led estimate ({elapsed}s)"},
+                )
         result = await task
         stages = [
             "score_parameters", "identify_drivers", "compare_to_anchors", "derive_points",
@@ -430,9 +641,12 @@ async def estimate_events(story):
             stages.insert(4, "spike_split_branch")
         for stage in stages:
             yield sse("node", {"node": stage, "status": "completed"})
+        run.finish("completed", summary={"points": result.get("points"), "source": story.source})
         yield sse("result", result)
     except Exception as exc:
         logger.exception("Estimate Code failed")
+        run.event("error", "failed", "Estimate failed validation", detail=str(exc)[:500])
+        run.finish("failed", summary={"error_type": type(exc).__name__})
         yield sse("error", {"message": str(exc), "retryable": True})
 
 
@@ -463,6 +677,12 @@ async def estimate_code_batch(payload: BatchEstimateRequest):
                 elif chunk.startswith("event: status"):
                     data = json.loads(chunk.split("data: ", 1)[1])
                     yield sse("status", {"index": index, **data})
+                elif chunk.startswith("event: agent_event"):
+                    data = json.loads(chunk.split("data: ", 1)[1])
+                    yield sse("agent_event", {"index": index, **data})
+                elif chunk.startswith("event: loop"):
+                    data = json.loads(chunk.split("data: ", 1)[1])
+                    yield sse("loop", {"index": index, **data})
                 elif chunk.startswith("event: error"):
                     data = json.loads(chunk.split("data: ", 1)[1])
                     yield sse("item_error", {"index": index, **data})
@@ -474,7 +694,12 @@ async def estimate_code_batch(payload: BatchEstimateRequest):
 @app.post("/api/estimate-code/upload/parse")
 async def estimate_upload(file: UploadFile = File(...)):
     try:
-        return parse_estimate_upload(await file.read(), file.filename or "upload")
+        content = bytearray()
+        while chunk := await file.read(1024 * 1024):
+            content.extend(chunk)
+            if len(content) > 15 * 1024 * 1024:
+                raise ValueError("File exceeds the 15 MB upload limit.")
+        return parse_estimate_upload(bytes(content), file.filename or "upload")
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

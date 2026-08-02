@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, event
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from backend.config import get_settings
@@ -31,8 +31,17 @@ class Message(SQLModel, table=True):
 settings = get_settings()
 engine = create_engine(
     f"sqlite:///{(settings.app_data_dir / 'gemma_studio.db').as_posix()}",
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
+
+
+@event.listens_for(engine, "connect")
+def configure_sqlite(connection, _record) -> None:
+    cursor = connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
 
 
 def init_db() -> None:
@@ -52,4 +61,3 @@ def list_messages(session: Session, conversation_id: UUID) -> list[Message]:
         select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)
     )
     return list(session.exec(statement).all())
-

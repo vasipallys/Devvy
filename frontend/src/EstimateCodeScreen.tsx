@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Anchor, ArrowLeft, BrainCircuit, Check, ChevronDown, Download, FileSpreadsheet, GitBranch, Keyboard, LoaderCircle, PanelsTopLeft, Plus, Server, Target, Trash2 } from 'lucide-react'
+import { AlertTriangle, Anchor, ArrowLeft, BrainCircuit, Check, ChevronDown, Download, FileSpreadsheet, GitBranch, Keyboard, LoaderCircle, PanelsTopLeft, Plus, Target, Trash2 } from 'lucide-react'
 import { api } from './api'
-import type { EstimateResult, Story } from './types'
+import { EvidencePanel } from './EvidencePanel'
+import { SystemStatusChip } from './SystemStatusChip'
+import type { AgentEvent, EstimateResult, Story } from './types'
 
 const steps = ['score_parameters', 'identify_drivers', 'compare_to_anchors', 'derive_points', 'spike_split_branch', 'write_plain_language_reasoning', 'detect_hidden_tasks', 'assess_risks', 'recommend_split']
 const labels: Record<string, string> = { score_parameters: 'Score parameters', identify_drivers: 'Identify drivers', compare_to_anchors: 'Compare anchors', derive_points: 'Derive points', spike_split_branch: 'Spike / split check', write_plain_language_reasoning: 'Write plain-language why', detect_hidden_tasks: 'Find hidden work', assess_risks: 'Assess risks', recommend_split: 'Recommend split' }
@@ -21,6 +23,7 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
   const [result, setResult] = useState<EstimateResult>()
   const [results, setResults] = useState<EstimateResult[]>([])
   const [error, setError] = useState('')
+  const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
   const [upload, setUpload] = useState<any>()
   const [mapping, setMapping] = useState<Record<string, string | null>>({})
   const [jiraProject, setJiraProject] = useState('')
@@ -33,11 +36,12 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
   const setField = <K extends keyof Story>(field: K, value: Story[K]) => setStory(current => ({ ...current, [field]: value }))
   function setCriterion(index: number, value: string) { setField('acceptance_criteria', story.acceptance_criteria.map((item, i) => i === index ? value : item)) }
 
-  function begin() { setLoading(true); setError(''); setResult(undefined); setResults([]); setStepsDone([]); setStatus('Starting local estimation…'); abortRef.current = new AbortController() }
+  function begin() { setLoading(true); setError(''); setResult(undefined); setResults([]); setStepsDone([]); setRunEvents([]); setStatus('Starting local estimation…'); abortRef.current = new AbortController() }
   async function estimateOne(next: Story) {
     begin()
     try {
       await api.estimate({ ...next, acceptance_criteria: next.acceptance_criteria.filter(Boolean) }, (event, data) => {
+        if (event === 'agent_event') setRunEvents(current => [...current, data as AgentEvent])
         if (event === 'status') setStatus(data.message)
         if (event === 'node') setStepsDone(current => [...new Set([...current, data.node])])
         if (event === 'result') { setResult(data); setStatus('Estimate complete') }
@@ -51,6 +55,7 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
     begin()
     try {
       await api.estimateBatch(items, (event, data) => {
+        if (event === 'agent_event') setRunEvents(current => [...current, data as AgentEvent])
         if (event === 'status') setStatus(data.message)
         if (event === 'item_started') { setStatus(`Estimating ${data.title}`); setStepsDone([]) }
         if (event === 'item_node') setStepsDone(current => [...new Set([...current, data.node])])
@@ -94,14 +99,14 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
   }
 
   return <div className="product-screen estimate-screen">
-    <header className="estimate-header"><button onClick={onHome}><ArrowLeft size={17}/> Home</button><div className="product-brand"><BrainCircuit/><span><b>Estimate Code</b><small>Evidence-led estimation</small></span></div><div className="estimate-model"><Server size={15}/>{config?.model || 'Checking model…'}<span className="pulse"/></div></header>
+    <header className="estimate-header"><button onClick={onHome}><ArrowLeft size={17}/> Home</button><div className="product-brand"><BrainCircuit/><span><b>Estimate Code</b><small>Evidence-led estimation</small></span></div><SystemStatusChip/></header>
     <main className="estimate-main">
       <section className="estimate-hero"><div><span className="eyebrow">DEFENSIBLE BY DESIGN</span><h1>A point is only useful when<br/>everyone understands <em>why.</em></h1><p>Score the real work, calibrate it against fixed anchors, and share a conclusion anyone can defend.</p></div><div className="method-card"><Target/><div><b>How it works</b><ol><li>Score 12 delivery factors</li><li>Find the true drivers</li><li>Compare fixed anchors</li><li>Conclude, never guess</li></ol></div></div></section>
       <nav className="source-tabs">{([{ id: 'jira', label: 'From Jira', Icon: PanelsTopLeft }, { id: 'manual', label: 'Manual entry', Icon: Keyboard }, { id: 'upload', label: 'Upload Excel / CSV', Icon: FileSpreadsheet }] as const).map(item => <button key={item.id} className={source === item.id ? 'active' : ''} onClick={() => setSource(item.id)}><item.Icon/>{item.label}</button>)}</nav>
       {error && <div className="estimate-error"><AlertTriangle/>{error}</div>}
       <div className="estimate-workspace">
         <section className="story-card">
-          {source === 'manual' && <form onSubmit={event => { event.preventDefault(); estimateOne(story) }}><span className="eyebrow">ONE STORY</span><h2>Describe the work</h2><label>Title<input required value={story.title} onChange={event => setField('title', event.target.value)} placeholder="What outcome are we delivering?"/></label><label>User story<textarea required rows={4} value={story.user_story} onChange={event => setField('user_story', event.target.value)} placeholder="As a…, I want…, so that…"/></label><fieldset><legend>Acceptance criteria</legend>{story.acceptance_criteria.map((item, index) => <div className="criterion" key={index}><span>{index + 1}</span><input value={item} onChange={event => setCriterion(index, event.target.value)} placeholder="Observable condition of success"/><button type="button" disabled={story.acceptance_criteria.length === 1} onClick={() => setField('acceptance_criteria', story.acceptance_criteria.filter((_, i) => i !== index))}><Trash2/></button></div>)}<button type="button" className="text-action" onClick={() => setField('acceptance_criteria', [...story.acceptance_criteria, ''])}><Plus/> Add criterion</button></fieldset><label>Technical breakdown <span>optional</span><textarea rows={3} value={story.technical_breakdown} onChange={event => setField('technical_breakdown', event.target.value)} placeholder="Known services, components, migrations, or constraints"/></label><button className="estimate-action" disabled={loading}>{loading ? <LoaderCircle className="spin"/> : <BrainCircuit/>}Build justified estimate</button></form>}
+          {source === 'manual' && <form onSubmit={event => { event.preventDefault(); estimateOne(story) }}><span className="eyebrow">ONE STORY</span><h2>Describe the work</h2><label>Title<input required value={story.title} onChange={event => setField('title', event.target.value)} placeholder="What outcome are we delivering?"/></label><label>User story<textarea required rows={4} value={story.user_story} onChange={event => setField('user_story', event.target.value)} placeholder="As a…, I want…, so that…"/></label><fieldset><legend>Acceptance criteria</legend>{story.acceptance_criteria.map((item, index) => <div className="criterion" key={index}><span>{index + 1}</span><input aria-label={`Acceptance criterion ${index + 1}`} value={item} onChange={event => setCriterion(index, event.target.value)} placeholder="Observable condition of success"/><button type="button" aria-label={`Remove acceptance criterion ${index + 1}`} disabled={story.acceptance_criteria.length === 1} onClick={() => setField('acceptance_criteria', story.acceptance_criteria.filter((_, i) => i !== index))}><Trash2/></button></div>)}<button type="button" className="text-action" onClick={() => setField('acceptance_criteria', [...story.acceptance_criteria, ''])}><Plus/> Add criterion</button></fieldset><label>Technical breakdown <span>optional</span><textarea rows={3} value={story.technical_breakdown} onChange={event => setField('technical_breakdown', event.target.value)} placeholder="Known services, components, migrations, or constraints"/></label><button className="estimate-action" disabled={loading}>{loading ? <LoaderCircle className="spin"/> : <BrainCircuit/>}Build justified estimate</button></form>}
           {source === 'upload' && <div className="upload-pane"><span className="eyebrow">BATCH ESTIMATION</span><h2>Import stories</h2><label className="upload-drop"><FileSpreadsheet/><b>Choose Excel or CSV</b><small>Up to 100 stories · 15 MB</small><input type="file" accept=".csv,.xlsx" onChange={event => parseFile(event.target.files?.[0])}/></label>{upload && <><p>{upload.row_count} row(s) found. Confirm column mapping:</p><div className="mapping-grid">{Object.keys(mapping).map(field => <label key={field}>{field.replaceAll('_', ' ')}<select value={mapping[field] || ''} onChange={event => setMapping(current => ({ ...current, [field]: event.target.value || null }))}><option value="">Not mapped</option>{upload.columns.map((column: string) => <option key={column}>{column}</option>)}</select></label>)}</div><button className="estimate-action" disabled={loading || !mapping.title} onClick={() => estimateMany(uploadStories())}>Estimate {uploadStories().length} stories</button></>}</div>}
           {source === 'jira' && <div className="jira-pane"><span className="eyebrow">JIRA SOURCE</span><h2>Choose backlog stories</h2>{!config?.jira_configured ? <div className="setup-note">Set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN in Devvy’s .env to enable this source.</div> : <><div className="jira-search"><input value={jiraProject} onChange={event => setJiraProject(event.target.value)} placeholder="Project key"/><input value={jiraQuery} onChange={event => setJiraQuery(event.target.value)} placeholder="Optional text filter"/><button onClick={fetchJira}>Load</button></div><div className="jira-list">{jiraStories.map(item => <label key={item.key}><input type="checkbox" checked={selectedJira.includes(item.key!)} onChange={event => setSelectedJira(current => event.target.checked ? [...current, item.key!] : current.filter(key => key !== item.key))}/><b>{item.key}</b><span>{item.title}</span></label>)}</div><button className="estimate-action" disabled={!selectedJira.length || loading} onClick={() => estimateMany(jiraStories.filter(item => selectedJira.includes(item.key!)))}>Estimate selected</button></>}</div>}
         </section>
@@ -109,6 +114,7 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
       </div>
       {results.length > 0 && <section className="batch-results"><h2>Batch results</h2>{results.map(item => <button key={item.story.key || item.story.title} onClick={() => setResult(item)}><strong>{item.points}</strong><span><b>{item.story.title}</b><small>{item.tldr}</small></span></button>)}</section>}
       {result && <article className="estimate-result">
+        <EvidencePanel events={runEvents} compact title="Estimation evidence"/>
         {(result.spike_recommended || result.split_recommendation.split_recommended) && <div className="recommendation"><AlertTriangle/><b>{result.split_recommendation.split_recommended ? 'SPLIT' : 'SPIKE'} recommended</b><span>{result.split_recommendation.split_recommended ? result.split_recommendation.rationale : result.spike_reason}</span></div>}
         <div className="result-hero"><div className="points"><span>STORY POINTS</span><strong>{result.points}</strong></div><div><span className="eyebrow">{result.story.key ? `${result.story.key} · ` : ''}{result.story.title}</span><h2>{result.tldr}</h2><p>{result.plain_language_why}</p></div></div>
         <div className="fib-scale">{[1,2,3,5,8,13].map(point => <span className={point === result.points ? 'selected' : ''} key={point}>{point}</span>)}</div><div className="result-buttons"><button className="download-result" onClick={download}><Download/> JSON</button>{config?.jira_write_enabled && result.story.source === 'jira' && <button className="jira-write" onClick={writePoints}>Write {result.points} to Jira</button>}</div>

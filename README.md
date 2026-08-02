@@ -15,8 +15,8 @@ Gemma 3 1B runtime. It combines four workspaces in a single Electron application
 
 The default profile is designed for CPU laptops. Model inference, chat history, uploaded
 documents, generated media, code previews, and estimation all remain on the machine. Network
-access occurs only for model/package downloads, explicit Research requests, Google Fonts in the
-current UI, optional Jira operations, and optional Phoenix trace export.
+access occurs only for model/package downloads, explicit Research requests, optional Jira
+operations, and optional Phoenix trace export. The UI uses local system fonts.
 
 For the complete build contract, data models, API/event protocols, workflow rules, UI states,
 security controls, and acceptance criteria, see
@@ -130,6 +130,35 @@ All four product workspaces reuse the same `GemmaRuntime`. Loading is protected 
 thread lock and generation is protected by an async lock, so CPU-heavy model calls are serialized.
 Chat and Smart/Estimate responses use SSE; Talk uses a per-connection WebSocket conversation.
 
+## Agent engineering and evidence
+
+Gemma Studio uses a bounded single-agent harness for open-ended work and deterministic code for
+validation, persistence, and side effects:
+
+- **Context engineering:** evidence sources are priority ordered, character-budgeted, labeled by
+  provenance, and wrapped as untrusted data so retrieved text cannot silently become system
+  instructions.
+- **Harness engineering:** every run receives an ID and emits typed trajectory events with stage,
+  status, elapsed time, evidence counts, validation outcomes, and approval gates. A privacy-safe
+  JSONL ledger stores operational metadata for 30 days by default, never prompts, source content,
+  hidden reasoning, or model responses.
+- **Prompt engineering:** system contracts separate role, response rules, grounding policy, and
+  context policy. Prompts require honest uncertainty, citations for live claims, and concise
+  evidence-based rationale instead of private chain-of-thought.
+- **Loop engineering:** structured workflows use a maximum two-attempt generate/validate/repair
+  loop. Attempts and failures are visible in the Evidence panel; they cannot continue indefinitely.
+- **Stable estimation boundary:** Estimate Code asks the 1B model for a compact semantic draft,
+  then deterministic code normalizes aliases and materializes the strict 12-factor/Fibonacci API
+  result. Harmless formatting variance cannot bypass policy or fail an otherwise useful estimate.
+- **Human control:** Smart Code writes and Jira updates remain deterministic, separately authorized
+  actions outside the model loop.
+
+The UX follows Google's guidance to explain capabilities and limits, show relevant evidence with
+progressive disclosure, preserve user control, and provide a path forward after failure. Design
+references: [Material Design 3](https://m3.material.io/),
+[Google People + AI Guidebook](https://pair.withgoogle.com/guidebook-v2/chapters), and
+[Google's production-ready agent guidance](https://cloud.google.com/blog/products/ai-machine-learning/a-devs-guide-to-production-ready-ai-agents).
+
 ## Workspace behavior
 
 ### Chat
@@ -215,6 +244,7 @@ Copy `.env.example` to `.env`. The most commonly tuned values are:
 | `SMART_CODE_MAX_CONTEXT_CHARS` | `48000` | Repository evidence cap |
 | `SMART_CODE_MAX_OUTPUT_TOKENS` | `4096` | Smart Code structured-output ceiling |
 | `ESTIMATE_MAX_OUTPUT_TOKENS` | `3072` | Estimation structured-output ceiling |
+| `AGENT_RUN_RETENTION_DAYS` | `30` | Privacy-safe trajectory ledger retention |
 | `APP_HOST` / `APP_PORT` | `127.0.0.1` / `8765` | API bind address |
 | `APP_DATA_DIR` | `./data` | Database, uploads, media, backups, evidence |
 | `VITE_API_URL` | `http://127.0.0.1:8765` | Renderer API URL, set at frontend build time |
@@ -235,6 +265,7 @@ data/
   gemma_studio.db
   uploads/
   generated/
+  agent-runs/
   smart-code/backups/
   smart-code/runs/
 ```

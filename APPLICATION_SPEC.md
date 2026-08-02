@@ -182,6 +182,7 @@ Compact-model aliases MAY be normalized before validation where explicitly docum
 | `backend/config.py` | `.env`-backed settings and data-directory helpers |
 | `backend/model.py` | Shared lazy Transformers runtime and token streaming |
 | `backend/structured_output.py` | JSON extraction, schema prompting, repair retry |
+| `backend/harness.py` | Context budgets/provenance plus privacy-safe run trajectories and retention |
 | `backend/agent.py` | Chat route/research/image/respond graph |
 | `backend/agent_graph.py` | Talk route/research/companion graph |
 | `backend/db.py` | Conversation/message SQLModel records and CRUD helpers |
@@ -218,6 +219,7 @@ upload/generated directories under `APP_DATA_DIR`.
 | `SMART_CODE_MAX_CONTEXT_CHARS` | integer / `48000` | Repository evidence character budget |
 | `SMART_CODE_MAX_OUTPUT_TOKENS` | integer / `4096` | Smart Code structured output limit |
 | `ESTIMATE_MAX_OUTPUT_TOKENS` | integer / `3072` | Estimate structured output limit |
+| `AGENT_RUN_RETENTION_DAYS` | integer / `30` | Best-effort retention for privacy-safe JSONL run ledgers |
 | `WHISPER_MODEL` | string / `base.en` | faster-whisper model |
 | `WHISPER_COMPUTE_TYPE` | string / `int8` | CPU speech-recognition compute type |
 | `TTS_RATE` | integer / `170` | pyttsx3 speaking rate |
@@ -250,6 +252,8 @@ APP_DATA_DIR/
     <uuid>.png
     <uuid>.wav
     <uuid>.mp4
+  agent-runs/
+    <yyyy-mm-dd>.jsonl
   smart-code/
     backups/<run-id>/<workspace-relative-path>
     runs/<run-id>.json
@@ -331,6 +335,7 @@ status update is progress feedback, not a claim that an internal model step has 
 | Method/path | Request | Success | Important failures |
 | --- | --- | --- | --- |
 | `GET /api/health` | none | Runtime status/model/load state | Always 200 while API runs |
+| `GET /api/system/status` | none | Secret-free model, capability, trust, and limit metadata | 500 |
 | `GET /api/conversations` | none | Conversations, newest update first | 500 |
 | `POST /api/conversations` | none | New conversation | 500 |
 | `GET /api/conversations/{id}/messages` | none | Ordered messages | 404 parent missing |
@@ -429,12 +434,11 @@ The combined text MUST be capped at `DOCUMENT_MAX_CHARS` before prompting.
 - Queries containing current/latest/news/weather intent use a recent freshness hint.
 - Result pages are fetched concurrently.
 - Only HTTP and HTTPS URLs are allowed.
-- DNS resolution of the initially requested hostname MUST reject loopback, private, link-local,
-  and reserved IP addresses.
-- Fetch timeout is 20 seconds and HTTPX follows redirects automatically.
-- **As-built security boundary:** redirect destinations are not independently DNS/IP validated.
-  Before any network-exposed deployment, redirect handling MUST be made manual (or hooked) so
-  every hop is revalidated and DNS rebinding is addressed.
+- DNS resolution of the initially requested hostname and every redirect destination MUST reject
+  loopback, private, link-local, and reserved IP addresses.
+- Fetch timeout is 20 seconds, redirects are followed manually, and at most five redirects are
+  accepted.
+- Declared or streamed response content over 2 MiB MUST be rejected before parsing.
 - Only `text/html` and `text/plain`-compatible responses are processed.
 - Script, style, navigation, and footer content is removed.
 - Each extracted page is capped at 3,000 characters.
@@ -734,8 +738,8 @@ sequentially because the shared model is serialized.
 
 ### 13.2 Required scorecard
 
-The model MUST return exactly one score for each factor, with `Low`, `Medium`, or `High` and a
-3-240 character reason:
+The public estimate result MUST contain exactly one score for each factor, with `Low`, `Medium`,
+or `High` and a 3-240 character reason:
 
 1. `complexity`
 2. `volume`
@@ -750,7 +754,12 @@ The model MUST return exactly one score for each factor, with `Low`, `Medium`, o
 11. `familiarity`
 12. `dod_overhead`
 
-Validation MUST reject missing, duplicate, or unknown factors.
+The local model returns a smaller semantic draft rather than the UI-ready object. The application
+normalizer accepts harmless model variations such as case-insensitive aliases, numeric effort,
+string task/risk lists, and boolean split recommendations. It then materializes all 12 factors,
+using explicit story evidence and conservative missing-evidence defaults for omitted scores. The
+final `EstimateOutput` validation MUST reject missing, duplicate, or unknown factors. This boundary
+keeps a compact 1B model useful without allowing its formatting choices to define the API contract.
 
 ### 13.3 Fixed calibration anchors
 
@@ -790,6 +799,10 @@ Deterministic post-processing MUST force:
 - `split_recommended=true` when points are 13.
 
 The model MUST be instructed not to invent unstated requirements.
+
+The structured loop validates the compact draft and performs at most one repair when it contains
+no usable estimation signal. A semantically useful but differently shaped draft is normalized in
+one pass; formatting differences alone MUST NOT fail the request.
 
 ### 13.5 Estimate event streams
 
@@ -873,10 +886,9 @@ or policy errors are 403; upstream errors are 502.
 `DesktopApp` owns a page union: `home`, `chat`, `talk`, `smart-code`, `estimate-code`. Page changes
 replace the active component and are not persisted across reloads.
 
-The design uses DM Sans, dark near-black/green surfaces for Home/Chat/Talk/Smart Code, and a light
-green editorial layout for Estimate Code. Responsive breakpoints collapse grids and hide
-nonessential mode labels. The current CSS imports DM Sans from Google Fonts, which is a network
-dependency and should be self-hosted for a strict offline build.
+The design uses the local Segoe UI/system font stack, dark near-black/green surfaces for
+Home/Chat/Talk/Smart Code, and a light green editorial layout for Estimate Code. Responsive
+breakpoints collapse grids and hide nonessential mode labels without a font-network dependency.
 
 ### 14.2 Home acceptance
 
@@ -902,8 +914,9 @@ Home MUST display:
 - Persisted `/generated/...` Markdown image URLs are rewritten against the API origin.
 - Error banner and local-model disclaimer.
 
-The renderer uses `dangerouslySetInnerHTML` with `marked` output. A production security pass SHOULD
-add explicit HTML sanitization or disable raw HTML.
+The renderer parses `marked` output through an allowlist sanitizer before assigning HTML. Dangerous
+elements, event/style attributes, non-HTTP links, and non-HTTP image sources are removed; external
+links receive `noopener noreferrer`.
 
 ### 14.4 Talk UI states
 
@@ -1022,7 +1035,6 @@ more UI surfaces.
 | First optional image request | Configured Hugging Face Diffusers model |
 | Jira source/write | Configured Jira base URL |
 | Phoenix enabled/reachable | Configured collector |
-| Renderer startup as-built | Google Fonts stylesheet/font assets |
 
 ### 16.3 Before non-local deployment
 
@@ -1201,16 +1213,15 @@ A replacement is compatible only when:
 Priority order for taking the application beyond trusted local use:
 
 1. Package and supervise the backend as an Electron sidecar.
-2. Self-host fonts and verify a fully offline post-install experience.
-3. Sanitize rendered Markdown and define a Content Security Policy.
-4. Add migrations, backup/restore, retention controls, and generated-file cleanup.
-5. Add full cancellation semantics for queued/running local generation.
-6. Make Smart Code multi-file apply recoverable as a transaction and optionally run repository
+2. Verify a fully offline post-install experience and define a strict Content Security Policy.
+3. Add migrations, backup/restore, user-configurable retention controls, and generated-file cleanup.
+4. Add full cancellation semantics for queued/running local generation.
+5. Make Smart Code multi-file apply recoverable as a transaction and optionally run repository
    test/lint/build commands in an isolated, user-approved execution policy.
-7. Add structured Jira ADF-to-text conversion and stronger project/query validation.
-8. Add model-capability/readiness UX, disk-space checks, and download progress.
-9. Add authenticated multi-user controls only if network deployment becomes a requirement.
-10. Add release signing, notarization, SBOM, dependency scanning, and update strategy.
+6. Add structured Jira ADF-to-text conversion and stronger project/query validation.
+7. Add model-capability/readiness UX, disk-space checks, and download progress.
+8. Add authenticated multi-user controls only if network deployment becomes a requirement.
+9. Add release signing, notarization, SBOM, dependency scanning, and update strategy.
 
 This backlog does not alter the as-built contract; it identifies the gap between a robust local
 development application and a distributable or network-exposed production service.

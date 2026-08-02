@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -38,8 +39,10 @@ async def generate_structured(
     prompt: str,
     *,
     max_new_tokens: int,
+    on_attempt: Callable[[dict[str, Any]], None] | None = None,
+    validate_result: Callable[[T], str | None] | None = None,
 ) -> T:
-    """Generate and validate JSON, with one concise repair attempt."""
+    """Generate and validate JSON and workflow semantics, with one repair attempt."""
     contract = json.dumps(schema.model_json_schema(), separators=(",", ":"))
     request = (
         f"{prompt}\n\nReturn ONLY one valid JSON object. No markdown or commentary. "
@@ -48,6 +51,15 @@ async def generate_structured(
     last_error: Exception | None = None
     last_text = ""
     for attempt in range(2):
+        if on_attempt:
+            on_attempt(
+                {
+                    "attempt": attempt + 1,
+                    "max_attempts": 2,
+                    "status": "running",
+                    "label": "Generating schema-constrained output",
+                }
+            )
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": request},
@@ -67,7 +79,30 @@ async def generate_structured(
             )
         last_text = await runtime.generate(messages, max_new_tokens=max_new_tokens)
         try:
-            return schema.model_validate(parse_json_object(last_text))
+            validated = schema.model_validate(parse_json_object(last_text))
+            semantic_error = validate_result(validated) if validate_result else None
+            if semantic_error:
+                raise ValueError(semantic_error)
+            if on_attempt:
+                on_attempt(
+                    {
+                        "attempt": attempt + 1,
+                        "max_attempts": 2,
+                        "status": "validated",
+                        "label": "Structured output validated",
+                    }
+                )
+            return validated
         except Exception as exc:
             last_error = exc
+            if on_attempt:
+                on_attempt(
+                    {
+                        "attempt": attempt + 1,
+                        "max_attempts": 2,
+                        "status": "retrying" if attempt == 0 else "failed",
+                        "label": "Repairing invalid structured output" if attempt == 0 else "Structured output failed validation",
+                        "detail": str(exc)[:500],
+                    }
+                )
     raise ValueError(f"The local model could not produce valid structured output: {last_error}")

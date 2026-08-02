@@ -23,6 +23,32 @@ export interface SmartCodePreview {
   diffs: Record<string, string>
   verification: { path: string; passed: boolean; detail: string }[]
   can_apply: boolean
+  evidence?: {
+    workspace: string
+    files_considered: string[]
+    context_characters: number
+    context_budget: number
+    selection: string
+    write_policy: string
+  }
+}
+
+export interface AgentEvent {
+  run_id: string
+  stage: string
+  status: 'running' | 'completed' | 'validated' | 'retrying' | 'waiting' | 'failed' | string
+  label: string
+  detail?: string
+  elapsed_ms: number
+  evidence?: Record<string, unknown>
+}
+
+export interface SystemStatus {
+  app: { name: string; version: string; deployment: string }
+  model: { id: string; loaded: boolean; error?: string; device: string; dtype: string; generation: string }
+  capabilities: Record<string, boolean>
+  trust: { privacy: string; data_dir: string; network: string[]; run_ledger: string }
+  limits: Record<string, number>
 }
 
 export interface Story {
@@ -51,4 +77,5 @@ export interface EstimateResult extends Record<string, unknown> {
   spike_reason?: string
   split_recommendation: { split_recommended: boolean; rationale: string; proposed_stories: string[] }
   effort: { react: string; spring: string; existing_code: string; person_days: { optimistic: number; likely: number; pessimistic: number } }
+  evidence?: { source: string; score_factors: string[]; anchors_considered: string[]; policy_checks: Record<string, boolean> }
 }

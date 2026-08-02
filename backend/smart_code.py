@@ -14,7 +14,8 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from collections.abc import Callable
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -64,7 +65,9 @@ class ProposedEdit(BaseModel):
             return value
         normalized = dict(value)
         if "action" not in normalized:
-            normalized["action"] = normalized.get("operation") or normalized.get("type")
+            normalized["action"] = (
+                normalized.get("operation") or normalized.get("type") or "replace"
+            )
         if "path" not in normalized:
             normalized["path"] = normalized.get("file") or normalized.get("filename")
         if "content" not in normalized:
@@ -98,7 +101,30 @@ class SmartCodeModelOutput(BaseModel):
             return value
         normalized = dict(value)
         if "edits" not in normalized:
-            normalized["edits"] = normalized.get("changes") or normalized.get("files") or []
+            raw_edits = (
+                normalized.get("changes")
+                or normalized.get("file_changes")
+                or normalized.get("files")
+                or normalized.get("edit")
+                or []
+            )
+            if not raw_edits and normalized.get("path") and normalized.get("code"):
+                raw_edits = [
+                    {"path": normalized["path"], "content": normalized["code"]}
+                ]
+            if isinstance(raw_edits, dict):
+                if any(key in raw_edits for key in ("path", "file", "filename")):
+                    raw_edits = [raw_edits]
+                else:
+                    raw_edits = [
+                        (
+                            {"path": path, **content}
+                            if isinstance(content, dict)
+                            else {"path": path, "content": content}
+                        )
+                        for path, content in raw_edits.items()
+                    ]
+            normalized["edits"] = raw_edits
         if "plan" not in normalized:
             normalized["plan"] = normalized.get("steps") or ["Implement the requested change"]
         if "summary" not in normalized:
@@ -230,7 +256,11 @@ class SmartCodeService:
             for key in stale:
                 self._previews.pop(key, None)
 
-    async def preview(self, request: SmartCodeRequest) -> dict:
+    async def preview(
+        self,
+        request: SmartCodeRequest,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
         self._purge()
         root = Path(request.workspace_root).expanduser().resolve()
         if not root.is_dir():
@@ -245,6 +275,19 @@ class SmartCodeService:
 
         repo_map = "\n".join(f"- {_relative(root, path)}" for path in candidates)
         evidence = _context(root, candidates, self.settings.smart_code_max_context_chars)
+        if progress:
+            progress(
+                {
+                    "stage": "retrieve",
+                    "status": "completed",
+                    "label": "Repository evidence selected",
+                    "evidence": {
+                        "files": len(candidates),
+                        "characters": len(evidence),
+                        "target_policy": "explicit allowlist" if targets else "ranked retrieval",
+                    },
+                }
+            )
         acceptance = request.acceptance_criteria or [
             "The requested behavior is complete and production ready",
             "Existing behavior remains compatible",
@@ -275,12 +318,26 @@ REPOSITORY MAP:
 RETRIEVED EVIDENCE:
 {evidence}
 """
+        def validate_workflow_result(candidate: SmartCodeModelOutput) -> str | None:
+            if request.mode == "review" and candidate.edits:
+                return "Review mode requires findings only and must not return file edits."
+            if request.mode != "review" and not candidate.edits:
+                return (
+                    "Generate/modify mode requires at least one complete create or replace edit. "
+                    "Return the smallest concrete whole-file change that satisfies the objective."
+                )
+            return None
+
         output = await generate_structured(
             self.runtime,
             SmartCodeModelOutput,
             "You are a cautious senior software engineer. Never claim unperformed verification.",
             prompt,
             max_new_tokens=self.settings.smart_code_max_output_tokens,
+            on_attempt=(
+                lambda event: progress({"stage": "generate", **event}) if progress else None
+            ),
+            validate_result=validate_workflow_result,
         )
         if request.mode == "review" and output.edits:
             raise ValueError("Review mode attempted to produce file edits.")
@@ -295,15 +352,26 @@ RETRIEVED EVIDENCE:
             path = _safe_path(root, edit.path)
             if targets and path not in explicit:
                 raise ValueError(f"The model attempted an unapproved target: {_relative(root, path)}")
-            if edit.action == "create" and path.exists():
-                raise ValueError(f"Create target already exists: {_relative(root, path)}")
-            if edit.action == "replace" and not path.is_file():
-                raise ValueError(f"Replace target does not exist: {_relative(root, path)}")
+            action = "replace" if path.is_file() else "create"
             materialized[path] = edit.content
             hashes[path] = _hash(path)
-            normalized_edits.append(edit.model_copy(update={"path": _relative(root, path)}))
+            normalized_edits.append(
+                edit.model_copy(update={"action": action, "path": _relative(root, path)})
+            )
         output = output.model_copy(update={"edits": normalized_edits})
         verification = [_verify(path, content) for path, content in materialized.items()]
+        if progress:
+            progress(
+                {
+                    "stage": "verify",
+                    "status": "completed" if all(item["passed"] for item in verification) else "failed",
+                    "label": "Deterministic structural checks complete",
+                    "evidence": {
+                        "checks": len(verification),
+                        "passed": sum(1 for item in verification if item["passed"]),
+                    },
+                }
+            )
         diffs: dict[str, str] = {}
         for path, content in materialized.items():
             old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
@@ -331,6 +399,14 @@ RETRIEVED EVIDENCE:
             "diffs": diffs,
             "verification": verification,
             "can_apply": bool(materialized) and all(item["passed"] for item in verification),
+            "evidence": {
+                "workspace": str(root),
+                "files_considered": [_relative(root, path) for path in candidates],
+                "context_characters": len(evidence),
+                "context_budget": self.settings.smart_code_max_context_chars,
+                "selection": "explicit targets" if targets else "objective-ranked source scan",
+                "write_policy": "preview only; explicit single-use approval required",
+            },
         }
 
     def apply(self, request: SmartCodeApplyRequest) -> dict:

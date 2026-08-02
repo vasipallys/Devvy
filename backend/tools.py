@@ -4,7 +4,7 @@ import re
 import socket
 import threading
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 
 import httpx
@@ -75,7 +75,7 @@ async def web_search(query: str, limit: int = 5) -> list[dict]:
     return list(await asyncio.gather(*(enrich(item) for item in raw)))
 
 
-async def fetch_page(url: str) -> str:
+async def _validate_public_url(url: str) -> None:
     if not re.match(r"^https?://", url):
         raise ValueError("Only http(s) URLs are allowed")
     parsed = urlparse(url)
@@ -86,15 +86,39 @@ async def fetch_page(url: str) -> str:
         ip = ipaddress.ip_address(address[4][0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             raise ValueError("Private and local network addresses are not allowed")
+
+
+async def fetch_page(url: str) -> str:
+    current = url
     async with httpx.AsyncClient(
-        timeout=20, follow_redirects=True, headers={"User-Agent": "GemmaStudio/0.1"}
+        timeout=20, follow_redirects=False, headers={"User-Agent": "GemmaStudio/0.1"}
     ) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-    content_type = response.headers.get("content-type", "")
-    if "text/html" not in content_type and "text/plain" not in content_type:
-        return ""
-    soup = BeautifulSoup(response.text, "html.parser")
+        for _ in range(6):
+            await _validate_public_url(current)
+            async with client.stream("GET", current) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("Redirect response did not include a destination")
+                    current = urljoin(current, location)
+                    continue
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                if "text/html" not in content_type and "text/plain" not in content_type:
+                    return ""
+                declared = response.headers.get("content-length")
+                if declared and int(declared) > 2 * 1024 * 1024:
+                    raise ValueError("Research page exceeds the 2 MB retrieval limit")
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > 2 * 1024 * 1024:
+                        raise ValueError("Research page exceeds the 2 MB retrieval limit")
+                text = content.decode(response.encoding or "utf-8", errors="replace")
+                break
+        else:
+            raise ValueError("Research page exceeded the redirect limit")
+    soup = BeautifulSoup(text, "html.parser")
     for node in soup(["script", "style", "nav", "footer"]):
         node.decompose()
     return " ".join(soup.get_text(" ", strip=True).split())[:3_000]

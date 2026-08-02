@@ -43,8 +43,24 @@ def test_talk_text_mode_returns_workspace_artifact(monkeypatch):
     with TestClient(app) as client, client.websocket_connect("/api/talk/ws") as socket:
         assert socket.receive_json() == {"type": "state", "value": "idle"}
         socket.send_json({"type": "text", "content": "draw a moon", "mode": "image"})
-        events = [socket.receive_json() for _ in range(8)]
+        events = []
+        for _ in range(14):
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "audio_ready":
+                break
 
-    assert {event["type"] for event in events} == {
+    assert {event["type"] for event in events} >= {
         "transcript", "state", "token", "text_complete", "image_ready", "audio_ready"
     }
+    assert any(event["type"] == "agent_event" for event in events)
+
+
+def test_system_status_exposes_capabilities_without_secrets():
+    with TestClient(app) as client:
+        payload = client.get("/api/system/status").json()
+    assert payload["app"]["deployment"] == "local-desktop"
+    assert payload["model"]["generation"] == "serialized"
+    assert payload["trust"]["privacy"] == "Local-first"
+    assert "hf_token" not in str(payload).lower()
+    assert "jira_api_token" not in str(payload).lower()

@@ -47,6 +47,7 @@ async def test_smart_code_preview_and_approved_atomic_apply(tmp_path, monkeypatc
     )
     assert preview["can_apply"] is True
     assert "-value = 1" in preview["diffs"]["app.py"]
+    assert preview["evidence"]["selection"] == "explicit targets"
     assert target.read_text(encoding="utf-8") == "value = 1\n"
 
     result = service.apply(
@@ -107,6 +108,56 @@ async def test_estimate_enforces_high_uncertainty_escalation(tmp_path, monkeypat
     assert result["points"] == 8
     assert result["spike_recommended"] is True
     assert result["spike_reason"]
+    assert result["evidence"]["policy_checks"]["high_uncertainty_forces_spike"] is True
+
+
+async def test_estimate_normalizes_compact_local_model_output(tmp_path):
+    class CompactRuntime:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, _messages, max_new_tokens):
+            assert max_new_tokens > 0
+            self.calls += 1
+            return """{
+                "Score": 13,
+                "EffortRange": {
+                    "react": 5,
+                    "spring": 5,
+                    "existing_code": 5,
+                    "person_days": 8
+                },
+                "ComplexityDrivers": ["security", "cross-stack integration"],
+                "Explanation": "Biometric authentication has security and integration risk.",
+                "HiddenTasks": ["Threat modelling", "Device compatibility testing"],
+                "Risks": ["Biometric hardware variance", "Authentication failures"],
+                "SplitRecommendation": true
+            }"""
+
+    runtime = CompactRuntime()
+    service = EstimateService(
+        runtime, Settings(app_data_dir=tmp_path / "data", phoenix_enabled=False)
+    )
+    result = await service.estimate(
+        Story(
+            title="Add biometric login",
+            user_story="Users authenticate with device biometrics through the existing service.",
+            acceptance_criteria=["Authentication failures are handled securely"],
+        )
+    )
+
+    assert runtime.calls == 1
+    assert result["points"] == 13
+    assert len(result["scorecard"]) == 12
+    assert result["effort"]["person_days"] == {
+        "optimistic": 8.0,
+        "likely": 8.0,
+        "pessimistic": 21.0,
+    }
+    assert result["hidden_tasks"][0]["task"] == "Threat modelling"
+    assert result["risks"][0]["risk"] == "Biometric hardware variance"
+    assert result["spike_recommended"] is True
+    assert result["split_recommendation"]["split_recommended"] is True
 
 
 def test_estimate_csv_upload_mapping():
@@ -164,6 +215,46 @@ async def test_smart_code_modify_can_seed_empty_workspace(tmp_path, monkeypatch)
     )
     assert preview["can_apply"] is True
     assert preview["edits"][0]["action"] == "create"
+
+
+async def test_smart_code_repairs_empty_edit_response(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "app.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+
+    class EmptyThenEditRuntime:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, messages, max_new_tokens):
+            assert max_new_tokens > 0
+            self.calls += 1
+            if self.calls == 1:
+                return '{"summary":"Planned","plan":["Update value"],"edits":[]}'
+            assert "requires at least one complete" in messages[-1]["content"]
+            return """{
+                "summary": "Updated value",
+                "plan": ["Update value"],
+                "files": {"app.py": "value = 2\\n"}
+            }"""
+
+    runtime = EmptyThenEditRuntime()
+    service = SmartCodeService(
+        runtime, Settings(app_data_dir=tmp_path / "data", phoenix_enabled=False)
+    )
+    preview = await service.preview(
+        SmartCodeRequest(
+            objective="Change value to 2",
+            workspace_root=str(workspace),
+            target_paths=[str(target)],
+        )
+    )
+
+    assert runtime.calls == 2
+    assert preview["can_apply"] is True
+    assert preview["edits"][0]["action"] == "replace"
+    assert "+value = 2" in preview["diffs"]["app.py"]
 
 
 async def test_smart_code_rejects_workspace_escape(tmp_path):

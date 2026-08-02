@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     smart_code_max_context_chars: int = 48_000
     smart_code_max_output_tokens: int = 4096
     estimate_max_output_tokens: int = 3072
+    agent_run_retention_days: int = 30
     whisper_model: str = "base.en"
     whisper_compute_type: str = "int8"
     tts_rate: int = 170

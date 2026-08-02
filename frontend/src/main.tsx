@@ -8,5 +8,6 @@ import './avatar.css'
 import './product.css'
 import './estimate.css'
 import './jira.css'
+import './design-system.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><DesktopApp /></React.StrictMode>)

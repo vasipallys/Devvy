@@ -1,4 +1,4 @@
-import type { Attachment, Conversation, Message, Mode, SmartCodeRequest } from './types'
+import type { Attachment, Conversation, Message, Mode, SmartCodeRequest, SystemStatus } from './types'
 
 export const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
 
@@ -41,6 +41,7 @@ export async function consumeSSE(
 }
 
 export const api = {
+  systemStatus: () => json<SystemStatus>('/api/system/status'),
   conversations: () => json<Conversation[]>('/api/conversations'),
   create: () => json<Conversation>('/api/conversations', { method: 'POST' }),
   messages: (id: string) => json<Message[]>(`/api/conversations/${id}/messages`),
