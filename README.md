@@ -1,0 +1,299 @@
+# Gemma Studio
+
+Gemma Studio is a local-first desktop AI workspace built around one shared, lazily loaded
+Gemma 3 1B runtime. It combines four workspaces in a single Electron application:
+
+- **Chat** - private conversation, coding assistance, document analysis, web research, and
+  optional local image generation.
+- **Talk** - typed or microphone input, streamed responses, offline speech-to-text and
+  text-to-speech, plus optional visual explanations.
+- **Smart Code** - repository-aware generation, modification, and review with diff preview,
+  structural checks, explicit approval, atomic writes, backups, and run evidence.
+- **Estimate Code** - evidence-led modified-Fibonacci estimation from manual stories,
+  CSV/XLSX batches, or Jira, including a 12-factor scorecard, fixed anchors, hidden work,
+  risks, and spike/split guidance.
+
+The default profile is designed for CPU laptops. Model inference, chat history, uploaded
+documents, generated media, code previews, and estimation all remain on the machine. Network
+access occurs only for model/package downloads, explicit Research requests, Google Fonts in the
+current UI, optional Jira operations, and optional Phoenix trace export.
+
+For the complete build contract, data models, API/event protocols, workflow rules, UI states,
+security controls, and acceptance criteria, see
+[`APPLICATION_SPEC.md`](APPLICATION_SPEC.md).
+
+## System requirements
+
+- Windows 10/11, macOS, or Linux
+- Python 3.11, 3.12, or 3.13 (64-bit)
+- Node.js 20 or newer
+- 8 GB RAM minimum; 16 GB recommended
+- About 6 GB of free disk for dependencies, model cache, and application data
+- A Hugging Face account that has accepted the Gemma license
+
+CPU inference is functional but can take time to prefill and then generate a few tokens per
+second. The UI streams tokens and periodic status messages so long-running local inference does
+not appear frozen.
+
+## Quick start on Windows
+
+1. Accept the license for
+   [`google/gemma-3-1b-it`](https://huggingface.co/google/gemma-3-1b-it) and create a read token
+   from the same Hugging Face account.
+2. Run setup from the repository root:
+
+   ```powershell
+   .\scripts\setup.ps1
+   ```
+
+3. Add the token to the generated `.env` file:
+
+   ```dotenv
+   HF_TOKEN=hf_your_read_token
+   ```
+
+4. Start the API:
+
+   ```powershell
+   .\scripts\start-backend.ps1
+   ```
+
+5. In a second terminal, start Vite and Electron:
+
+   ```powershell
+   cd frontend
+   npm run dev
+   ```
+
+The API listens on `http://127.0.0.1:8765`, Swagger UI is available at
+`http://127.0.0.1:8765/docs`, and Vite uses `http://localhost:5173`. The first model-backed
+request downloads and loads Gemma, so it is slower than later requests.
+
+`scripts/setup.ps1` installs the core, development, and image extras. Talk's microphone/TTS and
+Manim video features are optional:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[voice]"
+.\.venv\Scripts\python.exe -m pip install -e ".[visual]"
+```
+
+Manim also requires its operating-system prerequisites and FFmpeg. Typed Talk messages continue
+to work when voice or visual dependencies are unavailable; the client receives a media warning
+instead of losing the text response.
+
+## Repository layout
+
+```text
+backend/
+  api.py                 FastAPI composition root and transport protocols
+  model.py               Shared lazy Gemma runtime and serialized generation
+  agent.py               Chat/code/document/research/image LangGraph agent
+  agent_graph.py         Talk companion LangGraph agent
+  smart_code.py          Safe preview/apply code workflow
+  estimate_code.py       Structured story-estimation workflow and Jira helpers
+  structured_output.py   Schema-constrained JSON generation and repair retry
+  db.py                  SQLite/SQLModel conversation persistence
+  tools.py               Document, research, and image tools
+  voice_engine.py        Lazy local Whisper STT and pyttsx3 TTS
+  animation_engine.py    Optional constrained Manim rendering
+  config.py              Environment-backed settings
+frontend/
+  src/                    React workspaces, API client, types, and styles
+  electron/               Sandboxed Electron main process and preload bridge
+scripts/                  Setup and local startup scripts
+tests/                    Backend API, routing, safety, and workflow tests
+```
+
+## Architecture
+
+```mermaid
+flowchart LR
+  UI["Electron + React"] -->|"HTTP / SSE"| API["FastAPI"]
+  UI -->|"WebSocket"| API
+  API --> CHAT["Chat agent"]
+  API --> TALK["Talk agent"]
+  API --> SMART["Smart Code service"]
+  API --> EST["Estimate Code service"]
+  CHAT --> MODEL["Shared local Gemma runtime"]
+  TALK --> MODEL
+  SMART --> MODEL
+  EST --> MODEL
+  CHAT --> DB["SQLite history"]
+  CHAT --> DOC["Local document extraction"]
+  CHAT --> WEB["Explicit web research"]
+  CHAT --> IMG["Optional local Diffusers"]
+  TALK --> MEDIA["Optional Whisper / TTS / Manim"]
+  API -.-> PHX["Optional local Phoenix"]
+```
+
+All four product workspaces reuse the same `GemmaRuntime`. Loading is protected by a process-wide
+thread lock and generation is protected by an async lock, so CPU-heavy model calls are serialized.
+Chat and Smart/Estimate responses use SSE; Talk uses a per-connection WebSocket conversation.
+
+## Workspace behavior
+
+### Chat
+
+Auto mode chooses chat, code, document, research, or image behavior from the current prompt and
+attachment context. Conversation and message records persist in SQLite. The backend normalizes
+adjacent messages with the same role before applying Gemma's chat template, preserving the strict
+user/assistant alternation required by the model.
+
+Uploads are limited to 25 MB each and allow PDF, DOCX, TXT, Markdown, Python, JavaScript,
+TypeScript, JSON, and CSV. Extracted prompt content is capped by `DOCUMENT_MAX_CHARS`.
+
+Research uses DDGS for discovery and fetches public HTTP(S) pages with HTTPX. Private, loopback,
+link-local, and reserved destinations are rejected before fetching. Results include source URLs
+for citation. Image generation uses an optional local Diffusers model and is serialized to limit
+memory pressure.
+
+### Talk
+
+Talk supports text and microphone turns over one WebSocket. Microphone audio is buffered for the
+turn, transcribed locally, and deleted after processing. The server streams text first, then emits
+optional image, audio, and video URLs. Conversation memory lasts only for the WebSocket connection
+and Reset clears it.
+
+The renderer automatically reconnects with capped exponential backoff, animates mouth movement
+from the generated audio waveform, and highlights approximate spoken words. Voice generation,
+speech recognition, and Manim rendering run outside the event loop.
+
+### Smart Code
+
+Smart Code separates planning from mutation:
+
+1. Validate the selected workspace and optional target allowlist.
+2. Scan supported source files while skipping VCS, virtual environments, dependencies, build
+   output, caches, and editor metadata.
+3. Rank files lexically against the objective and build a bounded repository context.
+4. Request schema-valid, whole-file edits or review findings from the shared model.
+5. Enforce path containment, approved targets, create/replace semantics, and structural checks.
+6. Return plan, findings, unified diffs, verification, and a 30-minute single-use preview token.
+7. Apply only after explicit confirmation, unchanged-file hash checks, and successful verification.
+
+Replaced files are copied to `data/smart-code/backups/<run-id>/`. Writes use a temporary file,
+flush, `fsync`, and atomic `os.replace`. Every successful run writes JSON evidence to
+`data/smart-code/runs/<run-id>.json`.
+
+Smart Code structural verification is intentionally lightweight: Python AST parsing, JSON
+parsing, or generic bracket balancing. It does not execute repository tests, linters, builds, or
+security scanners.
+
+### Estimate Code
+
+Estimate Code accepts one manual story, up to 100 uploaded rows, or up to 100 Jira issues. It
+requires exactly one Low/Medium/High score for each of these factors:
+
+`complexity`, `volume`, `uncertainty`, `react_scope`, `spring_scope`,
+`existing_code_scope`, `dependencies`, `nfrs`, `testing`, `compliance_audit`,
+`familiarity`, and `dod_overhead`.
+
+The validated result includes 2-3 true drivers, fixed-anchor comparison, a point value from
+`1, 2, 3, 5, 8, 13`, derivation, plain-language summary, layer/person-day effort, hidden tasks,
+risks, assumptions, and spike/split decisions. High uncertainty or 13 points always forces a spike;
+13 points always forces a split recommendation.
+
+Jira reads require `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`. Write-back is disabled by
+default, must also set `JIRA_WRITE_ENABLED=true`, validates the issue key and point value, and
+requires confirmation in both the UI request and API payload.
+
+## Configuration
+
+Copy `.env.example` to `.env`. The most commonly tuned values are:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HF_TOKEN` | empty | Access token for the gated Gemma repository |
+| `MODEL_ID` | `google/gemma-3-1b-it` | Hugging Face model |
+| `MODEL_DEVICE` | `cpu` | Transformers device |
+| `MODEL_DTYPE` | `float32` | Model dtype |
+| `MODEL_QUANTIZATION` | `none` | `none`, `4bit`, or `8bit` |
+| `MAX_NEW_TOKENS` | `1024` | Chat/Talk output ceiling |
+| `MODEL_CONTEXT_MESSAGES` | `12` | Recent turns sent to the model |
+| `CPU_THREADS` | `0` | `0` lets PyTorch choose |
+| `DOCUMENT_MAX_CHARS` | `24000` | Extracted attachment context cap |
+| `SMART_CODE_MAX_CONTEXT_CHARS` | `48000` | Repository evidence cap |
+| `SMART_CODE_MAX_OUTPUT_TOKENS` | `4096` | Smart Code structured-output ceiling |
+| `ESTIMATE_MAX_OUTPUT_TOKENS` | `3072` | Estimation structured-output ceiling |
+| `APP_HOST` / `APP_PORT` | `127.0.0.1` / `8765` | API bind address |
+| `APP_DATA_DIR` | `./data` | Database, uploads, media, backups, evidence |
+| `VITE_API_URL` | `http://127.0.0.1:8765` | Renderer API URL, set at frontend build time |
+| `PHOENIX_ENABLED` | `true` | Attempt local tracing without making it required |
+
+See [`.env.example`](.env.example) and the configuration catalog in
+[`APPLICATION_SPEC.md`](APPLICATION_SPEC.md) for every setting.
+
+For a laptop that becomes sluggish, set `CPU_THREADS` to roughly half the logical CPU count or
+reduce `MAX_NEW_TOKENS`. Do not enable bitsandbytes quantization on the default Windows CPU setup.
+
+## Data and network boundaries
+
+By default, `APP_DATA_DIR=./data` contains:
+
+```text
+data/
+  gemma_studio.db
+  uploads/
+  generated/
+  smart-code/backups/
+  smart-code/runs/
+```
+
+The current application is a trusted single-user desktop design. The API has no authentication,
+authorization, tenancy, rate limiting, or malware scanner and should remain bound to loopback.
+Before exposing it to a LAN or the internet, add authenticated principals, per-user authorization
+and storage isolation, request/rate limits, hardened egress policy, upload scanning, secret
+management, TLS, audit retention, and a production database.
+
+The current `electron-builder` targets package the compiled renderer and Electron shell only. They
+do not bundle, install, or supervise Python, the backend dependencies, optional media tools, or the
+model cache. A distributable one-click product needs a backend sidecar packaging and lifecycle
+strategy before release.
+
+## Development
+
+Run all required checks from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check backend tests
+.\.venv\Scripts\python.exe -m pytest
+cd frontend
+npm run lint
+npm run build
+```
+
+Useful focused command:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_api.py::test_health
+```
+
+Start optional local Phoenix tracing with:
+
+```powershell
+.\scripts\start-phoenix.ps1
+```
+
+The app probes the collector before enabling instrumentation and continues normally if Phoenix is
+not running.
+
+## Troubleshooting
+
+- **`403 Cannot access gated repo`** - accept the Gemma license using the same account as
+  `HF_TOKEN`, wait for access to propagate, then restart the backend.
+- **Model appears stuck** - first load includes download and CPU initialization. Watch backend
+  logs and wait for streamed status events; lower output/context limits for future requests.
+- **Smart Code finds no files** - select a directory containing a supported source extension, or
+  use Generate/Modify with an objective that creates the first source file. Review mode requires
+  at least one source file.
+- **Smart Code structured-output validation fails** - compact local models can still emit invalid
+  JSON after the automatic repair retry. Narrow the objective/targets, reduce requested changes,
+  and retry.
+- **Talk text works but audio/video does not** - install the relevant optional extras and system
+  prerequisites. The text response is preserved and media failures are reported separately.
+- **Jira is unavailable** - verify all three Jira credentials and the base URL. Write-back also
+  requires `JIRA_WRITE_ENABLED=true` and a valid story-points field ID.
+
+## License
+
+No project license file is currently included. Add an explicit license before redistribution.

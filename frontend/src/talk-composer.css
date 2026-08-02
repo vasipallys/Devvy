@@ -1,0 +1,31 @@
+.talk-main { padding-bottom: 145px; }
+.talk-composer { position:absolute;z-index:5;bottom:14px;left:50%;transform:translateX(-50%);width:min(810px,calc(100% - 32px));background:#141918;border:1px solid #303835;border-radius:17px;padding:12px 13px 8px;box-shadow:0 18px 50px rgba(0,0,0,.42) }
+.talk-composer:focus-within { border-color:#4a584d }
+.talk-composer textarea { display:block;width:100%;max-height:110px;resize:none;background:transparent;border:0;outline:0;color:#e7ebe8;padding:2px 5px 11px;font-size:13px }
+.talk-composer textarea:disabled { opacity:.55 }
+.talk-composer-actions { display:flex;align-items:center;gap:4px }
+.talk-tool { width:31px;height:31px;border-radius:8px;background:transparent;color:#8c9690;display:grid;place-items:center }
+.talk-tool:hover:not(:disabled) { background:#252b28;color:#e8ece9 }
+.talk-tool:disabled { opacity:.35 }
+.talk-modes { display:flex;gap:2px }
+.talk-modes button { height:29px;display:flex;align-items:center;gap:5px;padding:0 8px;border-radius:7px;background:transparent;color:#75807a;font-size:10px }
+.talk-modes button:hover,.talk-modes button.selected { background:#252c28;color:#bceba3 }
+.talk-grow { flex:1 }
+.talk-send { width:33px;height:33px;border-radius:9px;background:#d9ffbf;color:#172013;display:grid;place-items:center }
+.talk-send:disabled { background:#303633;color:#66706a;cursor:default }
+.talk-composer>small { display:block;text-align:center;color:#515b55;font-size:8px;margin-top:7px }
+.talk-attachments { display:flex;gap:6px;overflow:auto;padding:0 2px 8px }
+.talk-attachments>span { display:flex;align-items:center;gap:5px;max-width:230px;padding:6px 8px;border:1px solid #303935;border-radius:7px;color:#aeb8b2;font-size:9px;white-space:nowrap }
+.talk-attachments>span button { padding:0;background:transparent;color:#7f8983;display:grid }
+.talk-image { border:1px solid #2c352f;background:#111513;border-radius:14px;overflow:hidden }
+.talk-image>div { display:flex;align-items:center;gap:7px;padding:10px 13px;font-size:10px;color:#a5afa9 }
+.talk-image img { display:block;width:100%;max-height:300px;object-fit:contain;background:#090b0a }
+@media(max-width:780px) {
+  .talk-main { padding:15px 18px 165px }
+  .talk-modes button span { display:none }
+  .talk-modes button { padding:0 6px }
+}
+@media(max-width:480px) {
+  .talk-modes button:not(.selected) { display:none }
+  .talk-composer { width:calc(100% - 18px) }
+}
