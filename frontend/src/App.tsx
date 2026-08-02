@@ -102,7 +102,7 @@ export function App({ onHome }: { onHome?: () => void }) {
   const filtered = conversations.filter(x => x.title.toLowerCase().includes(query.toLowerCase()))
   return <div className="shell">
     <aside className={sidebar ? 'sidebar' : 'sidebar closed'}>
-      <div className="brand"><div className="brand-mark"><Sparkles size={18}/></div><span>Gemma Studio</span><button className="icon" onClick={() => setSidebar(false)}><X size={18}/></button></div>
+      <div className="brand"><div className="brand-mark"><Sparkles size={18}/></div><span>Devvy</span><button className="icon" onClick={() => setSidebar(false)}><X size={18}/></button></div>
       {onHome && <button className="home-nav" onClick={onHome}><Home size={17}/> Home</button>}
       <button className="new-chat" onClick={createChat}><Plus size={17}/> New chat</button>
       <div className="search"><Search size={15}/><input aria-label="Search conversations" placeholder="Search conversations" value={query} onChange={e => setQuery(e.target.value)}/></div>
@@ -112,27 +112,27 @@ export function App({ onHome }: { onHome?: () => void }) {
     <main>
       <header><button className="icon" aria-label="Toggle navigation" onClick={() => setSidebar(!sidebar)}><Menu size={19}/></button>{onHome && <button className="icon" title="Home" onClick={onHome}><Home size={18}/></button>}<div className="workspace-title"><b>Chat</b><span>Grounded local assistant</span></div><div className="header-spacer"/><SystemStatusChip/></header>
       <section className="conversation">
-        {!messages.length ? <div className="welcome"><div className="orb"><Sparkles size={31}/></div><h1>What can I help you build?</h1><p>Chat privately with Gemma, write production code, research the web, analyze documents, or generate images.</p><div className="suggestions">{[
+        {!messages.length ? <div className="welcome"><div className="orb"><Sparkles size={31}/></div><h1>What can I help you build?</h1><p>Chat privately with Devvy, write production code, research the web, analyze documents, or generate images.</p><div className="suggestions">{[
           ['Build an API', 'Create a FastAPI service with authentication', Code2], ['Analyze a document', 'Summarize and extract key findings', FileText],
           ['Research a topic', 'Find and synthesize current sources', Globe2], ['Create an image', 'Generate a polished visual concept', Image]
         ].map(([title, desc, Icon]: any) => <button key={title} onClick={() => setInput(desc)}><Icon size={19}/><div><b>{title}</b><span>{desc}</span></div></button>)}</div></div>
         : <div className="messages">{messages.map(message => <article key={message.id} className={message.role}>
           <div className="avatar">{message.role === 'user' ? 'You' : <Sparkles size={17}/>}</div><div className="message-body">
-            <div className="message-name">{message.role === 'user' ? 'You' : 'Gemma'}</div>
+            <div className="message-name">{message.role === 'user' ? 'You' : 'Devvy'}</div>
             {message.attachments?.map(a => <div className="file-chip" key={a.id}><FileText size={15}/>{a.name}</div>)}
             <div className="markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content || (sending ? 'Thinking…' : '')) }} />
           </div></article>)}<div ref={endRef}/></div>}
       </section>
       <footer>{error && <div className="error"><span>{error}</span><button onClick={() => setError('')}><X size={14}/></button></div>}
         {attachments.length > 0 && <div className="attachment-row">{attachments.map(a => <span key={a.id}><FileText size={14}/>{a.name}<button onClick={() => setAttachments(x => x.filter(y => y.id !== a.id))}><X size={13}/></button></span>)}</div>}
-        <div className="composer"><textarea aria-label="Message Gemma" value={input} onChange={e => setInput(e.target.value)} placeholder="Message Gemma…" rows={1} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}/>
+        <div className="composer"><textarea aria-label="Message Devvy" value={input} onChange={e => setInput(e.target.value)} placeholder="Message Devvy…" rows={1} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}/>
           <div className="composer-actions"><input ref={fileRef} hidden type="file" multiple accept=".pdf,.docx,.txt,.md,.py,.js,.ts,.json,.csv" onChange={e => pickFiles(e.target.files)}/><button className="tool" title="Attach documents" onClick={() => fileRef.current?.click()}><Paperclip size={18}/></button>
             <div className="mode-picker">{modes.map(item => <button key={item.id} className={mode === item.id ? 'selected' : ''} onClick={() => setMode(item.id)}><item.icon size={15}/><span>{item.label}</span></button>)}</div><div className="grow"/>
             {sending ? <button className="send" onClick={() => abortRef.current?.abort()}><Square size={14}/></button> : <button className="send" disabled={!input.trim()} onClick={send}><Send size={17}/></button>}
-          </div></div><small className="disclaimer">Gemma runs locally and can make mistakes. Verify important information.</small>
+          </div></div><small className="disclaimer">Devvy runs locally and can make mistakes. Verify important information.</small>
       </footer>
     </main>
     <EvidencePanel events={runEvents}/>
-    <div className="sr-only" aria-live="polite">{sending ? 'Gemma is working' : error || (runEvents.length ? runEvents[runEvents.length - 1].label : '')}</div>
+    <div className="sr-only" aria-live="polite">{sending ? 'Devvy is working' : error || (runEvents.length ? runEvents[runEvents.length - 1].label : '')}</div>
   </div>
 }

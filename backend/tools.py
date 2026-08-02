@@ -91,7 +91,7 @@ async def _validate_public_url(url: str) -> None:
 async def fetch_page(url: str) -> str:
     current = url
     async with httpx.AsyncClient(
-        timeout=20, follow_redirects=False, headers={"User-Agent": "GemmaStudio/0.1"}
+        timeout=20, follow_redirects=False, headers={"User-Agent": "Devvy/0.1"}
     ) as client:
         for _ in range(6):
             await _validate_public_url(current)

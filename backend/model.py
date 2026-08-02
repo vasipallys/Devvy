@@ -77,7 +77,7 @@ class GemmaRuntime:
     ) -> str:
         from opentelemetry import trace
 
-        tracer = trace.get_tracer("gemma-studio.model")
+        tracer = trace.get_tracer("devvy.model")
         with tracer.start_as_current_span("gemma.generate") as span:
             span.set_attribute("gen_ai.system", "huggingface")
             span.set_attribute("gen_ai.request.model", self.settings.model_id)

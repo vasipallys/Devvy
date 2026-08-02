@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    app_name: str = "Gemma Studio"
+    app_name: str = "Devvy — Evidence-Based Development"
     app_host: str = "127.0.0.1"
     app_port: int = 8765
     app_data_dir: Path = Path("./data")

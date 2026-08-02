@@ -1,4 +1,4 @@
-"""Gemma Studio backend."""
+"""Devvy evidence-based development backend."""
 
 import warnings
 

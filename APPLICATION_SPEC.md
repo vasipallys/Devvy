@@ -1,14 +1,14 @@
-# Gemma Studio Application Specification
+# Devvy — Evidence-Based Development Application Specification
 
 **Document status:** As-built implementation and reproducible rebuild specification  
 **Application version:** 0.1.0  
 **Last verified against source:** 2026-08-02  
 **Repository:** `Devvy`  
-**Product name:** Gemma Studio
+**Product name:** Devvy — Evidence-Based Development
 
 ## 1. Purpose
 
-This document is the implementation-grade source of truth for Gemma Studio. It describes the
+This document is the implementation-grade source of truth for Devvy. It describes the
 existing application's product behavior, system architecture, module responsibilities, data
 models, transport protocols, safety rules, configuration, UI states, failure behavior, and
 acceptance criteria in enough detail to rebuild the project without access to its original source.
@@ -28,7 +28,7 @@ both are deliberately reconciled.
 
 ## 2. Product definition
 
-Gemma Studio is a trusted, single-user, local-first desktop AI workspace. One Electron window
+Devvy is a trusted, single-user, evidence-based local desktop AI workspace. One Electron window
 hosts four React workspaces backed by one FastAPI process and one shared local Gemma language
 model runtime.
 
@@ -202,7 +202,7 @@ upload/generated directories under `APP_DATA_DIR`.
 
 | Environment variable | Type/default | Contract |
 | --- | --- | --- |
-| `APP_NAME` | string / `Gemma Studio` | FastAPI title and service identity |
+| `APP_NAME` | string / `Devvy — Evidence-Based Development` | FastAPI title and identity |
 | `APP_HOST` | string / `127.0.0.1` | API bind host; MUST remain loopback in trusted-local mode |
 | `APP_PORT` | integer / `8765` | API port |
 | `APP_DATA_DIR` | path / `./data` | Root for DB, uploads, generated media, and Smart Code records |
@@ -894,7 +894,7 @@ breakpoints collapse grids and hide nonessential mode labels without a font-netw
 
 Home MUST display:
 
-- Gemma Studio brand and `Private & local` indicator;
+- Devvy brand, `Evidence-based development` tagline, and `Private & local` indicator;
 - one card each for Chat, Talk, Smart Code, and Estimate Code;
 - concise outcome description and keyboard/mouse-accessible buttons;
 - footer explaining local execution.

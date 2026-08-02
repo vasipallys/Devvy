@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this is
 
-Gemma Studio: a local-first desktop AI workspace. A FastAPI backend runs Gemma 3 1B locally on CPU via transformers; an Electron + React frontend talks to it over HTTP/SSE (Chat) and WebSocket (Talk voice mode). The Python package is `backend/`, built with hatchling (`pyproject.toml`).
+Devvy — Evidence-Based Development: a local-first desktop AI workspace. A FastAPI backend runs Gemma 3 1B locally on CPU via transformers; an Electron + React frontend talks to it over HTTP/SSE (Chat) and WebSocket (Talk voice mode). The Python package is `backend/`, built with hatchling (`pyproject.toml`).
 
 ## Commands (Windows / PowerShell)
 

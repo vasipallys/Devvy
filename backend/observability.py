@@ -26,7 +26,7 @@ def configure_observability(settings: Settings, app=None) -> None:
         from phoenix.otel import register
 
         provider = register(
-            project_name="gemma-studio",
+            project_name="devvy",
             endpoint=settings.phoenix_collector_endpoint,
             batch=True,
             auto_instrument=True,

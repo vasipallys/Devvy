@@ -98,7 +98,7 @@ export function AngelAvatar({ state, mouthOpen, mouthWide }: { state: AvatarStat
   const mouth = mouthGeometry(talking ? mouthOpen : 0, talking ? mouthWide : (state === 'thinking' ? .2 : .35), face.smile)
 
   return <div className={`angel-avatar state-${state}`} style={{ '--energy': talking ? mouthOpen : 0 } as React.CSSProperties}
-    role="img" aria-label="Gemma, your robotic angel companion">
+    role="img" aria-label="Devvy, your robotic angel companion">
     <svg viewBox="0 0 240 300" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <radialGradient id="angelSkin" cx="50%" cy="36%" r="72%">

@@ -59,7 +59,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="Gemma Studio API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title=f"{settings.app_name} API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -365,7 +365,7 @@ async def talk_socket(websocket: WebSocket):
         )
         await send(
             "agent_event",
-            **active_run.event("generate", "running", "Gemma is composing a grounded response"),
+            **active_run.event("generate", "running", "Devvy is composing a grounded response"),
         )
         token_queue: asyncio.Queue[str] = asyncio.Queue()
         if mode == "talk":
@@ -544,7 +544,7 @@ async def smart_code_preview(payload: SmartCodeRequest):
                         "status",
                         {
                             "stage": "generate",
-                            "message": f"Gemma is planning and coding locally ({elapsed}s)",
+                            "message": f"Devvy is planning and coding locally ({elapsed}s)",
                         },
                     )
             result = await task
@@ -629,7 +629,7 @@ async def estimate_events(story):
                 elapsed += 2
                 yield sse(
                     "status",
-                    {"message": f"Gemma is building the evidence-led estimate ({elapsed}s)"},
+                    {"message": f"Devvy is building the evidence-led estimate ({elapsed}s)"},
                 )
         result = await task
         stages = [

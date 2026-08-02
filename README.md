@@ -1,6 +1,6 @@
-# Gemma Studio
+# Devvy — Evidence-Based Development
 
-Gemma Studio is a local-first desktop AI workspace built around one shared, lazily loaded
+Devvy is an evidence-based, local-first desktop AI workspace built around one shared, lazily loaded
 Gemma 3 1B runtime. It combines four workspaces in a single Electron application:
 
 - **Chat** - private conversation, coding assistance, document analysis, web research, and
@@ -132,7 +132,7 @@ Chat and Smart/Estimate responses use SSE; Talk uses a per-connection WebSocket 
 
 ## Agent engineering and evidence
 
-Gemma Studio uses a bounded single-agent harness for open-ended work and deterministic code for
+Devvy uses a bounded single-agent harness for open-ended work and deterministic code for
 validation, persistence, and side effects:
 
 - **Context engineering:** evidence sources are priority ordered, character-budgeted, labeled by

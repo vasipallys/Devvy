@@ -6,7 +6,7 @@ type Props = { onChat: () => void; onTalk: () => void; onSmartCode: () => void; 
 export function HomeScreen({ onChat, onTalk, onSmartCode, onEstimateCode }: Props) {
   return <div className="home-screen">
     <div className="home-glow" />
-    <header className="home-header"><div className="brand-lockup"><div className="brand-mark"><Sparkles size={18}/></div><span><b>Gemma Studio</b><small>Local agent workspace</small></span></div><SystemStatusChip/></header>
+    <header className="home-header"><div className="brand-lockup"><div className="brand-mark"><Sparkles size={18}/></div><span><b>Devvy</b><small>Evidence-based development</small></span></div><SystemStatusChip/></header>
     <main className="home-content">
       <div className="home-kicker"><ShieldCheck/> PRIVATE BY ARCHITECTURE</div>
       <h1>One local intelligence.<br/><em>Four focused workflows.</em></h1>
@@ -19,6 +19,6 @@ export function HomeScreen({ onChat, onTalk, onSmartCode, onEstimateCode }: Prop
       </div>
       <section className="trust-strip" aria-label="Privacy and evidence"><div><LockKeyhole/><span><b>Private by default</b><small>Inference and work stay on this machine</small></span></div><div><Database/><span><b>Evidence, not mystery</b><small>See context, checks, loops, and gates</small></span></div><div><ShieldCheck/><span><b>You stay in control</b><small>External and write actions are explicit</small></span></div></section>
     </main>
-    <footer className="home-footer">Gemma can make mistakes. Evidence helps you decide what to trust.</footer>
+    <footer className="home-footer">Devvy can make mistakes. Evidence helps you decide what to trust.</footer>
   </div>
 }

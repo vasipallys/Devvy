@@ -1,5 +1,5 @@
 {
-  "name": "gemma-studio-desktop",
+  "name": "devvy-desktop",
   "version": "0.1.0",
   "private": true,
   "main": "electron/main.cjs",
@@ -32,8 +32,8 @@
     "wait-on": "^8.0.1"
   },
   "build": {
-    "appId": "ai.gemma.studio",
-    "productName": "Gemma Studio",
+    "appId": "ai.devvy.desktop",
+    "productName": "Devvy - Evidence-Based Development",
     "files": [
       "dist/**/*",
       "electron/**/*",
