@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle, Anchor, ArrowLeft, BrainCircuit, Check, ChevronDown, CircleSlash, Download,
-  FileSpreadsheet, FlaskConical, GitBranch, Keyboard, Layers, LoaderCircle, PanelsTopLeft, Plus,
-  ShieldCheck, Sigma, Target, Trash2, X,
+  FileSpreadsheet, FlaskConical, GitBranch, Keyboard, Layers, Lightbulb, LoaderCircle,
+  PanelsTopLeft, Plus, ShieldCheck, Sigma, Target, TrendingDown, Trash2, X,
 } from 'lucide-react'
 import { api } from './api'
 import { EvidencePanel } from './EvidencePanel'
@@ -44,8 +44,8 @@ const emptyStory: Story = {
   title: '', user_story: '', acceptance_criteria: [''], technical_breakdown: '', source: 'manual',
 }
 
-function Detail({ title, count, children }: { title: string; count?: number; children: React.ReactNode }) {
-  return <details className="estimate-detail">
+function Detail({ title, count, open, children }: { title: string; count?: number; open?: boolean; children: React.ReactNode }) {
+  return <details className="estimate-detail" open={open}>
     <summary><span>{title}{count !== undefined && <em>{count}</em>}</span><ChevronDown size={17} /></summary>
     <div>{children}</div>
   </details>
@@ -205,6 +205,77 @@ function GateList({ checks }: { checks: PolicyCheck[] }) {
       <code>{check.reference}</code>
     </li>)}
   </ul>
+}
+
+function DetailedReasoningPanel({ result }: { result: EstimateResult }) {
+  const reasoning = result.detailed_reasoning
+  return <div className="reasoning-panel">
+    <div className="reasoning-conclusion"><BrainCircuit size={18} /><p>{reasoning.conclusion}</p></div>
+    <div className="reasoning-formula" aria-label="Estimation formula">
+      <span><small>Factor subtotal</small><b>{result.calculation.base_sum}</b></span>
+      <i>+</i><span><small>Base rules</small><b>{result.calculation.base_adjustment_total}</b></span>
+      <i>+</i><span><small>Stack rules</small><b>{result.calculation.stack_adjustment_total}</b></span>
+      <i>=</i><span><small>Adjusted score</small><b>{result.calculation.adjusted_score}</b></span>
+      <i>→</i><span className="reasoning-points"><small>Fibonacci</small><b>{result.points}</b></span>
+    </div>
+    <p className="reasoning-formula-text">{reasoning.formula}</p>
+
+    <h4>Where the base score comes from</h4>
+    <div className="reasoning-groups">{reasoning.group_contributions.map(group =>
+      <div key={group.group} className={`reasoning-group group-${group.group}`}>
+        <span>{group.label}</span><b>{group.subtotal}<small> / {group.maximum}</small></b>
+        <em>{group.factor_count} factors</em>
+      </div>)}</div>
+
+    <h4>Strongest evidence contributors</h4>
+    <ol className="contributor-list">{reasoning.top_contributors.map(item =>
+      <li key={item.factor}>
+        <span className={`factor-score s${item.score}`}>{item.score}</span>
+        <div><b>{item.label}</b><small>{item.reason}</small></div>
+        <em>{item.provenance === 'model' ? 'model scored' : 'inferred'}</em>
+      </li>)}</ol>
+
+    <div className="reasoning-columns">
+      <div><h4>Adjustments that changed the result</h4>
+        {reasoning.applied_adjustments.length > 0
+          ? <ul className="reason-list">{reasoning.applied_adjustments.map(step =>
+              <li key={step.rule}><b>+{step.delta}</b><span>{step.label}</span><code>{step.reference}</code></li>)}</ul>
+          : <p className="empty-reason">No adjustment rule fired; the result comes directly from the factor subtotal.</p>}
+      </div>
+      <div><h4>Decision path</h4>
+        <ul className="reason-list">{reasoning.gate_path.map(check =>
+          <li key={check.rule} className={check.passed ? 'passed' : 'failed'}>
+            <b>{check.passed ? 'Pass' : 'Stop'}</b><span>{check.detail}</span><code>{check.reference}</code>
+          </li>)}</ul>
+      </div>
+    </div>
+
+    <div className="sensitivity-callout"><TrendingDown size={18} /><div>
+      <b>Lower-band sensitivity</b><p>{reasoning.band_sensitivity.explanation}</p>
+    </div></div>
+    <div className="sensitivity-grid">{reasoning.factor_sensitivity.map(item =>
+      <div key={item.factor} className={item.changes_outcome ? 'changes' : ''}>
+        <b>{item.label}</b>
+        <span>{item.current_score} → {item.trial_score}</span>
+        <small>Adjusted {item.adjusted_score} · {item.points} points · {item.recommendation.replaceAll('_', ' ')}</small>
+        {item.changes_outcome && <em>Changes outcome</em>}
+      </div>)}</div>
+    <p className="confidence-basis"><ShieldCheck size={15} /><span><b>Confidence basis:</b> {reasoning.confidence_basis}</span></p>
+  </div>
+}
+
+function SuggestionsPanel({ result }: { result: EstimateResult }) {
+  return <section className="suggestions-panel">
+    <header><Lightbulb size={19} /><div><b>Recommended next actions</b><small>Prioritized from the scorecard and failed gates—not generated point arithmetic</small></div><span>{result.suggestions.length}</span></header>
+    <div className="suggestion-grid">{result.suggestions.map(item =>
+      <article key={item.id} className={`suggestion suggestion-${item.priority}`}>
+        <div className="suggestion-meta"><span>{item.priority}</span><em>{item.category}</em></div>
+        <h3>{item.title}</h3>
+        <p>{item.action}</p>
+        <dl><div><dt>Why now</dt><dd>{item.why}</dd></div><div><dt>Expected outcome</dt><dd>{item.expected_outcome}</dd></div></dl>
+        <details><summary>Evidence used</summary><ul>{item.evidence.map(evidence => <li key={evidence}>{evidence}</li>)}</ul></details>
+      </article>)}</div>
+  </section>
 }
 
 export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
@@ -479,6 +550,13 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
           {config?.jira_write_enabled && result.story.source === 'jira' &&
             <button className="jira-write" onClick={writePoints}>Write {result.points} to Jira</button>}
         </div>
+
+        <Detail title="Detailed estimation reasoning" open>
+          <p className="detail-lede"><BrainCircuit size={17} />Replayable rationale from story evidence and deterministic framework rules. Private chain-of-thought is neither requested nor shown.</p>
+          <DetailedReasoningPanel result={result} />
+        </Detail>
+
+        <SuggestionsPanel result={result} />
 
         <Detail title="The calculation, step by step">
           <p className="detail-lede"><Sigma size={17} />{result.evidence.determinism}</p>

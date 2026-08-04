@@ -139,6 +139,58 @@ export interface RiskFlag {
   detail: string
 }
 
+export interface DetailedReasoning {
+  conclusion: string
+  formula: string
+  group_contributions: {
+    group: 'scope' | 'delivery' | 'assurance' | 'risk'
+    label: string
+    subtotal: number
+    factor_count: number
+    maximum: number
+  }[]
+  top_contributors: {
+    factor: string
+    label: string
+    group: 'scope' | 'delivery' | 'assurance' | 'risk'
+    score: Level
+    reason: string
+    provenance: 'model' | 'heuristic'
+  }[]
+  applied_adjustments: CalculationStep[]
+  gate_path: PolicyCheck[]
+  confidence_basis: string
+  band_sensitivity: {
+    current_points: number
+    target_points: number | null
+    target_adjusted_score: number | null
+    reduction_required: number
+    explanation: string
+  }
+  factor_sensitivity: {
+    factor: string
+    label: string
+    current_score: Level
+    trial_score: Level
+    adjusted_score: number
+    points: number
+    recommendation: Recommendation
+    changes_outcome: boolean
+  }[]
+}
+
+export interface EstimationSuggestion {
+  id: string
+  priority: 'critical' | 'high' | 'medium'
+  category: 'decision' | 'clarity' | 'scope' | 'risk' | 'assurance' | 'delivery' | 'stack'
+  title: string
+  action: string
+  why: string
+  evidence: string[]
+  expected_outcome: string
+  related_factors: string[]
+}
+
 export interface EstimateConfig {
   model: string
   jira_configured: boolean
@@ -185,6 +237,8 @@ export interface EstimateResult extends Record<string, unknown> {
   confidence_detail: string
   recommendation: Recommendation
   recommendation_detail: string
+  detailed_reasoning: DetailedReasoning
+  suggestions: EstimationSuggestion[]
   risk_flags: RiskFlag[]
   anchor_comparison: string
   anchors_considered: { points: number; title: string; stack: string }[]

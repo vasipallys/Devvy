@@ -51,6 +51,20 @@ button:disabled{cursor:not-allowed}
 .evidence-list span{padding:2px 6px;border-radius:9px;background:#1b211d;color:#b6c0b8}
 .evidence-panel.compact{width:auto;max-width:1180px;margin:12px auto;border:1px solid #2b332e;border-radius:12px;overflow:visible}.evidence-panel.compact .evidence-heading{height:48px;position:static;border-radius:12px 12px 0 0}.evidence-panel.compact .evidence-timeline{display:flex;gap:7px;overflow:auto}.evidence-panel.compact .evidence-timeline details{min-width:220px;max-width:310px;margin:0}.evidence-panel.compact .evidence-empty{min-height:75px;flex-direction:row;gap:10px;text-align:left}.evidence-panel.compact .evidence-empty p{max-width:680px}
 
+/* Crash screen: a render error must never present as an empty black window. */
+.crash-screen{position:fixed;inset:0;z-index:99;display:grid;place-items:center;padding:24px;background:radial-gradient(700px 420px at 50% 30%,#241b1a 0,#0b0e0d 62%);overflow:auto}
+.crash-card{width:min(620px,100%);border:1px solid #4a332f;border-radius:var(--radius-l);background:#141a17;padding:24px;color:var(--md-on-surface)}
+.crash-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}.crash-head svg{width:21px;color:var(--md-error)}.crash-head b{font-size:15px}
+.crash-card>p{font-size:12px;line-height:1.65;color:#aab4ad;margin:0 0 14px}
+.crash-message{margin:0 0 12px;padding:11px 13px;border-radius:var(--radius-s);background:#1e1513;border:1px solid #4a332f;color:#ffb4ab;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+.crash-detail summary{cursor:pointer;font-size:11px;color:#9fb0a6;padding:6px 0}
+.crash-detail pre{max-height:220px;overflow:auto;margin:6px 0 0;padding:10px;border-radius:var(--radius-s);background:#101411;border:1px solid #2b332e;color:#93a09a;font-size:10px;line-height:1.6}
+.crash-actions{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 12px}
+.crash-actions button{display:flex;align-items:center;gap:6px;padding:0 14px;border:1px solid #3d4741;border-radius:var(--radius-s);background:#1b221e;color:var(--md-on-surface);font-size:11px}
+.crash-actions button:first-child{background:var(--md-primary);border-color:var(--md-primary);color:var(--md-on-primary)}
+.crash-actions button:hover{border-color:#6f8a68}
+.crash-card>small{font-size:10px;color:#78837c}
+
 /* Core workspace improvements */
 .shell>.sidebar{width:248px}.shell>main>header{height:64px;background:rgba(11,14,13,.86);backdrop-filter:blur(16px)}
 .new-chat{min-height:42px}.history-item{min-height:40px;padding:0;gap:0}.history-open{height:40px;min-height:40px;min-width:0;flex:1;display:flex;align-items:center;gap:9px;padding:0 9px;background:transparent;color:inherit;text-align:left}.history-open span{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.history-delete{width:34px;min-width:34px;min-height:34px;padding:0;display:grid;place-items:center;background:transparent;color:#8e9992;opacity:0}.history-item:hover .history-delete,.history-delete:focus-visible{opacity:1}.history-delete:hover{color:#ffb4ab}.icon{min-height:36px;min-width:36px}.conversation{background:radial-gradient(700px 420px at 50% 0,rgba(31,47,34,.36),transparent 70%)}

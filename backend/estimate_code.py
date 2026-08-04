@@ -43,7 +43,9 @@ from backend.estimation_framework import (
     StackProfile,
     calculate,
     confidence,
+    detailed_reasoning,
     decide,
+    estimation_suggestions,
     policy_checks,
     risk_flags,
     spike_template,
@@ -447,6 +449,18 @@ def build_result(draft: EstimateDraft, story: Story, context_manifest: list[dict
     checks = policy_checks(scores, stack, calculation)
     recommendation, recommendation_detail = decide(checks, stack, calculation, scores)
     confidence_level, confidence_detail = confidence(scores, stack, calculation)
+    reasoning = detailed_reasoning(
+        scorecard,
+        stack,
+        calculation,
+        checks,
+        recommendation,
+        recommendation_detail,
+        confidence_detail,
+    )
+    suggestions = estimation_suggestions(
+        scorecard, stack, calculation, checks, recommendation, reasoning
+    )
     flags = risk_flags(scores, stack)
     anchors = stack.anchors()
     nearest = min(anchors, key=lambda anchor: abs(int(anchor["points"]) - calculation.points))
@@ -562,6 +576,8 @@ def build_result(draft: EstimateDraft, story: Story, context_manifest: list[dict
         "confidence_detail": confidence_detail,
         "recommendation": recommendation,
         "recommendation_detail": recommendation_detail,
+        "detailed_reasoning": reasoning.model_dump(),
+        "suggestions": [item.model_dump() for item in suggestions],
         "risk_flags": flags,
         "anchor_comparison": (
             f"Closest calibrated reference: \"{nearest['title']}\" "
@@ -854,6 +870,7 @@ class EstimateService:
                         "gates_failed": failed or "none",
                         "confidence": result["confidence"],
                         "risk_flags": len(result["risk_flags"]),
+                        "suggestions": len(result["suggestions"]),
                     },
                 }
             )

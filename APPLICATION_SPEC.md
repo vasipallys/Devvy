@@ -860,6 +860,29 @@ recommendation MUST carry a filled-in spike definition (§10 template).
 
 The model MUST be instructed not to invent unstated requirements.
 
+#### 13.5.1 Detailed reasoning and suggestions
+
+The result MUST include `detailed_reasoning`, produced entirely from the normalized scorecard and
+deterministic framework state. It is public decision rationale, not private model chain-of-thought:
+
+- `formula` reconciles factor subtotal + base adjustments + stack adjustments = adjusted score,
+  then names the Fibonacci band and point value;
+- four `group_contributions` (scope, delivery, assurance, risk) MUST sum to `base_sum`;
+- `top_contributors` carries factor score, evidence reason, and model/heuristic provenance;
+- `applied_adjustments` contains only rules that changed the arithmetic, with deltas and references;
+- `gate_path` records every decision gate in framework order;
+- `band_sensitivity` states the exact adjusted-score reduction required to reach the next lower
+  band, while warning that scope/risk must actually change;
+- `factor_sensitivity` recomputes the framework after reducing each leading factor by one level and
+  reports the resulting adjusted score, points, recommendation, and whether the outcome changes;
+- `confidence_basis` repeats the deterministic confidence evidence.
+
+The result MUST also include prioritized `suggestions`. Each suggestion carries a stable id,
+priority, category, action, rationale, evidence list, expected outcome, and related factors.
+Critical recommendations follow failed framework gates; elevated factors select deterministic
+action templates; inferred factors trigger human score confirmation; stack penalties and lower-band
+sensitivity produce explicit follow-up actions. Suggestions MUST NOT alter scores or points.
+
 ### 13.6 Structured loop
 
 The loop performs at most one repair. Its semantic gate requires the model to score at least 8 of
@@ -1051,6 +1074,10 @@ recommendation chip, point hero with confidence, the modified Fibonacci scale, J
 a conditional Jira write button.
 
 The result MUST include, as progressively disclosed sections:
+
+- **detailed estimation reasoning** — reconciled formula, factor-group contributions, leading
+  evidence, applied adjustments, gate path, lower-band and per-factor what-if sensitivity;
+- **recommended next actions** — prioritized, evidence-linked suggestions with expected outcomes;
 
 - **the calculation ledger** — every rule with its spec reference, whether it applied, its delta,
   and the running total, with the non-firing rules available behind a toggle;

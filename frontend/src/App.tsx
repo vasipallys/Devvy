@@ -70,7 +70,13 @@ export function App({ onHome }: { onHome?: () => void }) {
     if (activeId) api.messages(activeId).then(setMessages).catch(e => setError(e.message))
     else setMessages([])
   }, [activeId])
-  useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages])
+  // Block body, deliberately: a concise arrow would return whatever scrollIntoView yields,
+  // and React treats an effect's return value as its cleanup function. Anything non-callable
+  // there fails with "destroy is not a function" when the effect re-runs or unmounts — which
+  // is every streamed token here, since `messages` changes on each one.
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
   async function createChat() { const chat = await api.create(); setConversations(x => [chat, ...x]); setActiveId(chat.id); setMessages([]) }
   async function removeChat(id: string) { await api.remove(id); if (activeId === id) { setActiveId(undefined); setMessages([]) }; refresh() }

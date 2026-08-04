@@ -238,6 +238,13 @@ final recommendation are all computed in `backend/estimation_framework.py`. The 
 step-by-step ledger of every rule — **including the ones that did not fire** — with its spec
 reference, delta, and running total, so the arithmetic can be replayed by hand.
 
+Every result also includes detailed public reasoning: factor-group subtotals, the strongest
+evidence contributors, applied adjustments, the complete gate path, the exact reduction required
+to reach a lower Fibonacci band, and one-level factor sensitivity recomputed by the framework.
+Evidence-linked suggestions then turn failed gates, elevated factors, inferred scores, and stack
+penalties into prioritized planning actions. These are deterministic recommendations; they never
+change the scorecard or point value and never expose private model chain-of-thought.
+
 Factors the model declines to score are filled from story-text heuristics and labelled `inferred`;
 its own point guess, if offered, is reported beside the calculated one purely as a cross-check and
 never used. If the model cannot hold the contract across both loop attempts, the estimate degrades

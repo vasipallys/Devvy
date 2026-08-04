@@ -1,7 +1,7 @@
 import pytest
 
 from backend.config import Settings
-from backend.estimate_code import EstimateService, Story, parse_upload
+from backend.estimate_code import EstimateDraft, EstimateService, Story, build_result, parse_upload
 from backend.estimation_framework import StackProfile
 from backend.smart_code import (
     ProposedEdit,
@@ -68,6 +68,47 @@ def full_scorecard(**overrides: int) -> dict:
     }
 
 
+def test_estimate_explains_the_number_and_prioritizes_actions():
+    result = build_result(
+        EstimateDraft.model_validate(
+            {
+                "scores": full_scorecard(technical_complexity=5),
+                "rationale": "A novel implementation path is the primary size driver.",
+            }
+        ),
+        Story(
+            title="Implement a novel scheduling algorithm",
+            user_story="Schedule work fairly across competing queues.",
+            acceptance_criteria=["No queue can starve"],
+        ),
+        [],
+    )
+
+    reasoning = result["detailed_reasoning"]
+    assert sum(item["subtotal"] for item in reasoning["group_contributions"]) == result[
+        "calculation"
+    ]["base_sum"]
+    assert str(result["calculation"]["adjusted_score"]) in reasoning["formula"]
+    assert str(result["points"]) in reasoning["formula"]
+    assert reasoning["top_contributors"][0]["factor"] == "technical_complexity"
+    sensitivity = next(
+        item
+        for item in reasoning["factor_sensitivity"]
+        if item["factor"] == "technical_complexity"
+    )
+    assert sensitivity["current_score"] == 5
+    assert sensitivity["trial_score"] == 4
+    assert sensitivity["points"] == 5
+    assert sensitivity["changes_outcome"] is True
+
+    suggestion = next(
+        item for item in result["suggestions"] if item["id"] == "factor-technical_complexity"
+    )
+    assert suggestion["priority"] == "high"
+    assert suggestion["evidence"]
+    assert suggestion["related_factors"] == ["technical_complexity"]
+
+
 async def test_estimate_refuses_to_estimate_when_uncertainty_is_maximal(tmp_path, monkeypatch):
     """§10 — uncertainty 5 must escalate to a spike no matter what the model concluded."""
     from backend.estimate_code import EstimateDraft
@@ -106,6 +147,8 @@ async def test_estimate_refuses_to_estimate_when_uncertainty_is_maximal(tmp_path
     assert cross_check["model_points"] == 5
     assert cross_check["calculated_points"] == result["points"]
     assert cross_check["agreement"] in {"agrees", "diverges"}
+    assert result["suggestions"][0]["id"] == "decision-spike"
+    assert result["suggestions"][0]["priority"] == "critical"
 
 
 async def test_estimate_mixes_model_scores_with_heuristics_and_labels_the_difference(tmp_path):

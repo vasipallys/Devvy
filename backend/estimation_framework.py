@@ -392,6 +392,78 @@ class Calculation(BaseModel):
     steps: list[CalculationStep]
 
 
+class GroupContribution(BaseModel):
+    """Subtotal for one factor family; these subtotals reconcile to the base sum."""
+
+    group: Literal["scope", "delivery", "assurance", "risk"]
+    label: str
+    subtotal: int
+    factor_count: int
+    maximum: int
+
+
+class FactorContribution(BaseModel):
+    """One evidence-backed contributor to the estimate, ordered by materiality."""
+
+    factor: str
+    label: str
+    group: Literal["scope", "delivery", "assurance", "risk"]
+    score: Level
+    reason: str
+    provenance: Literal["model", "heuristic"]
+
+
+class BandSensitivity(BaseModel):
+    """What would have to change before the result enters the next lower point band."""
+
+    current_points: int
+    target_points: int | None
+    target_adjusted_score: int | None
+    reduction_required: int
+    explanation: str
+
+
+class FactorSensitivity(BaseModel):
+    """A deterministic one-level what-if, never a promise that the work is smaller."""
+
+    factor: str
+    label: str
+    current_score: Level
+    trial_score: Level
+    adjusted_score: int
+    points: int
+    recommendation: Recommendation
+    changes_outcome: bool
+
+
+class DetailedReasoning(BaseModel):
+    """Public decision rationale assembled from evidence and framework rules."""
+
+    conclusion: str
+    formula: str
+    group_contributions: list[GroupContribution]
+    top_contributors: list[FactorContribution]
+    applied_adjustments: list[CalculationStep]
+    gate_path: list[PolicyCheck]
+    confidence_basis: str
+    band_sensitivity: BandSensitivity
+    factor_sensitivity: list[FactorSensitivity]
+
+
+class EstimationSuggestion(BaseModel):
+    """A deterministic, evidence-linked next action for planning or delivery."""
+
+    id: str
+    priority: Literal["critical", "high", "medium"]
+    category: Literal["decision", "clarity", "scope", "risk", "assurance", "delivery", "stack"]
+    title: str
+    action: str
+    why: str
+    evidence: list[str]
+    expected_outcome: str
+    related_factors: list[str] = Field(default_factory=list)
+
+
 def _band(score: int) -> tuple[str, int]:
     """§9 — map an adjusted score onto the modified Fibonacci ladder."""
     if score <= 24:
@@ -699,6 +771,382 @@ def confidence(scores: dict[str, int], stack: StackProfile, calculation: Calcula
         "High",
         "High confidence: every factor scored 3 or below and no stack penalty applied.",
     )
+
+
+_GROUP_LABELS = {
+    "scope": "Scope surface",
+    "delivery": "Implementation delivery",
+    "assurance": "Quality and assurance",
+    "risk": "Risk and uncertainty",
+}
+
+_LOWER_BAND_TARGETS: dict[int, tuple[int, int]] = {
+    5: (3, 24),
+    8: (5, 34),
+    13: (8, 44),
+    21: (13, 54),
+    34: (21, 64),
+}
+
+
+def detailed_reasoning(
+    scorecard: list[FactorScore],
+    stack: StackProfile,
+    calculation: Calculation,
+    checks: list[PolicyCheck],
+    recommendation: Recommendation,
+    recommendation_detail: str,
+    confidence_detail: str,
+) -> DetailedReasoning:
+    """Build a replayable public rationale without asking for private model reasoning."""
+    scores = {item.factor: int(item.score) for item in scorecard}
+    groups = []
+    for group in ("scope", "delivery", "assurance", "risk"):
+        members = [item for item in scorecard if item.group == group]
+        groups.append(
+            GroupContribution(
+                group=group,
+                label=_GROUP_LABELS[group],
+                subtotal=sum(int(item.score) for item in members),
+                factor_count=len(members),
+                maximum=len(members) * 5,
+            )
+        )
+
+    ranked = sorted(scorecard, key=lambda item: (-item.score, item.number))
+    contributors = [
+        FactorContribution(
+            factor=item.factor,
+            label=item.label,
+            group=item.group,
+            score=item.score,
+            reason=item.reason,
+            provenance=item.provenance,
+        )
+        for item in ranked[:5]
+    ]
+    applied = [
+        step
+        for step in calculation.steps
+        if step.applied and step.delta > 0 and step.rule != "base_sum"
+    ]
+
+    lower_target = _LOWER_BAND_TARGETS.get(calculation.points)
+    if lower_target:
+        target_points, target_score = lower_target
+        reduction = max(0, calculation.adjusted_score - target_score)
+        band_sensitivity = BandSensitivity(
+            current_points=calculation.points,
+            target_points=target_points,
+            target_adjusted_score=target_score,
+            reduction_required=reduction,
+            explanation=(
+                f"The story would need at least {reduction} fewer adjusted-score unit(s) "
+                f"to enter the {target_points}-point band (score <= {target_score}). "
+                "That requires real scope or risk reduction, not relabelling the estimate."
+            ),
+        )
+    else:
+        band_sensitivity = BandSensitivity(
+            current_points=calculation.points,
+            target_points=None,
+            target_adjusted_score=None,
+            reduction_required=0,
+            explanation="This estimate is already in the framework's smallest point band.",
+        )
+
+    sensitivity = []
+    for item in [candidate for candidate in ranked if candidate.score > 1][:5]:
+        trial_scores = dict(scores)
+        trial_scores[item.factor] = int(item.score) - 1
+        trial_calculation = calculate(trial_scores, stack)
+        trial_checks = policy_checks(trial_scores, stack, trial_calculation)
+        trial_recommendation, _ = decide(
+            trial_checks, stack, trial_calculation, trial_scores
+        )
+        sensitivity.append(
+            FactorSensitivity(
+                factor=item.factor,
+                label=item.label,
+                current_score=item.score,
+                trial_score=int(item.score) - 1,
+                adjusted_score=trial_calculation.adjusted_score,
+                points=trial_calculation.points,
+                recommendation=trial_recommendation,
+                changes_outcome=(
+                    trial_calculation.points != calculation.points
+                    or trial_recommendation != recommendation
+                ),
+            )
+        )
+
+    formula = (
+        f"{calculation.base_sum} factor subtotal + "
+        f"{calculation.base_adjustment_total} base adjustments + "
+        f"{calculation.stack_adjustment_total} stack adjustments = "
+        f"{calculation.adjusted_score}; band {calculation.band} maps to "
+        f"{calculation.points} points."
+    )
+    return DetailedReasoning(
+        conclusion=(
+            f"The deterministic framework returns {calculation.points} points and the "
+            f"decision '{recommendation.replace('_', ' ')}'. {recommendation_detail}"
+        ),
+        formula=formula,
+        group_contributions=groups,
+        top_contributors=contributors,
+        applied_adjustments=applied,
+        gate_path=checks,
+        confidence_basis=confidence_detail,
+        band_sensitivity=band_sensitivity,
+        factor_sensitivity=sensitivity,
+    )
+
+
+_FACTOR_ACTIONS: dict[str, tuple[str, str, str, str]] = {
+    "requirements_clarity": (
+        "clarity",
+        "Tighten the acceptance contract",
+        "Run a short refinement session and add examples, exclusions, and failure behaviour.",
+        "A clearer boundary can lower uncertainty and prevent scope growth.",
+    ),
+    "technical_complexity": (
+        "delivery",
+        "Prove the difficult implementation path",
+        "Build a thin technical slice or ADR around the novel mechanism before commitment.",
+        "The team can replace architectural assumptions with observed constraints.",
+    ),
+    "integration_surface": (
+        "risk",
+        "Pin integration contracts",
+        "Confirm owners, schemas, timeouts, retries, test doubles, and failure semantics.",
+        "Stable contracts reduce coordination and integration surprises.",
+    ),
+    "data_model_change": (
+        "delivery",
+        "Design migration and rollback together",
+        "Document schema, backfill, compatibility window, verification, and rollback steps.",
+        "The data change becomes independently testable and reversible.",
+    ),
+    "frontend_effort": (
+        "scope",
+        "Split the UI into observable states",
+        "Define loading, empty, error, success, accessibility, and responsive states explicitly.",
+        "The frontend scope becomes reviewable and easier to split vertically.",
+    ),
+    "backend_effort": (
+        "scope",
+        "Separate orchestration from business rules",
+        "Identify API, domain, persistence, async, and failure-handling slices.",
+        "The backend work can be sequenced and tested in smaller units.",
+    ),
+    "test_effort": (
+        "assurance",
+        "Make the test matrix part of the story",
+        "List required unit, integration, contract, end-to-end, and regression coverage.",
+        "Assurance work stops being hidden effort.",
+    ),
+    "regulatory_compliance": (
+        "assurance",
+        "Book compliance review before implementation ends",
+        "Name the control owner, evidence artefacts, retention rules, and approval checkpoint.",
+        "Review-cycle latency becomes planned work rather than a late blocker.",
+    ),
+    "security_review": (
+        "assurance",
+        "Threat-model the changed trust boundary",
+        "Identify assets, actors, abuse cases, controls, secrets, and security test evidence.",
+        "Security assumptions become explicit and verifiable.",
+    ),
+    "observability_operations": (
+        "assurance",
+        "Define operational evidence",
+        "Specify logs, metrics, traces, alerts, ownership, and rollback signals before coding.",
+        "Production readiness becomes part of done.",
+    ),
+    "cross_team_dependency": (
+        "risk",
+        "Turn dependencies into named commitments",
+        "Record the owner, deliverable, due date, fallback, and escalation path for each dependency.",
+        "External waiting time and blockers become visible.",
+    ),
+    "reversibility": (
+        "risk",
+        "Create a safe reversal path",
+        "Add a feature flag, backward-compatible rollout, backup, or tested rollback procedure.",
+        "The blast radius and recovery cost are reduced.",
+    ),
+    "uncertainty": (
+        "risk",
+        "Buy the missing knowledge",
+        "Run a time-boxed spike with a decision record and re-estimation exit criterion.",
+        "Unknowns are resolved before they are converted into a delivery commitment.",
+    ),
+    "performance_scalability": (
+        "assurance",
+        "Set measurable performance boundaries",
+        "Define load, latency, throughput, data volume, and an executable performance test.",
+        "Performance scope becomes testable rather than subjective.",
+    ),
+    "documentation_knowledge_transfer": (
+        "delivery",
+        "Name the knowledge-transfer deliverables",
+        "Add the ADR, API documentation, runbook, support notes, or training session to done.",
+        "Documentation effort is visible and owned.",
+    ),
+    "dod_overhead": (
+        "delivery",
+        "Expose release and coordination work",
+        "List environment promotion, demo, release notes, approvals, rollout, and support handoff.",
+        "Definition-of-done work is estimated instead of absorbed silently.",
+    ),
+}
+
+
+def estimation_suggestions(
+    scorecard: list[FactorScore],
+    stack: StackProfile,
+    calculation: Calculation,
+    checks: list[PolicyCheck],
+    recommendation: Recommendation,
+    reasoning: DetailedReasoning,
+) -> list[EstimationSuggestion]:
+    """Return prioritized next actions linked to the exact evidence that triggered them."""
+    suggestions: list[EstimationSuggestion] = []
+
+    def add(
+        suggestion_id: str,
+        priority: Literal["critical", "high", "medium"],
+        category: Literal[
+            "decision", "clarity", "scope", "risk", "assurance", "delivery", "stack"
+        ],
+        title: str,
+        action: str,
+        why: str,
+        evidence: list[str],
+        expected_outcome: str,
+        factors: list[str] | None = None,
+    ) -> None:
+        if any(item.id == suggestion_id for item in suggestions):
+            return
+        suggestions.append(
+            EstimationSuggestion(
+                id=suggestion_id,
+                priority=priority,
+                category=category,
+                title=title,
+                action=action,
+                why=why,
+                evidence=evidence,
+                expected_outcome=expected_outcome,
+                related_factors=factors or [],
+            )
+        )
+
+    failed = [check for check in checks if not check.passed]
+    if recommendation == "epic_discovery":
+        add(
+            "decision-epic-discovery", "critical", "decision",
+            "Convert the migration into a discovery epic",
+            "Time-box discovery, map migration slices, then estimate each resulting story.",
+            "The framework classifies migrations as epics rather than committable stories.",
+            [check.detail for check in failed],
+            "Produces independently estimable delivery slices.",
+        )
+    elif recommendation == "upgrade_framework_first":
+        add(
+            "decision-framework-evaluation", "critical", "stack",
+            "Evaluate the framework before commitment",
+            "Run the framework evaluation spike or select a more established supported version.",
+            "Bleeding-edge maturity fails the framework gate.",
+            [check.detail for check in failed],
+            "Creates a supported technical baseline for re-estimation.",
+        )
+    elif recommendation == "spike_first":
+        add(
+            "decision-spike", "critical", "decision",
+            "Run the spike before assigning delivery capacity",
+            "Use the proposed spike, capture observed constraints, then re-run this estimate.",
+            "One or more knowledge gates failed, so the current number is not committable.",
+            [check.detail for check in failed],
+            "Replaces major unknowns with evidence for a new estimate.",
+        )
+    elif recommendation == "decompose":
+        add(
+            "decision-decompose", "critical", "scope",
+            "Split the story before commitment",
+            "Separate vertical outcomes or isolate integration, migration, and assurance work.",
+            "The calculated size or number of extreme factors exceeds a single-story gate.",
+            [check.detail for check in failed],
+            "Creates smaller stories that can be estimated and delivered independently.",
+        )
+
+    ranked = sorted(scorecard, key=lambda item: (-item.score, item.number))
+    for item in [candidate for candidate in ranked if candidate.score >= 4][:3]:
+        category, title, action, outcome = _FACTOR_ACTIONS[item.factor]
+        add(
+            f"factor-{item.factor}",
+            "high" if item.score == 5 else "medium",
+            category,
+            title,
+            action,
+            f"{item.label} scored {item.score}/5: {item.reason}",
+            [f"Factor {item.number}: {item.label}", item.reason],
+            outcome,
+            [item.factor],
+        )
+
+    inferred = [item for item in scorecard if item.provenance == "heuristic"]
+    if inferred:
+        names = [item.label for item in inferred]
+        add(
+            "confirm-inferred-scores", "medium", "clarity",
+            "Confirm the inferred factor scores",
+            "Review the inferred rows with engineering, QA, security, and product owners.",
+            f"{len(inferred)} factor(s) were filled from story keywords rather than model scoring.",
+            names[:6],
+            "Improves confidence and records accountable human agreement.",
+            [item.factor for item in inferred],
+        )
+
+    sensitivity = reasoning.band_sensitivity
+    if sensitivity.target_points is not None:
+        add(
+            "narrow-to-lower-band", "medium", "scope",
+            f"Narrow scope before targeting {sensitivity.target_points} points",
+            (
+                "Remove or resolve real scope and risk, then re-score; do not simply lower "
+                "factor values to meet a desired number."
+            ),
+            sensitivity.explanation,
+            [reasoning.formula],
+            (
+                f"A reduction of at least {sensitivity.reduction_required} adjusted-score "
+                f"unit(s) is required before the lower band is mathematically reachable."
+            ),
+        )
+
+    if calculation.stack_adjustment_total > 0 and len(suggestions) < 7:
+        stack_steps = [step for step in reasoning.applied_adjustments if step.reference == "Â§8.2"]
+        add(
+            "reduce-stack-penalties", "medium", "stack",
+            "Address stack-specific delivery penalties",
+            "Pair with experienced owners and prove new test, observability, or build patterns early.",
+            f"Stack calibration added {calculation.stack_adjustment_total} score unit(s).",
+            [step.label for step in stack_steps],
+            "Makes the stack assumptions observable before implementation expands.",
+        )
+
+    if not suggestions:
+        add(
+            "preserve-evidence", "medium", "delivery",
+            "Carry the evidence into planning",
+            "Attach this scorecard, calculation ledger, and assumptions to the delivery story.",
+            "All gates pass, but the estimate remains conditional on its recorded evidence.",
+            [reasoning.formula, reasoning.confidence_basis],
+            "Keeps refinement, delivery, and retrospective decisions traceable.",
+        )
+    return suggestions[:7]
 
 
 def risk_flags(scores: dict[str, int], stack: StackProfile) -> list[dict[str, object]]:
