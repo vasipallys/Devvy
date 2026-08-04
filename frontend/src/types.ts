@@ -26,9 +26,13 @@ export interface SmartCodePreview {
   evidence?: {
     workspace: string
     files_considered: string[]
+    /** Per-file provenance: what was actually sent to the model, and what the budget cut. */
+    context_manifest: { id: string; label: string; characters: number; truncated: boolean; trusted: boolean }[]
     context_characters: number
     context_budget: number
+    truncated_files: string[]
     selection: string
+    trust_policy: string
     write_policy: string
   }
 }

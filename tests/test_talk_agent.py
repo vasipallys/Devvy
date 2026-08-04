@@ -49,6 +49,50 @@ async def test_talk_router_uses_web_for_latest_questions():
     assert result["requires_research"] is True
 
 
+async def test_talk_router_reports_why_it_routed(monkeypatch):
+    """Talk shares Chat's rule: the decision is shown, not just asserted."""
+    agent = TalkAgentGraph(RuntimeStub(), Settings(phoenix_enabled=False))
+
+    async def route(text: str) -> dict:
+        return await agent._route_visual({"voice_input": text})
+
+    both = await route("show me the latest news and visualize the algorithm")
+    assert both["requires_research"] is True and both["requires_animation"] is True
+    assert "'latest'" in both["route_reason"]
+    assert "'algorithm'" in both["route_reason"]
+
+    plain = await route("how was your day")
+    assert plain["requires_research"] is False and plain["requires_animation"] is False
+    assert "No live-data or visual trigger matched" in plain["route_reason"]
+
+
+async def test_talk_research_failure_degrades_honestly(monkeypatch):
+    async def failing_search(*_args, **_kwargs):
+        raise TimeoutError("search timed out")
+
+    monkeypatch.setattr("backend.agent_graph.web_search", failing_search)
+    agent = TalkAgentGraph(RuntimeStub(), Settings(phoenix_enabled=False))
+    result = await agent._research({"voice_input": "latest news"})
+
+    assert result["research_failed"] is True
+    assert result["sources"] == []
+    assert "do not invent" in result["research_context"].lower()
+
+
+async def test_talk_research_success_exposes_sources(monkeypatch):
+    async def search(*_args, **_kwargs):
+        return [{"title": "Story", "url": "https://example.org/x", "content": "z" * 40}]
+
+    monkeypatch.setattr("backend.agent_graph.web_search", search)
+    agent = TalkAgentGraph(RuntimeStub(), Settings(phoenix_enabled=False))
+    result = await agent._research({"voice_input": "latest news"})
+
+    assert result["research_failed"] is False
+    assert result["sources"] == [
+        {"title": "Story", "url": "https://example.org/x", "characters": 40}
+    ]
+
+
 async def test_talk_graph_preserves_multi_turn_state():
     runtime = RuntimeStub()
     agent = TalkAgentGraph(runtime, Settings(phoenix_enabled=False))

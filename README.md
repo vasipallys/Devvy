@@ -216,17 +216,41 @@ security scanners.
 
 ### Estimate Code
 
-Estimate Code accepts one manual story, up to 100 uploaded rows, or up to 100 Jira issues. It
-requires exactly one Low/Medium/High score for each of these factors:
+Estimate Code accepts one manual story, up to 100 uploaded rows, or up to 100 Jira issues, and
+implements the **Agile Story Point Estimation Framework v2.0 (Full-Stack Edition)** in
+[`agile_story_point_estimation_framework_fullstack.md`](agile_story_point_estimation_framework_fullstack.md).
 
-`complexity`, `volume`, `uncertainty`, `react_scope`, `spring_scope`,
-`existing_code_scope`, `dependencies`, `nfrs`, `testing`, `compliance_audit`,
-`familiarity`, and `dod_overhead`.
+Every story is scored 1-5 against 16 factors:
 
-The validated result includes 2-3 true drivers, fixed-anchor comparison, a point value from
-`1, 2, 3, 5, 8, 13`, derivation, plain-language summary, layer/person-day effort, hidden tasks,
-risks, assumptions, and spike/split decisions. High uncertainty or 13 points always forces a spike;
-13 points always forces a split recommendation.
+`requirements_clarity`, `technical_complexity`, `integration_surface`, `data_model_change`,
+`frontend_effort`, `backend_effort`, `test_effort`, `regulatory_compliance`, `security_review`,
+`observability_operations`, `cross_team_dependency`, `reversibility`, `uncertainty`,
+`performance_scalability`, `documentation_knowledge_transfer`, and `dod_overhead`.
+
+A technology stack declaration (frontend, backend, database, framework maturity 1-5, team
+experience 1-5, and scenario) then calibrates the score. Declaring a stack injects its specific
+scoring guidance into the prompt and selects its calibrated reference stories.
+
+**The model scores; the application calculates.** Gemma is asked only for a 1-5 score and a short
+reason per factor. Base sum, the §8.1 base adjustments, the §8.2 stack adjustments, the §9
+Fibonacci band (3 · 5 · 8 · 13 · 21 · 34), the framework-maturity point cap, confidence, and the
+final recommendation are all computed in `backend/estimation_framework.py`. The result carries a
+step-by-step ledger of every rule — **including the ones that did not fire** — with its spec
+reference, delta, and running total, so the arithmetic can be replayed by hand.
+
+Factors the model declines to score are filled from story-text heuristics and labelled `inferred`;
+its own point guess, if offered, is reported beside the calculated one purely as a cross-check and
+never used. If the model cannot hold the contract across both loop attempts, the estimate degrades
+to a fully heuristic scorecard rather than failing.
+
+Gates are evaluated on every run and can override the number: uncertainty at 5, a Bleeding Edge
+framework, a knowledge gap, two or more factors at 5, a score above the 13-point ceiling, a
+maturity-cap breach, or a framework migration each escalate the recommendation to Decompose,
+Spike first, Evaluate the framework first, or Epic discovery.
+
+The specification's four published walkthroughs (§12) are pinned as regression tests in
+`tests/test_estimation_framework.py`. Where that document's prose disagrees with its own rule
+tables, the tables win and the divergence is documented at the assertion.
 
 Jira reads require `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`. Write-back is disabled by
 default, must also set `JIRA_WRITE_ENABLED=true`, validates the issue key and point value, and

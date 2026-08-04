@@ -936,12 +936,16 @@ to a 502 response.
 
 Jira write MUST require all of:
 
-1. points in `1, 2, 3, 5, 8, 13`;
+1. points in `1, 2, 3, 5, 8, 13, 21, 34`;
 2. `confirm=true` in the API payload;
 3. `JIRA_WRITE_ENABLED=true`;
 4. complete Jira credentials;
 5. issue key matching `[A-Za-z][A-Za-z0-9_]+-\d+`;
 6. a second UI confirmation before the API request.
+
+When the framework's recommendation is anything other than `proceed`, the UI MUST warn that it is
+writing a number the framework says should not yet be committed, and take a separate confirmation
+before the standard write confirmation.
 
 The API sends a Jira v3 issue update setting only the configured story-points field. Configuration
 or policy errors are 403; upstream errors are 502.
@@ -977,6 +981,11 @@ Home MUST display:
 - Optimistic user and blank assistant turns while streaming.
 - Status text replaces blank assistant content until first token.
 - Stop button aborts the renderer fetch.
+- The conversation loader MUST NOT refetch the conversation currently being streamed into. A new
+  conversation receives its id from the `start` event; reloading at that moment would replace the
+  optimistic turns with the server's copy, which does not yet contain the assistant row, and every
+  subsequent token would be discarded. On `done`, the optimistic assistant turn is replaced by the
+  persisted message so it carries its real id and metadata.
 - Markdown rendering with code blocks, links, and images.
 - Persisted `/generated/...` Markdown image URLs are rewritten against the API origin.
 - Error banner and local-model disclaimer.
@@ -1032,10 +1041,30 @@ Sources:
 - manual single-story form;
 - CSV/XLSX upload and mapping confirmation.
 
-The UI MUST show a nine-step progress list, errors, batch result selection, point hero, modified
-Fibonacci scale, JSON download, conditional Jira write button, scorecard/drivers, anchor
-comparison, hidden tasks, risks/assumptions, and split recommendation. A spike/split warning is
-prominent when either is recommended.
+A **stack calibration panel** precedes all three and applies to every story in a batch. Each
+control MUST display the adjustment it carries (`+2 emerging`, `+1 new test layer`) so the user
+sees the cost of a declaration before running, not only afterwards. The maturity slider shows the
+level's name, definition, and point cap, sourced from `GET /api/estimate-code/config`.
+
+The UI MUST show an eight-step progress list, errors, batch result selection with a per-row
+recommendation chip, point hero with confidence, the modified Fibonacci scale, JSON download, and
+a conditional Jira write button.
+
+The result MUST include, as progressively disclosed sections:
+
+- **the calculation ledger** — every rule with its spec reference, whether it applied, its delta,
+  and the running total, with the non-firing rules available behind a toggle;
+- the **16-factor scorecard** with a 1-5 indicator, provenance badge (`scored` / `inferred`), and
+  any stack calibration notes;
+- the **gate list**, showing passing gates as well as failing ones;
+- risk flags, calibration anchors, effort envelope, hidden sub-tasks, risks/assumptions;
+- a filled-in **spike definition** whenever the recommendation escalates;
+- **provenance** — the context manifest and the model-versus-calculated point cross-check.
+
+A verdict banner carrying the recommendation and its detail is prominent above the point hero.
+
+Because a CPU run takes minutes, the evidence panel MUST be visible **during** the run, not only
+after the result arrives.
 
 ### 14.7 Frontend API client
 
