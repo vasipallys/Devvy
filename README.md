@@ -71,6 +71,24 @@ The API listens on `http://127.0.0.1:8765`, Swagger UI is available at
 `http://127.0.0.1:8765/docs`, and Vite uses `http://localhost:5173`. The first model-backed
 request downloads and loads Gemma, so it is slower than later requests.
 
+### Running in a browser instead of Electron
+
+`npm run dev` launches the Electron desktop shell. To run the same UI in an ordinary browser -
+useful for debugging with DevTools, or on a machine where Electron will not start:
+
+```powershell
+cd frontend
+npm run dev:web
+```
+
+That serves Vite on `http://localhost:5173` and opens your default browser. Use `npm run preview:web`
+to serve a production build the same way. The backend must already be running; both modes talk to
+the same API.
+
+Everything works in the browser except the Electron-only native dialogs: Smart Code's **Choose
+folder** and **Select files** buttons need the desktop shell, so paste absolute paths into the
+workspace and target fields instead. The UI says so when you click them.
+
 `scripts/setup.ps1` installs the core, development, and image extras. Talk's microphone/TTS and
 Manim video features are optional:
 

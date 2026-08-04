@@ -14,6 +14,7 @@ The venv lives at `.venv` (older setups may have `venv` — `scripts/start-backe
 .\scripts\setup.ps1                                  # one-time: venv, pip install -e ".[dev]", npm install
 .\scripts\start-backend.ps1                          # backend (uvicorn on 127.0.0.1:8765; runs python -m backend)
 cd frontend; npm run dev                             # Vite (5173) + Electron, concurrently
+cd frontend; npm run dev:web                         # Vite only, opens in the default browser (no Electron)
 
 .\.venv\Scripts\python.exe -m ruff check backend tests   # lint (line-length 100, py311)
 .\.venv\Scripts\python.exe -m pytest                     # all tests

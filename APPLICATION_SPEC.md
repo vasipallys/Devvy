@@ -980,6 +980,21 @@ or policy errors are 403; upstream errors are 502.
 `DesktopApp` owns a page union: `home`, `chat`, `talk`, `smart-code`, `estimate-code`. Page changes
 replace the active component and are not persisted across reloads.
 
+Each page MUST be wrapped in an error boundary, keyed by page. React unmounts the whole tree when a
+render throws, so without one any error presents as an empty black window that cannot be told apart
+from a slow load. The boundary MUST show the error message, expose the component stack, log both to
+the console, and offer retry, return-to-home, and reload actions.
+
+`useEffect` callbacks MUST use a block body. A concise arrow returns its expression, and React calls
+an effect's return value as the cleanup function; a non-callable value there crashes the tree with
+`destroy is not a function` on the next re-run or unmount. TypeScript does not catch this, because
+`EffectCallback` permits `void` and DOM methods are typed `void` regardless of their runtime return.
+An ESLint `no-restricted-syntax` rule enforces it.
+
+The renderer MUST run in an ordinary browser as well as in Electron (`npm run dev:web`). Only the
+native file/folder dialogs are Electron-only; those call sites MUST detect the missing `window.desktop`
+bridge and tell the user to enter a path manually rather than failing silently.
+
 The design uses the local Segoe UI/system font stack, dark near-black/green surfaces for
 Home/Chat/Talk/Smart Code, and a light green editorial layout for Estimate Code. Responsive
 breakpoints collapse grids and hide nonessential mode labels without a font-network dependency.

@@ -5,7 +5,9 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev:web": "vite --open",
     "build": "tsc -b && vite build",
+    "preview:web": "vite preview --open",
     "start": "electron .",
     "lint": "eslint . --max-warnings=0",
     "package": "npm run build && electron-builder"
