@@ -1,5 +1,6 @@
 import type {
-  AgentEvent, Attachment, Conversation, JobDetail, JobStatus, JobSummary, Message, Mode,
+  AgentEvent, Attachment, Conversation, EstimateHistoryEntry, EstimateHistoryPage,
+  EstimateHistoryStats, JobDetail, JobStatus, JobSummary, Message, Mode,
   SmartCodeRequest, SystemStatus,
 } from './types'
 
@@ -130,6 +131,25 @@ export const api = {
     json<{ job_id: string; count: number }>('/api/estimate-code/batch-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stories }),
     }),
+  estimateHistory: (params: {
+    query?: string; source?: string; points?: number; recommendation?: string
+    limit?: number; offset?: number
+  } = {}) => {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== '' && value !== null) search.set(key, String(value))
+    }
+    return json<EstimateHistoryPage>(`/api/estimate-code/history?${search}`)
+  },
+  estimateHistoryStats: () => json<EstimateHistoryStats>('/api/estimate-code/history/stats'),
+  estimateHistoryDetail: (id: string) =>
+    json<EstimateHistoryEntry & { result: any }>(`/api/estimate-code/history/${id}`),
+  deleteEstimateHistory: (id: string) =>
+    json<void>(`/api/estimate-code/history/${id}`, { method: 'DELETE' }),
+  clearEstimateHistory: () => json<{ deleted: number }>('/api/estimate-code/history/clear', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: true }),
+  }),
   parseEstimateUpload: async (file: File) => {
     const body = new FormData(); body.append('file', file)
     return json<any>('/api/estimate-code/upload/parse', { method: 'POST', body })

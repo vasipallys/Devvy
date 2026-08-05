@@ -55,7 +55,7 @@ single-page application, built by Vite and opened in an ordinary browser, provid
 | Chat | Conversational answer or generated artifact | HTTP + SSE | SQLite history |
 | Talk | Typed/voice conversation with optional audio, image, video | WebSocket | Connection memory only |
 | Smart Code | Reviewed repository change or review findings | HTTP + named SSE; HTTP apply | Preview memory; backup/run files after apply |
-| Estimate Code | Validated evidence-led story estimate | HTTP + named SSE | UI memory; optional JSON download / Jira write |
+| Estimate Code | Validated evidence-led story estimate, plus a searchable history of past estimates | HTTP + named SSE | SQLite estimate history; optional JSON download / Jira write |
 
 ### 2.3 Actors
 
@@ -745,7 +745,44 @@ Batch: `batch_started {count}`, `item_started {index,title}`, `item_node`, `stat
 `loop`, `item_result`, `item_error`, `batch_result {results}`. An item failure MUST NOT stop later
 items.
 
-### 11.8 Import and Jira
+### 11.8 Estimate history
+
+Every completed estimate MUST be recorded in a durable store (`backend/estimate_history.py`),
+separate from the job that produced it.
+
+A job is the wrong shape and the wrong lifetime for this: it is keyed by execution rather than
+by story, and it is purged on a short retention so the job table does not grow without bound.
+An estimate is the artefact a team refers back to, so it is indexed by the fields people search
+on and is **not** purged on a timer.
+
+The **complete result payload is stored verbatim**. A recalled estimate MUST render through the
+same component as a fresh one — full scorecard, calculation ledger, gates, and provenance.
+Summarising a stored estimate into a few columns would defeat the purpose of keeping it.
+
+Denormalised columns exist for listing, filtering, and calibration: points, confidence,
+recommendation, base sum, adjusted score, band, declared stack, maturity, team experience, and
+the model/heuristic scoring split.
+
+Recording history is a side effect of estimating. A failure to write it MUST be logged and
+swallowed; it MUST NOT fail the estimate the user is waiting for.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/estimate-code/history` | Search with `query`, `source`, `points`, `recommendation`, `limit`, `offset` |
+| GET | `/api/estimate-code/history/stats` | Points distribution, medians, recommendation and confidence mix |
+| GET | `/api/estimate-code/history/{id}` | One record including its full result |
+| DELETE | `/api/estimate-code/history/{id}` | Remove one record |
+| POST | `/api/estimate-code/history/clear` | Remove all; requires `confirm: true` |
+
+Search matches title, Jira key, and summary. Listing is newest first and MUST report the total
+matching count, not just the page size, so pagination is honest.
+
+The UI presents history as a fourth tab beside the three sources. It MUST offer search, point
+filters, a calibration summary, per-entry delete, JSON download, and a re-estimate action that
+reloads the stored story **and its stack profile** into the form so a past estimate can be re-run
+against current knowledge rather than retyped.
+
+### 11.9 Import and Jira
 
 CSV or XLSX up to 15 MB and 100 rows. Column mapping is suggested by fuzzy-matching headers against
 alias sets for title, user story, acceptance criteria, technical breakdown, and existing points,
@@ -971,6 +1008,10 @@ cd frontend; npm run preview                             # serve dist/
 27. Cancelling stops the job server-side and preserves partial output.
 28. A restart marks orphaned jobs `interrupted` rather than leaving them `running`.
 29. Two workers racing on the same database cannot claim the same job.
+30. Every completed estimate appears in history without the user saving it.
+31. A history entry reopens with its full scorecard, ledger, and gates intact.
+32. History search matches title, Jira key, and summary, and reports an honest total.
+33. History survives job retention, and a failed history write never fails the estimate.
 
 ### 15.2 Regression suite
 

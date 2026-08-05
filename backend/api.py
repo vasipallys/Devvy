@@ -21,7 +21,9 @@ from backend.agent import ChatAgent
 from backend.agent_graph import TalkAgentGraph
 from backend.animation_engine import AnimationEngine
 from backend.config import get_settings
-from backend.db import Conversation, Message, create_conversation, engine, init_db, list_messages, now
+from backend.db import (
+    Conversation, Message, create_conversation, engine, init_db, list_messages, now, utc_iso,
+)
 from backend.estimate_code import (
     BatchEstimateRequest,
     EstimateRequest,
@@ -32,6 +34,14 @@ from backend.estimate_code import (
     parse_upload as parse_estimate_upload,
     rows_to_stories,
     write_jira_points,
+)
+from backend.estimate_history import (
+    clear_estimates,
+    delete_estimate,
+    estimate_stats,
+    get_estimate,
+    list_estimates,
+    save_estimate,
 )
 from backend.estimation_framework import (
     FACTORS,
@@ -99,7 +109,7 @@ def sse(event: str, data: dict) -> str:
 def message_dict(item: Message) -> dict:
     return {
         "id": str(item.id), "role": item.role, "content": item.content,
-        "created_at": item.created_at.isoformat(), "attachments": item.attachments,
+        "created_at": utc_iso(item.created_at), "attachments": item.attachments,
         "metadata": item.message_metadata,
     }
 
@@ -1000,6 +1010,15 @@ async def estimate_one(story, context: JobContext, index: int, total: int) -> di
                 "confidence": result.get("confidence"),
             },
         )
+        try:
+            record = await asyncio.to_thread(
+                save_estimate, engine, result, context.job_id
+            )
+            result["history_id"] = str(record.id)
+        except Exception:
+            # History is a side effect of estimating. Losing it must never cost the user
+            # the estimate they are waiting for.
+            logger.exception("Could not record the estimate in history")
         return result
     except asyncio.CancelledError:
         task.cancel()
@@ -1059,6 +1078,49 @@ def submit_estimate(payload: EstimateRequest):
 @app.post("/api/estimate-code/batch-jobs", status_code=202)
 def submit_estimate_batch(payload: BatchEstimateRequest):
     return submit_estimate_job(list(payload.stories))
+
+
+@app.get("/api/estimate-code/history")
+def estimate_history(
+    query: str = Query(default="", max_length=200),
+    source: str | None = Query(default=None, max_length=20),
+    points: int | None = Query(default=None, ge=1, le=34),
+    recommendation: str | None = Query(default=None, max_length=40),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Searchable record of every completed estimate, newest first."""
+    return list_estimates(
+        engine, query=query, source=source, points=points,
+        recommendation=recommendation, limit=limit, offset=offset,
+    )
+
+
+@app.get("/api/estimate-code/history/stats")
+def estimate_history_stats():
+    """Aggregates that let a team see how they estimate, not just what they estimated."""
+    return estimate_stats(engine)
+
+
+@app.get("/api/estimate-code/history/{record_id}")
+def estimate_history_detail(record_id: UUID):
+    record = get_estimate(engine, record_id)
+    if record is None:
+        raise HTTPException(404, "That estimate is no longer in history.")
+    return record
+
+
+@app.delete("/api/estimate-code/history/{record_id}", status_code=204)
+def estimate_history_delete(record_id: UUID):
+    if not delete_estimate(engine, record_id):
+        raise HTTPException(404, "That estimate is no longer in history.")
+
+
+@app.post("/api/estimate-code/history/clear")
+def estimate_history_clear(payload: dict = Body(default={})):
+    if not payload.get("confirm"):
+        raise HTTPException(400, "Explicit confirmation is required to clear history.")
+    return {"deleted": clear_estimates(engine)}
 
 
 @app.post("/api/estimate-code/upload/parse")

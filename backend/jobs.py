@@ -32,6 +32,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import Column, JSON, update
 from sqlmodel import Field, Session, SQLModel, select
 
+from backend.db import utc_iso
+
 logger = logging.getLogger(__name__)
 
 JobKind = Literal["chat", "estimate", "smart-code", "talk"]
@@ -97,9 +99,9 @@ def job_summary(job: Job) -> dict[str, Any]:
         "status": job.status,
         "title": job.title,
         "progress": job.progress,
-        "created_at": job.created_at.isoformat(),
-        "started_at": job.started_at.isoformat() if job.started_at else None,
-        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "created_at": utc_iso(job.created_at),
+        "started_at": utc_iso(job.started_at),
+        "completed_at": utc_iso(job.completed_at),
         "conversation_id": str(job.conversation_id) if job.conversation_id else None,
         "error": job.error,
         "has_result": job.result is not None,

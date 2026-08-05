@@ -11,6 +11,19 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+def utc_iso(value: datetime | None) -> str | None:
+    """Serialise a stored timestamp as an unambiguous UTC instant.
+
+    SQLite has no timezone type, so a `datetime` written as aware comes back naive. Emitting
+    that bare string makes browsers parse it as *local* time, which silently shifts every
+    displayed timestamp by the viewer's offset ("5h ago" for something that just happened).
+    Timestamps are always stored in UTC, so re-attaching the offset here is the correct read.
+    """
+    if value is None:
+        return None
+    return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
+
+
 class Conversation(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     title: str = "New conversation"

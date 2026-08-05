@@ -1,0 +1,194 @@
+import { useCallback, useEffect, useState } from 'react'
+import {
+  ArrowLeft, ChartNoAxesColumn, CircleAlert, History, LoaderCircle, RotateCw, Search, Trash2,
+} from 'lucide-react'
+import { api } from './api'
+import { EstimateResultView, RECOMMENDATIONS } from './EstimateResultView'
+import type {
+  EstimateConfig, EstimateHistoryEntry, EstimateHistoryStats, EstimateResult, Points,
+} from './types'
+
+const PAGE_SIZE = 25
+const POINT_FILTERS: Points[] = [3, 5, 8, 13, 21, 34]
+
+function relativeTime(iso: string): string {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000))
+  if (seconds < 60) return 'just now'
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`
+  if (seconds < 604_800) return `${Math.floor(seconds / 86_400)}d ago`
+  return new Date(iso).toLocaleDateString()
+}
+
+/** Calibration summary. A list of past estimates is a log; the distribution is what tells a
+ *  team something about how they estimate. */
+function StatsBar({ stats }: { stats: EstimateHistoryStats }) {
+  if (!stats.total) return null
+  const busiest = Math.max(...Object.values(stats.points), 1)
+  return <section className="history-stats">
+    <div className="history-stat">
+      <span>Estimated</span><b>{stats.total}</b><small>stories on record</small>
+    </div>
+    <div className="history-stat">
+      <span>Median</span><b>{stats.median_points ?? '—'}</b><small>points</small>
+    </div>
+    <div className="history-stat">
+      <span>Model-scored</span>
+      <b>{stats.model_scored_share === null ? '—' : `${Math.round(stats.model_scored_share * 100)}%`}</b>
+      <small>of all factors</small>
+    </div>
+    <div className="history-distribution" aria-label="Points distribution">
+      <span><ChartNoAxesColumn size={12} /> Distribution</span>
+      <div>
+        {POINT_FILTERS.map(point => {
+          const count = stats.points[String(point)] ?? 0
+          return <i key={point} title={`${count} story/stories at ${point} points`}
+            style={{ height: `${Math.max(3, (count / busiest) * 34)}px` }}
+            className={count ? 'on' : ''}><em>{point}</em></i>
+        })}
+      </div>
+    </div>
+  </section>
+}
+
+export function EstimateHistoryPanel({ config, onBack, onReEstimate }: {
+  config?: EstimateConfig
+  onBack: () => void
+  onReEstimate?: (result: EstimateResult) => void
+}) {
+  const [page, setPage] = useState<{ items: EstimateHistoryEntry[]; total: number }>({ items: [], total: 0 })
+  const [stats, setStats] = useState<EstimateHistoryStats>()
+  const [query, setQuery] = useState('')
+  const [points, setPoints] = useState<number>()
+  const [offset, setOffset] = useState(0)
+  const [selected, setSelected] = useState<EstimateResult>()
+  const [selectedId, setSelectedId] = useState<string>()
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [listed, summary] = await Promise.all([
+        api.estimateHistory({ query, points, limit: PAGE_SIZE, offset }),
+        api.estimateHistoryStats(),
+      ])
+      setPage({ items: listed.items, total: listed.total })
+      setStats(summary)
+      setError('')
+    } catch (cause) { setError((cause as Error).message) }
+    finally { setLoading(false) }
+  }, [query, points, offset])
+
+  // Debounced so typing in the search box does not fire a request per keystroke.
+  useEffect(() => {
+    const timer = window.setTimeout(load, query ? 250 : 0)
+    return () => window.clearTimeout(timer)
+  }, [load, query])
+
+  async function open(id: string) {
+    setSelectedId(id)
+    try {
+      const record = await api.estimateHistoryDetail(id)
+      setSelected(record.result as EstimateResult)
+    } catch (cause) { setError((cause as Error).message); setSelectedId(undefined) }
+  }
+
+  async function remove(entry: EstimateHistoryEntry) {
+    if (!window.confirm(`Remove the estimate for "${entry.title}" from history?`)) return
+    try {
+      await api.deleteEstimateHistory(entry.id)
+      if (selectedId === entry.id) { setSelected(undefined); setSelectedId(undefined) }
+      await load()
+    } catch (cause) { setError((cause as Error).message) }
+  }
+
+  function download(entry: EstimateHistoryEntry, result: EstimateResult) {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${entry.issue_key || entry.title.slice(0, 40) || 'estimate'}.json`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
+  if (selected && selectedId) {
+    const entry = page.items.find(item => item.id === selectedId)
+    return <div className="history-detail">
+      <div className="history-detail-bar">
+        <button className="text-action" onClick={() => { setSelected(undefined); setSelectedId(undefined) }}>
+          <ArrowLeft size={14} /> Back to history
+        </button>
+        <span>{entry ? `Estimated ${relativeTime(entry.created_at)}` : ''}</span>
+        <div className="history-detail-actions">
+          {entry && <button className="text-action" onClick={() => download(entry, selected)}>Download JSON</button>}
+          {onReEstimate && <button className="text-action" onClick={() => onReEstimate(selected)}>
+            <RotateCw size={13} /> Re-estimate this story
+          </button>}
+        </div>
+      </div>
+      {/* The stored payload renders through the same component as a fresh run, so a recalled
+          estimate shows its full scorecard, ledger, and gates rather than a summary. */}
+      <EstimateResultView result={selected} config={config} events={[]} />
+    </div>
+  }
+
+  return <div className="history-panel">
+    <div className="history-toolbar">
+      <button className="text-action" onClick={onBack}><ArrowLeft size={14} /> New estimate</button>
+      <label className="history-search">
+        <Search size={14} />
+        <input value={query} placeholder="Search by story, Jira key, or summary"
+          onChange={event => { setQuery(event.target.value); setOffset(0) }} />
+      </label>
+      <div className="history-filters" role="group" aria-label="Filter by points">
+        <button className={points === undefined ? 'active' : ''}
+          onClick={() => { setPoints(undefined); setOffset(0) }}>All</button>
+        {POINT_FILTERS.map(value => <button key={value} className={points === value ? 'active' : ''}
+          onClick={() => { setPoints(points === value ? undefined : value); setOffset(0) }}>{value}</button>)}
+      </div>
+    </div>
+
+    {error && <div className="estimate-error"><CircleAlert size={16} />{error}</div>}
+    {stats && <StatsBar stats={stats} />}
+
+    {loading && !page.items.length && <div className="history-empty"><LoaderCircle className="spin" /> Loading history…</div>}
+
+    {!loading && !page.items.length && <div className="history-empty">
+      <History size={30} />
+      <p>{query || points
+        ? 'No estimate matches that search.'
+        : 'No estimates yet. Every story you estimate is recorded here with its full scorecard, so you can revisit the reasoning and compare new work against it.'}</p>
+    </div>}
+
+    {page.items.length > 0 && <>
+      <ul className="history-list">
+        {page.items.map(entry => {
+          const verdict = entry.recommendation ? RECOMMENDATIONS[entry.recommendation] : undefined
+          return <li key={entry.id}>
+            <button className="history-entry" onClick={() => open(entry.id)}>
+              <span className="history-points">{entry.points}</span>
+              <span className="history-body">
+                <b>{entry.issue_key ? `${entry.issue_key} · ` : ''}{entry.title}</b>
+                <small>{entry.tldr}</small>
+                <em>
+                  {relativeTime(entry.created_at)} · base {entry.base_sum} → {entry.adjusted_score}
+                  {entry.band ? ` (${entry.band})` : ''} · {entry.confidence || '—'} confidence
+                  {entry.heuristic_filled ? ` · ${entry.heuristic_filled} factor(s) inferred` : ''}
+                </em>
+              </span>
+              {verdict && <span className={`chip-${verdict.tone}`}>{verdict.label}</span>}
+            </button>
+            <button className="history-remove" aria-label={`Remove ${entry.title} from history`}
+              onClick={() => remove(entry)}><Trash2 size={14} /></button>
+          </li>
+        })}
+      </ul>
+      <div className="history-pager">
+        <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Newer</button>
+        <span>{offset + 1}–{Math.min(offset + PAGE_SIZE, page.total)} of {page.total}</span>
+        <button disabled={offset + PAGE_SIZE >= page.total} onClick={() => setOffset(offset + PAGE_SIZE)}>Older</button>
+      </div>
+    </>}
+  </div>
+}

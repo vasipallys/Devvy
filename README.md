@@ -320,6 +320,23 @@ The specification's four published walkthroughs (§12) are pinned as regression 
 `tests/test_estimation_framework.py`. Where that document's prose disagrees with its own rule
 tables, the tables win and the divergence is documented at the assertion.
 
+### Estimate history
+
+Every completed estimate is recorded automatically — there is nothing to save. The **History**
+tab lists them newest first with search (title, Jira key, or summary), point filters, and a
+calibration summary: how many stories you have estimated, the median, the points distribution,
+and what share of factors the model scored rather than the app inferring them.
+
+Opening an entry renders the **whole stored estimate** — the 16-factor scorecard, the
+calculation ledger, the gates, and the provenance — not a summary. The full payload is kept
+verbatim so a recalled estimate looks exactly as it did the day it was produced. Each entry can
+be downloaded as JSON, deleted, or re-estimated: re-estimating reloads the story *and its stack
+profile* into the form so you can re-run it against current knowledge instead of retyping it.
+
+History is stored separately from the background job that produced it. Jobs are purged after
+`JOB_RETENTION_DAYS`; estimates are not purged on a timer, because they are the record a team
+refers back to.
+
 Jira reads require `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN`. Write-back is disabled by
 default, must also set `JIRA_WRITE_ENABLED=true`, validates the issue key and point value, and
 requires confirmation in both the UI request and API payload.

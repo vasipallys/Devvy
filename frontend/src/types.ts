@@ -382,6 +382,45 @@ export interface EstimateConfig {
   }
 }
 
+/** A previously completed estimate. Durable, searchable, and independent of job retention. */
+export interface EstimateHistoryEntry {
+  id: string
+  created_at: string
+  job_id: string | null
+  title: string
+  issue_key: string | null
+  source: 'manual' | 'jira' | 'upload'
+  points: Points
+  confidence: 'High' | 'Medium' | 'Low' | ''
+  recommendation: Recommendation | ''
+  base_sum: number
+  adjusted_score: number
+  band: string
+  frontend: FrontendStack
+  backend: BackendStack
+  maturity_level: Level
+  team_experience: Level
+  model_scored: number
+  heuristic_filled: number
+  tldr: string
+}
+
+export interface EstimateHistoryPage {
+  total: number
+  limit: number
+  offset: number
+  items: EstimateHistoryEntry[]
+}
+
+export interface EstimateHistoryStats {
+  total: number
+  points: Record<string, number>
+  recommendations: Record<string, number>
+  confidence: Record<string, number>
+  median_points: number | null
+  model_scored_share: number | null
+}
+
 export interface Story {
   title: string
   user_story: string
