@@ -3,6 +3,7 @@ import {
   AlertTriangle, ArrowLeft, BrainCircuit, Check, FileSpreadsheet, History, Keyboard,
   Layers, LoaderCircle, PanelsTopLeft, Plus, Target, Trash2,
 } from 'lucide-react'
+import { AgentFlowDiagram } from './AgentFlowDiagram'
 import { api, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { EstimateHistoryPanel } from './EstimateHistoryPanel'
@@ -465,8 +466,12 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
         </section>
       </div>
 
-      {/* While the CPU model works, the evidence panel is the only thing telling the user
-          what has actually happened. It appears as soon as the run starts and stays put. */}
+      {/* While the CPU model works, these are the only things telling the user what has
+          actually happened. The flow diagram shows which agent is running and what it has
+          produced; the evidence panel keeps the raw trajectory. Both appear as soon as the
+          run starts and stay put. */}
+      {(loading || runEvents.length > 0) && !result &&
+        <AgentFlowDiagram events={runEvents} />}
       {(loading || runEvents.length > 0) && !result &&
         <EvidencePanel events={runEvents} compact title="Estimation evidence" />}
 

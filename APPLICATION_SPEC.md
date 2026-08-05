@@ -691,6 +691,35 @@ disagreements, critic challenges, arbitration decisions, audit, final report, pr
 model policy, and a pending human-review record. Only concise public rationale is persisted;
 hidden chain-of-thought MUST NOT be requested or stored.
 
+### 11.3.2 Agent flow visualisation
+
+The pipeline MUST be shown as a flow, not only as a checklist, in both the live run and the
+stored result. A user watching a multi-minute CPU run needs to see *which agent is working and
+what it produced*, and a reader of a finished estimate needs to see how the number was reached.
+
+The diagram groups nodes into five named lanes that match the architecture: **Intake**,
+**Two independent assessments** (drawn as parallel branches, with the reviewer marked blind),
+**Reconciliation**, **Deterministic calculation**, and **Human authority**. Drawing the two
+model passes side by side is the point: it makes the independence visible rather than asserted.
+
+Each node MUST display the headline output it produced — scored counts, cross-check points,
+material disagreements, gate outcome — not merely a tick. A node whose required fields have not
+arrived yet MUST render no metric rather than a partial one; every progress event carries an
+`evidence` object, so presence of evidence is not proof the stage's results are in it.
+
+Node state comes from the event stream for a live run. A stored estimate has no event stream, so
+a finished pipeline MUST be treated as proof every stage ran, with metrics read from the stored
+payload. Otherwise a completed estimate recalled from history would render as entirely pending.
+
+`human_review` MUST never render as complete. The pipeline always ends waiting on a person.
+
+The arithmetic MUST also be drawn as a flow — 16 scores -> base sum -> base adjustments -> stack
+adjustments -> adjusted score -> band -> capped points — carrying the real numbers, so the path
+from scorecard to a single Fibonacci value is followable by eye.
+
+Nodes are buttons: keyboard focusable, `aria-expanded`, and `aria-current="step"` on the running
+node. All text MUST meet WCAG AA contrast (4.5:1) at its rendered size.
+
 ### 11.4 Deterministic calculation
 
 1. **Base sum** — the 16 scores (16–80).
@@ -1012,6 +1041,9 @@ cd frontend; npm run preview                             # serve dist/
 31. A history entry reopens with its full scorecard, ledger, and gates intact.
 32. History search matches title, Jira key, and summary, and reports an honest total.
 33. History survives job retention, and a failed history write never fails the estimate.
+34. The agent flow shows which stage is running, with each completed node's real output.
+35. A completed estimate recalled from history renders its flow fully, not as pending.
+36. No node ever renders a partial metric while its stage is still running.
 
 ### 15.2 Regression suite
 

@@ -5,6 +5,7 @@ import {
   Layers, ShieldCheck, Sigma, Target, X,
 } from 'lucide-react'
 import { EvidencePanel } from './EvidencePanel'
+import { AgentFlowDiagram } from './AgentFlowDiagram'
 import { EstimationPipelineReport } from './EstimationPipelineReport'
 import type {
   AgentEvent, Calculation, EstimateConfig, EstimateResult, FactorScore, PolicyCheck,
@@ -220,6 +221,11 @@ export function EstimateResultView({ result, config, events, onDownload, onWrite
             <button className="jira-write" onClick={onWriteJira}>Write {result.points} to Jira</button>}
         </div>
 
+        <AgentFlowDiagram
+          events={events}
+          pipeline={result.agentic_pipeline}
+          calculation={result.calculation}
+        />
         <EstimationPipelineReport result={result} />
 
         <Detail title="Framework appendix: detailed reasoning">
