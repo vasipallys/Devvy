@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { Bot, Code2, FileText, Globe2, Home, Image, Menu, MessageSquare, Paperclip, Plus, Search, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
 import { marked } from 'marked'
-import { api, API } from './api'
+import { api, API, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { SystemStatusChip } from './SystemStatusChip'
-import type { AgentEvent, Attachment, Conversation, Message, Mode } from './types'
+import { isJobActive, type AgentEvent, type Attachment, type Conversation, type Message, type Mode } from './types'
 
 const modes: { id: Mode; label: string; icon: typeof Bot }[] = [
   { id: 'auto', label: 'Auto', icon: Sparkles }, { id: 'chat', label: 'Chat', icon: MessageSquare },
@@ -13,7 +13,7 @@ const modes: { id: Mode; label: string; icon: typeof Bot }[] = [
 ]
 
 function renderMarkdown(content: string): string {
-  // Generated files are served by FastAPI, not the Vite/Electron frontend origin.
+  // Generated files are served by FastAPI, not the Vite frontend origin.
   // Rewriting here also fixes images loaded later from persisted conversation history.
   const withBackendAssets = content.replace(
     /\]\((\/generated\/[^)\s]+)\)/g,
@@ -48,14 +48,15 @@ function renderMarkdown(content: string): string {
   return document.body.innerHTML
 }
 
-export function App({ onHome }: { onHome?: () => void }) {
+export function App({ onHome, initialConversationId }: { onHome?: () => void; initialConversationId?: string }) {
   const [conversations, setConversations] = useState<Conversation[]>([])
-  const [activeId, setActiveId] = useState<string>()
+  const [activeId, setActiveId] = useState<string | undefined>(initialConversationId)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState(''); const [mode, setMode] = useState<Mode>('auto')
   const [attachments, setAttachments] = useState<Attachment[]>([]); const [sending, setSending] = useState(false)
   const [sidebar, setSidebar] = useState(true); const [error, setError] = useState(''); const [query, setQuery] = useState('')
   const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
+  const [activeJobId, setActiveJobId] = useState<string>()
   const endRef = useRef<HTMLDivElement>(null); const fileRef = useRef<HTMLInputElement>(null); const abortRef = useRef<AbortController | undefined>(undefined)
   // The conversation currently being streamed into. A brand-new chat gets its id from the
   // `start` event, which would otherwise trip the loader below and replace the optimistic
@@ -67,8 +68,27 @@ export function App({ onHome }: { onHome?: () => void }) {
   useEffect(() => { refresh().catch(e => setError(e.message)) }, [])
   useEffect(() => {
     if (activeId === streamingRef.current) return
-    if (activeId) api.messages(activeId).then(setMessages).catch(e => setError(e.message))
-    else setMessages([])
+    if (!activeId) { setMessages([]); return }
+    // Opening a conversation also reattaches to a turn still generating on the server, so
+    // a reopened browser resumes mid-answer instead of showing a stalled blank bubble.
+    const load = async () => {
+      try {
+        const [history, { jobs }] = await Promise.all([api.messages(activeId), api.jobs()])
+        setMessages(history)
+        const live = jobs.find(job =>
+          job.kind === 'chat' && job.conversation_id === activeId && isJobActive(job.status))
+        if (live) {
+          const placeholder: Message = {
+            id: crypto.randomUUID(), role: 'assistant', content: '',
+            created_at: new Date().toISOString(),
+          }
+          setMessages(current => [...current, placeholder])
+          setActiveJobId(live.id)
+          follow(live.id, placeholder.id, activeId)
+        }
+      } catch (e) { setError((e as Error).message) }
+    }
+    load()
   }, [activeId])
   // Block body, deliberately: a concise arrow would return whatever scrollIntoView yields,
   // and React treats an effect's return value as its cleanup function. Anything non-callable
@@ -87,38 +107,65 @@ export function App({ onHome }: { onHome?: () => void }) {
       setAttachments(x => [...x, ...uploaded]); setMode('document')
     } catch (e) { setError((e as Error).message) }
   }
-  async function send() {
-    const text = input.trim(); if (!text || sending) return
-    setError(''); setInput(''); setSending(true); setRunEvents([])
-    const user: Message = { id: crypto.randomUUID(), role: 'user', content: text, created_at: new Date().toISOString(), attachments }
-    const assistant: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', created_at: new Date().toISOString() }
-    setMessages(x => [...x, user, assistant]); const uploaded = attachments; setAttachments([])
+  /** Follow a job: works for one just submitted and for one already running on the server. */
+  async function follow(jobId: string, placeholderId: string, conversationId: string) {
+    streamingRef.current = conversationId
+    setSending(true)
     abortRef.current = new AbortController()
-    streamingRef.current = activeId
-    let receivedToken = false
     try {
-      await api.stream({ conversation_id: activeId, message: text, attachment_ids: uploaded.map(x => x.id), mode }, event => {
-        if (event.type === 'agent_event') setRunEvents(current => [...current, event as AgentEvent])
-        if (event.type === 'start' && !activeId) { streamingRef.current = event.conversation_id; setActiveId(event.conversation_id) }
-        // Replace the optimistic placeholder with the persisted row so the message carries
-        // its real id and metadata, and a later reload shows exactly what is on screen.
-        if (event.type === 'done' && event.message) {
-          setMessages(x => x.map(m => m.id === assistant.id ? event.message : m))
-        }
-        if (event.type === 'status' && !receivedToken) setMessages(x => x.map(m => m.id === assistant.id ? { ...m, content: `_${event.content}_` } : m))
-        if (event.type === 'token') {
-          const firstToken = !receivedToken
-          receivedToken = true
-          setMessages(x => x.map(m => m.id === assistant.id ? { ...m, content: (firstToken ? '' : m.content) + event.content } : m))
-        }
-        if (event.type === 'error') {
-          setMessages(x => x.map(m => m.id === assistant.id ? { ...m, content: `Generation failed: ${event.message}` } : m))
-          throw new Error(event.message)
-        }
+      await attachToJob(jobId, {
+        onSnapshot: job => setRunEvents(job.events),
+        onEvent: event => setRunEvents(current => [...current, event]),
+        onStatus: message => setMessages(x => x.map(m =>
+          m.id === placeholderId && !m.content ? { ...m, content: `_${message}_` } : m)),
+        onText: text => setMessages(x => x.map(m =>
+          m.id === placeholderId ? { ...m, content: text } : m)),
+        onDone: (status, result, failure) => {
+          if (status === 'succeeded' && result?.message) {
+            // Swap the placeholder for the persisted row so it carries its real id.
+            setMessages(x => x.map(m => m.id === placeholderId ? result.message : m))
+          } else if (status !== 'succeeded') {
+            const note = status === 'cancelled' ? 'Cancelled.' : `Generation ${status}: ${failure ?? ''}`
+            setMessages(x => x.map(m => m.id === placeholderId
+              ? { ...m, content: m.content || `_${note}_` } : m))
+          }
+        },
       }, abortRef.current.signal)
       await refresh()
-    } catch (e) { if ((e as Error).name !== 'AbortError') setError((e as Error).message) }
-    finally { setSending(false); streamingRef.current = undefined }
+    } catch (e) {
+      // Detaching from the stream never cancels the job; it keeps running server-side.
+      if ((e as Error).name !== 'AbortError') setError((e as Error).message)
+    } finally { setSending(false); streamingRef.current = undefined; setActiveJobId(undefined) }
+  }
+
+  /** Stop means stop: cancel the job on the server, not merely detach this tab from it. */
+  async function stop() {
+    if (activeJobId) {
+      try { await api.cancelJob(activeJobId) } catch { /* already finished */ }
+    }
+    abortRef.current?.abort()
+  }
+
+  async function send() {
+    const text = input.trim(); if (!text || sending) return
+    setError(''); setInput(''); setRunEvents([])
+    const placeholder: Message = { id: crypto.randomUUID(), role: 'assistant', content: '', created_at: new Date().toISOString() }
+    const uploaded = attachments; setAttachments([])
+    setSending(true)
+    try {
+      const submitted = await api.submitChat({
+        conversation_id: activeId, message: text,
+        attachment_ids: uploaded.map(x => x.id), mode,
+      })
+      streamingRef.current = submitted.conversation_id
+      if (!activeId) setActiveId(submitted.conversation_id)
+      setMessages(x => [...x, submitted.message, placeholder])
+      setActiveJobId(submitted.job_id)
+      await follow(submitted.job_id, placeholder.id, submitted.conversation_id)
+    } catch (e) {
+      setSending(false)
+      setError((e as Error).message)
+    }
   }
   const filtered = conversations.filter(x => x.title.toLowerCase().includes(query.toLowerCase()))
   return <div className="shell">
@@ -149,7 +196,7 @@ export function App({ onHome }: { onHome?: () => void }) {
         <div className="composer"><textarea aria-label="Message Devvy" value={input} onChange={e => setInput(e.target.value)} placeholder="Message Devvy…" rows={1} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}/>
           <div className="composer-actions"><input ref={fileRef} hidden type="file" multiple accept=".pdf,.docx,.txt,.md,.py,.js,.ts,.json,.csv" onChange={e => pickFiles(e.target.files)}/><button className="tool" title="Attach documents" onClick={() => fileRef.current?.click()}><Paperclip size={18}/></button>
             <div className="mode-picker">{modes.map(item => <button key={item.id} className={mode === item.id ? 'selected' : ''} onClick={() => setMode(item.id)}><item.icon size={15}/><span>{item.label}</span></button>)}</div><div className="grow"/>
-            {sending ? <button className="send" onClick={() => abortRef.current?.abort()}><Square size={14}/></button> : <button className="send" disabled={!input.trim()} onClick={send}><Send size={17}/></button>}
+            {sending ? <button className="send" title="Stop generating" aria-label="Stop generating" onClick={stop}><Square size={14}/></button> : <button className="send" disabled={!input.trim()} onClick={send}><Send size={17}/></button>}
           </div></div><small className="disclaimer">Devvy runs locally and can make mistakes. Verify important information.</small>
       </footer>
     </main>

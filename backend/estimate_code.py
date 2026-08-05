@@ -51,6 +51,18 @@ from backend.estimation_framework import (
     spike_template,
 )
 from backend.harness import ContextSource, assemble_context
+from backend.estimation_pipeline import (
+    PIPELINE_VERSION,
+    arbitrate,
+    assessment,
+    canonical_story,
+    compare_assessments,
+    consistency_audit,
+    criticize,
+    evaluate_readiness,
+    route_specialists,
+    specialist_analysis,
+)
 from backend.model import GemmaRuntime
 from backend.structured_output import generate_structured
 
@@ -439,9 +451,14 @@ def _collect(values: Any, limit: int) -> list[str]:
     return [text for text in (_text(item) for item in _items(values)) if text][:limit]
 
 
-def build_result(draft: EstimateDraft, story: Story, context_manifest: list[dict]) -> dict[str, Any]:
+def build_result(
+    draft: EstimateDraft,
+    story: Story,
+    context_manifest: list[dict],
+    scorecard_override: list[FactorScore] | None = None,
+) -> dict[str, Any]:
     """Turn a model draft plus the framework arithmetic into the full estimate payload."""
-    scorecard = build_scorecard(draft, story)
+    scorecard = scorecard_override or build_scorecard(draft, story)
     scores = {item.factor: int(item.score) for item in scorecard}
     stack = story.stack
 
@@ -753,6 +770,51 @@ class EstimateService:
         story: Story,
         progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        canonical = canonical_story(story)
+        readiness = evaluate_readiness(story, canonical)
+        pipeline_mode, specialist_routes = route_specialists(story)
+        if progress:
+            progress(
+                {
+                    "stage": "normalize",
+                    "status": "completed",
+                    "label": "Story normalized into stable evidence",
+                    "evidence": {
+                        "input_hash": canonical["input_hash"],
+                        "evidence_items": len(canonical["evidence"]),
+                        "missing_fields": canonical["missing_fields"] or "none",
+                        "untrusted_instructions_detected": canonical[
+                            "untrusted_instructions_detected"
+                        ],
+                    },
+                }
+            )
+            progress(
+                {
+                    "stage": "readiness",
+                    "status": "completed",
+                    "label": f"Readiness: {readiness.decision.replace('_', ' ').title()}",
+                    "evidence": {
+                        "checks": len(readiness.checks),
+                        "assumptions": len(readiness.assumptions),
+                        "questions": len(readiness.targeted_questions),
+                    },
+                }
+            )
+            progress(
+                {
+                    "stage": "specialist_routing",
+                    "status": "completed",
+                    "label": (
+                        f"{pipeline_mode.replace('_', ' ').title()} pipeline routed to "
+                        f"{len(specialist_routes)} specialist lenses"
+                    ),
+                    "evidence": {
+                        "mode": pipeline_mode,
+                        "specialists": [route.label for route in specialist_routes],
+                    },
+                }
+            )
         prompt, manifest = build_prompt(story)
         if progress:
             progress(
@@ -799,7 +861,7 @@ class EstimateService:
                 max_new_tokens=self.settings.estimate_max_output_tokens,
                 validate_result=_validate_draft,
                 on_attempt=(
-                    lambda event: progress({"stage": "structured_loop", **event})
+                    lambda event: progress({"stage": "primary_estimate", **event})
                     if progress else None
                 ),
             )
@@ -810,7 +872,7 @@ class EstimateService:
             if progress:
                 progress(
                     {
-                        "stage": "structured_loop",
+                        "stage": "primary_estimate",
                         "status": "failed",
                         "label": "Model output unusable — falling back to evidence heuristics",
                         "detail": str(exc)[:500],
@@ -820,7 +882,240 @@ class EstimateService:
                 scores={}, drivers=[], points=None, rationale="",
                 hidden_tasks=[], risks=[], assumptions=[], proposed_stories=[],
             )
-        result = build_result(draft, story, manifest)
+        primary_scorecard = build_scorecard(draft, story)
+        primary_assessment = assessment("PRIMARY_ESTIMATOR", primary_scorecard, story)
+        specialist_findings = specialist_analysis(specialist_routes, primary_assessment)
+        if progress:
+            progress(
+                {
+                    "stage": "primary_estimate",
+                    "status": "completed",
+                    "label": "Primary evidence assessment completed",
+                    "evidence": {
+                        "model_scored": primary_assessment.model_scored,
+                        "heuristic_filled": primary_assessment.heuristic_filled,
+                        "point_cross_check": primary_assessment.point_cross_check,
+                    },
+                }
+            )
+            progress(
+                {
+                    "stage": "specialist_analysis",
+                    "status": "completed",
+                    "label": f"{len(specialist_findings)} specialist lenses assessed evidence",
+                    "evidence": {
+                        "lenses": [item.label for item in specialist_findings],
+                        "material_risks": sum(
+                            len(item.material_risks) for item in specialist_findings
+                        ),
+                        "open_questions": sum(
+                            len(item.open_questions) for item in specialist_findings
+                        ),
+                    },
+                }
+            )
+
+        reviewer_system = (
+            "You are an independent blind technical estimator. You have not seen another "
+            "estimator's scores. Assess only the supplied evidence against the rubric. "
+            "Score every factor from 1 to 5, do not invent requirements, and never compute "
+            "or recommend story points. Keep each reason concise and evidence-specific."
+        )
+        try:
+            reviewer_draft = await generate_structured(
+                self.runtime,
+                EstimateDraft,
+                reviewer_system,
+                prompt,
+                max_new_tokens=self.settings.estimate_max_output_tokens,
+                validate_result=_validate_draft,
+                on_attempt=(
+                    lambda event: progress({"stage": "blind_review", **event})
+                    if progress else None
+                ),
+            )
+        except ValueError as exc:
+            if progress:
+                progress(
+                    {
+                        "stage": "blind_review",
+                        "status": "failed",
+                        "label": "Blind review degraded to independent evidence heuristics",
+                        "detail": str(exc)[:500],
+                    }
+                )
+            reviewer_draft = EstimateDraft.model_construct(
+                scores={}, drivers=[], points=None, rationale="",
+                hidden_tasks=[], risks=[], assumptions=[], proposed_stories=[],
+            )
+        reviewer_scorecard = build_scorecard(reviewer_draft, story)
+        reviewer_assessment = assessment("BLIND_REVIEWER", reviewer_scorecard, story)
+        if progress:
+            progress(
+                {
+                    "stage": "blind_review",
+                    "status": "completed",
+                    "label": "Independent blind review completed",
+                    "detail": "The reviewer received story evidence and rubric, never primary scores.",
+                    "evidence": {
+                        "blind": True,
+                        "model_scored": reviewer_assessment.model_scored,
+                        "heuristic_filled": reviewer_assessment.heuristic_filled,
+                        "point_cross_check": reviewer_assessment.point_cross_check,
+                    },
+                }
+            )
+
+        disagreements = compare_assessments(primary_assessment, reviewer_assessment)
+        challenges = criticize(disagreements)
+        arbitrated_scores, arbitration = arbitrate(
+            primary_assessment, reviewer_assessment, disagreements
+        )
+        if progress:
+            material = sum(item.material for item in disagreements)
+            progress(
+                {
+                    "stage": "disagreement",
+                    "status": "completed",
+                    "label": f"Independent estimates compared: {material} material disagreement(s)",
+                    "evidence": {
+                        "differences": len(disagreements),
+                        "material": material,
+                        "protected": sum(
+                            item.material and item.protected for item in disagreements
+                        ),
+                    },
+                }
+            )
+            progress(
+                {
+                    "stage": "critic",
+                    "status": "completed",
+                    "label": (
+                        f"Critic challenged {len(challenges)} material dimension(s)"
+                        if challenges else "Critic found no material challenge"
+                    ),
+                    "evidence": {"challenges": len(challenges)},
+                }
+            )
+            progress(
+                {
+                    "stage": "arbitration",
+                    "status": "completed",
+                    "label": "Disagreements resolved by explicit deterministic policy",
+                    "evidence": {
+                        "decisions": len(arbitration),
+                        "human_approval_required": sum(
+                            item.human_approval_required for item in arbitration
+                        ),
+                    },
+                }
+            )
+
+        final_draft = EstimateDraft.model_construct(
+            scores=arbitrated_scores,
+            drivers=draft.drivers,
+            points=draft.points,
+            rationale=(
+                "Primary and blind assessments were compared and reconciled by the "
+                "published arbitration policy."
+            ),
+            hidden_tasks=draft.hidden_tasks,
+            risks=draft.risks,
+            assumptions=draft.assumptions,
+            proposed_stories=draft.proposed_stories,
+        )
+        primary_by_factor = {item.factor: item for item in primary_assessment.dimensions}
+        reviewer_by_factor = {item.factor: item for item in reviewer_assessment.dimensions}
+        arbitration_by_factor = {item.factor: item for item in arbitration}
+        final_scorecard = []
+        for item in build_scorecard(final_draft, story):
+            primary_dimension = primary_by_factor[item.factor]
+            reviewer_dimension = reviewer_by_factor[item.factor]
+            resolution = arbitration_by_factor[item.factor]
+            if resolution.selected_score == primary_dimension.score_most_likely:
+                evidence_reason = primary_dimension.rationale
+            elif resolution.selected_score == reviewer_dimension.score_most_likely:
+                evidence_reason = reviewer_dimension.rationale
+            else:
+                evidence_reason = (
+                    f"Primary evidence: {primary_dimension.rationale} "
+                    f"Reviewer evidence: {reviewer_dimension.rationale}"
+                )
+            final_scorecard.append(
+                item.model_copy(
+                    update={
+                        "reason": evidence_reason[:300],
+                        "provenance": (
+                            "model"
+                            if primary_dimension.provenance == "model"
+                            or reviewer_dimension.provenance == "model"
+                            else "heuristic"
+                        ),
+                    }
+                )
+            )
+        result = build_result(final_draft, story, manifest, final_scorecard)
+        final_scores = {item["factor"]: int(item["score"]) for item in result["scorecard"]}
+        audit = consistency_audit(
+            primary_assessment,
+            reviewer_assessment,
+            disagreements,
+            Calculation.model_validate(result["calculation"]),
+            final_scores,
+            story.stack,
+        )
+        result["agentic_pipeline"] = {
+            "version": PIPELINE_VERSION,
+            "mode": pipeline_mode,
+            "status": "HUMAN_REVIEW",
+            "canonical_story": canonical,
+            "readiness": readiness.model_dump(),
+            "specialist_routes": [item.model_dump() for item in specialist_routes],
+            "specialist_findings": [item.model_dump() for item in specialist_findings],
+            "primary": primary_assessment.model_dump(),
+            "reviewer": reviewer_assessment.model_dump(),
+            "disagreements": [item.model_dump() for item in disagreements],
+            "critic_challenges": [item.model_dump() for item in challenges],
+            "arbitration": [item.model_dump() for item in arbitration],
+            "consistency_audit": audit,
+            "final_report": {
+                "recommended_points": result["points"],
+                "recommendation": result["recommendation"],
+                "confidence": result["confidence"],
+                "why_selected": result["plain_language_why"],
+                "why_not_lower": result["detailed_reasoning"]["band_sensitivity"][
+                    "explanation"
+                ],
+                "why_not_higher": (
+                    "The next Fibonacci value requires additional scored evidence or a "
+                    "framework gate; unsupported risk is not added to the estimate."
+                ),
+                "assumptions": result["assumptions"],
+                "human_authority": (
+                    "This is a decision-support recommendation. The delivery team owns "
+                    "the final estimate and may accept, override, spike, or decompose it."
+                ),
+            },
+            "human_review": {
+                "required": True,
+                "status": "pending",
+                "options": ["accept", "override", "spike", "decompose"],
+                "reason": (
+                    "Every AI-assisted estimate requires an explicit human team decision."
+                ),
+            },
+            "prompt_versions": {
+                "primary": "estimate-primary-1.0",
+                "reviewer": "estimate-blind-review-1.0",
+            },
+            "model_policy": {
+                "model": self.settings.model_id,
+                "serialized": True,
+                "independent_model_passes": 2,
+                "hidden_chain_of_thought_stored": False,
+            },
+        }
 
         if progress:
             provenance = result["evidence"]["scoring_provenance"]
@@ -871,6 +1166,25 @@ class EstimateService:
                         "confidence": result["confidence"],
                         "risk_flags": len(result["risk_flags"]),
                         "suggestions": len(result["suggestions"]),
+                    },
+                }
+            )
+            progress(
+                {
+                    "stage": "consistency_audit",
+                    "status": "completed",
+                    "label": f"Consistency audit: {audit['status'].replace('_', ' ').title()}",
+                    "evidence": audit,
+                }
+            )
+            progress(
+                {
+                    "stage": "human_review",
+                    "status": "waiting",
+                    "label": "Human team decision required",
+                    "detail": result["agentic_pipeline"]["human_review"]["reason"],
+                    "evidence": {
+                        "options": result["agentic_pipeline"]["human_review"]["options"]
                     },
                 }
             )

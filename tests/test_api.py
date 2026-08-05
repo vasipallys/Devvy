@@ -44,16 +44,22 @@ def test_talk_text_mode_returns_workspace_artifact(monkeypatch):
         assert socket.receive_json() == {"type": "state", "value": "idle"}
         socket.send_json({"type": "text", "content": "draw a moon", "mode": "image"})
         events = []
-        for _ in range(14):
+        # The turn now runs as a background job, so the socket also relays heartbeats while
+        # it waits. Read until the terminal event rather than assuming a fixed count.
+        for _ in range(200):
             event = socket.receive_json()
             events.append(event)
             if event["type"] == "audio_ready":
                 break
+        else:
+            raise AssertionError(f"audio_ready never arrived; saw {[e['type'] for e in events]}")
 
     assert {event["type"] for event in events} >= {
         "transcript", "state", "token", "text_complete", "image_ready", "audio_ready"
     }
     assert any(event["type"] == "agent_event" for event in events)
+    # The turn is durable: it is submitted as a job the client can look up later.
+    assert any(event["type"] == "job_started" and event["job_id"] for event in events)
 
 
 def test_system_status_exposes_capabilities_without_secrets():

@@ -9,4 +9,5 @@ data/
 models/
 frontend/node_modules/
 frontend/dist/
-frontend/release/
+frontend/*.tsbuildinfo
+.pytest-data/

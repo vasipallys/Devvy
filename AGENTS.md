@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What this is
 
-Devvy — Evidence-Based Development: a local-first desktop AI workspace. A FastAPI backend runs Gemma 3 1B locally on CPU via transformers; an Electron + React frontend talks to it over HTTP/SSE (Chat) and WebSocket (Talk voice mode). The Python package is `backend/`, built with hatchling (`pyproject.toml`).
+Devvy — Evidence-Based Development: a local-first AI workspace that runs as a local web application. A FastAPI backend runs Gemma 3 1B locally on CPU via transformers; a React frontend served by Vite talks to it over HTTP/SSE (Chat) and WebSocket (Talk voice mode). There is no Electron shell — the UI is opened in an ordinary browser. The Python package is `backend/`, built with hatchling (`pyproject.toml`).
 
 ## Commands (Windows / PowerShell)
 
@@ -13,8 +13,8 @@ The venv lives at `.venv` (older setups may have `venv` — `scripts/start-backe
 ```powershell
 .\scripts\setup.ps1                                  # one-time: venv, pip install -e ".[dev]", npm install
 .\scripts\start-backend.ps1                          # backend (uvicorn on 127.0.0.1:8765; runs python -m backend)
-cd frontend; npm run dev                             # Vite (5173) + Electron, concurrently
-cd frontend; npm run dev:web                         # Vite only, opens in the default browser (no Electron)
+cd frontend; npm run dev                             # Vite dev server (5173), opens the browser
+cd frontend; npm run preview                         # serve the production build from dist/
 
 .\.venv\Scripts\python.exe -m ruff check backend tests   # lint (line-length 100, py311)
 .\.venv\Scripts\python.exe -m pytest                     # all tests
@@ -63,7 +63,13 @@ Configuration is `config.py` `Settings` (pydantic-settings, reads `.env`); `get_
 
 `src/main.tsx` mounts `DesktopApp`, which switches between `HomeScreen` (Chat, Talk, Smart Code, Estimate Code), `App.tsx` (chat workspace: sidebar, mode picker, SSE streaming via `src/api.ts`), `TalkScreen.tsx` (WebSocket voice UI with animated avatar states Idle/Listening/Thinking/Speaking), `SmartCodeScreen.tsx`, and `EstimateCodeScreen.tsx`. `EvidencePanel.tsx` is shared by all four and renders the agent-event trajectory.
 
-In `App.tsx`, `streamingRef` guards the `[activeId]` message loader: a new conversation gets its id from the `start` event, and refetching at that moment would replace the optimistic messages with the server's copy, where the assistant row does not exist yet — dropping every subsequent token. Keep that guard when touching the streaming path. The backend URL is hardcoded in `src/api.ts`. Electron (`electron/main.cjs`) uses context isolation, sandbox, no Node integration in the renderer, and opens external links in the system browser — keep those settings intact.
+In `App.tsx`, `streamingRef` guards the `[activeId]` message loader: a new conversation gets its id from the `start` event, and refetching at that moment would replace the optimistic messages with the server's copy, where the assistant row does not exist yet — dropping every subsequent token. Keep that guard when touching the streaming path. The API base URL comes from `VITE_API_URL` in `src/api.ts`, defaulting to `http://127.0.0.1:8765`.
+
+**Every model-backed request is a durable background job** (`backend/jobs.py`). Submitting returns a job id immediately; the worker claims queued rows from SQLite and runs them one at a time, because `GemmaRuntime` already serializes generation. Closing the tab cannot cancel work or lose a result. `GET /api/jobs/{id}/stream` sends a snapshot then live deltas — token deltas carry a character `offset` and agent events carry a `seq` so a client attaching mid-run drops the overlap instead of duplicating it. On startup the runner marks jobs orphaned by a previous process as `interrupted`, since a generation cannot be resumed. `useJobs` mounts once in `DesktopApp` to drive the activity badge and the `beforeunload` guard; each screen reattaches on load to a job of its kind that is still active.
+
+Every page is wrapped in `ErrorBoundary` (keyed per page). Without it a render error unmounts the tree and shows an empty black window that cannot be told apart from a slow load. Relatedly, `useEffect` callbacks must use a block body — a concise arrow returns its expression and React calls that as the cleanup function, which fails with `destroy is not a function`. TypeScript cannot catch this, so an ESLint `no-restricted-syntax` rule enforces it.
+
+The browser cannot read filesystem paths from a file input, so Smart Code takes the workspace root and target files as text. Never reintroduce a native picker dependency.
 
 ## Conventions and constraints
 

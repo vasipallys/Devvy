@@ -1,7 +1,8 @@
 # Devvy — Evidence-Based Development
 
-Devvy is an evidence-based, local-first desktop AI workspace built around one shared, lazily loaded
-Gemma 3 1B runtime. It combines four workspaces in a single Electron application:
+Devvy is an evidence-based, local-first AI workspace built around one shared, lazily loaded
+Gemma 3 1B runtime. It runs entirely on your machine as a local web application: a FastAPI
+backend plus a React frontend you open in your browser. It combines four workspaces:
 
 - **Chat** - private conversation, coding assistance, document analysis, web research, and
   optional local image generation.
@@ -60,34 +61,35 @@ not appear frozen.
    .\scripts\start-backend.ps1
    ```
 
-5. In a second terminal, start Vite and Electron:
+5. In a second terminal, start the frontend:
 
    ```powershell
    cd frontend
    npm run dev
    ```
 
+   This starts Vite and opens Devvy in your default browser.
+
 The API listens on `http://127.0.0.1:8765`, Swagger UI is available at
 `http://127.0.0.1:8765/docs`, and Vite uses `http://localhost:5173`. The first model-backed
 request downloads and loads Gemma, so it is slower than later requests.
 
-### Running in a browser instead of Electron
-
-`npm run dev` launches the Electron desktop shell. To run the same UI in an ordinary browser -
-useful for debugging with DevTools, or on a machine where Electron will not start:
+### Serving a production build
 
 ```powershell
 cd frontend
-npm run dev:web
+npm run build
+npm run preview
 ```
 
-That serves Vite on `http://localhost:5173` and opens your default browser. Use `npm run preview:web`
-to serve a production build the same way. The backend must already be running; both modes talk to
-the same API.
+`build` emits a static bundle to `frontend/dist/`, and `preview` serves it. Because the whole
+frontend is static files, you can also serve `dist/` with any web server. The backend must be
+running either way; the API base URL comes from `VITE_API_URL` and defaults to
+`http://127.0.0.1:8765`.
 
-Everything works in the browser except the Electron-only native dialogs: Smart Code's **Choose
-folder** and **Select files** buttons need the desktop shell, so paste absolute paths into the
-workspace and target fields instead. The UI says so when you click them.
+Smart Code takes filesystem paths as text, since a browser cannot read a real path from a file
+picker. Enter an absolute path for the workspace folder; target files may be absolute or relative
+to that workspace. The API resolves both and rejects anything that escapes the workspace root.
 
 `scripts/setup.ps1` installs the core, development, and image extras. Talk's microphone/TTS and
 Manim video features are optional:
@@ -119,7 +121,6 @@ backend/
   config.py              Environment-backed settings
 frontend/
   src/                    React workspaces, API client, types, and styles
-  electron/               Sandboxed Electron main process and preload bridge
 scripts/                  Setup and local startup scripts
 tests/                    Backend API, routing, safety, and workflow tests
 ```
@@ -128,7 +129,7 @@ tests/                    Backend API, routing, safety, and workflow tests
 
 ```mermaid
 flowchart LR
-  UI["Electron + React"] -->|"HTTP / SSE"| API["FastAPI"]
+  UI["React in the browser"] -->|"HTTP / SSE"| API["FastAPI"]
   UI -->|"WebSocket"| API
   API --> CHAT["Chat agent"]
   API --> TALK["Talk agent"]
@@ -149,6 +150,32 @@ flowchart LR
 All four product workspaces reuse the same `GemmaRuntime`. Loading is protected by a process-wide
 thread lock and generation is protected by an async lock, so CPU-heavy model calls are serialized.
 Chat and Smart/Estimate responses use SSE; Talk uses a per-connection WebSocket conversation.
+
+## Long-running requests
+
+CPU inference takes minutes, so no request is tied to the browser tab that started it.
+Submitting a chat turn, an estimate, a code preview, or a Talk turn creates a **durable job**:
+the API returns a job id immediately and an in-process worker runs it independently of any
+connection.
+
+- **Close the tab and the work continues.** Devvy warns you first, because it is easy to assume
+  closing a tab cancels a request. It does not — the warning exists so you know a result will be
+  waiting rather than believing you stopped it.
+- **Reopen and everything is there.** Home shows how many requests are running. The **Activity**
+  screen lists every request — running and finished — with its status, elapsed time, evidence
+  trajectory, and full response. Opening a conversation reattaches to a turn still generating, so
+  you rejoin mid-answer instead of seeing a stalled blank bubble.
+- **Stop means stop.** Cancelling cancels the job on the server, not just this tab's view of it.
+  Output produced before cancelling stays readable.
+
+Jobs are persisted in SQLite alongside conversations and kept for `JOB_RETENTION_DAYS`
+(default 7). If the backend restarts mid-run, the job is marked `interrupted` rather than left
+claiming to be in progress — a partially completed generation cannot be resumed, and pretending
+otherwise would be worse than saying so.
+
+Work runs one job at a time. The shared Gemma runtime already serializes generation behind a
+single lock, so a wider pool would only queue inside the model while making progress reporting
+dishonest.
 
 ## Agent engineering and evidence
 
@@ -256,6 +283,22 @@ final recommendation are all computed in `backend/estimation_framework.py`. The 
 step-by-step ledger of every rule — **including the ones that did not fire** — with its spec
 reference, delta, and running total, so the arithmetic can be replayed by hand.
 
+The estimation workflow also implements the controlled local adaptation of
+[`agentic_story_point_estimation_pipeline_spec.md`](agentic_story_point_estimation_pipeline_spec.md).
+It normalizes the story into stable evidence IDs and an input hash, evaluates readiness, routes
+risk-relevant specialist lenses, and runs two independent model assessments. The blind reviewer
+receives the same evidence and rubric but never the primary scorecard. Application code detects
+dimension and Fibonacci-boundary disagreement, challenges material differences, applies a
+published arbitration policy, replays the calculation, and emits a consistency audit. Protected
+risk disagreements use the higher score and require human review. This is a serialized two-pass
+design for a local CPU model; the UI does not pretend that several models ran in parallel.
+
+The result workspace exposes Final report, Readiness, Evidence, Specialists, Primary, Blind
+review, Critic & resolution, Calculation, References, AI scenario, Human consensus, and Audit
+views. It shows concise public rationale, score ranges, evidence IDs, why-not-lower/higher
+boundaries, prompt versions, and calculation replay. Private chain-of-thought is neither requested
+nor stored. The final estimate remains a team decision; AI output is decision support only.
+
 Every result also includes detailed public reasoning: factor-group subtotals, the strongest
 evidence contributors, applied adjustments, the complete gate path, the exact reduction required
 to reach a lower Fibonacci band, and one-level factor sensitivity recomputed by the framework.
@@ -325,16 +368,16 @@ data/
   smart-code/runs/
 ```
 
-The current application is a trusted single-user desktop design. The API has no authentication,
+The current application is a trusted single-user local design. The API has no authentication,
 authorization, tenancy, rate limiting, or malware scanner and should remain bound to loopback.
 Before exposing it to a LAN or the internet, add authenticated principals, per-user authorization
 and storage isolation, request/rate limits, hardened egress policy, upload scanning, secret
 management, TLS, audit retention, and a production database.
 
-The current `electron-builder` targets package the compiled renderer and Electron shell only. They
-do not bundle, install, or supervise Python, the backend dependencies, optional media tools, or the
-model cache. A distributable one-click product needs a backend sidecar packaging and lifecycle
-strategy before release.
+There is no packaged installer. `npm run build` produces a static frontend bundle, but nothing
+bundles, installs, or supervises Python, the backend dependencies, the optional media tools, or the
+model cache. A distributable one-click product would need a backend packaging and lifecycle strategy
+before release.
 
 ## Development
 

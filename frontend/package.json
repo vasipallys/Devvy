@@ -1,16 +1,12 @@
 {
-  "name": "devvy-desktop",
+  "name": "devvy-web",
   "version": "0.1.0",
   "private": true,
-  "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "dev:web": "vite --open",
+    "dev": "vite --open",
     "build": "tsc -b && vite build",
-    "preview:web": "vite preview --open",
-    "start": "electron .",
-    "lint": "eslint . --max-warnings=0",
-    "package": "npm run build && electron-builder"
+    "preview": "vite preview --open",
+    "lint": "eslint . --max-warnings=0"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -23,35 +19,10 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "4.7.0",
-    "concurrently": "^9.1.0",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
     "eslint": "^9.16.0",
     "globals": "^16.3.0",
     "typescript": "~5.7.2",
     "typescript-eslint": "^8.39.0",
-    "vite": "^6.0.0",
-    "wait-on": "^8.0.1"
-  },
-  "build": {
-    "appId": "ai.devvy.desktop",
-    "productName": "Devvy - Evidence-Based Development",
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "package.json"
-    ],
-    "directories": {
-      "output": "release"
-    },
-    "win": {
-      "target": "nsis"
-    },
-    "mac": {
-      "target": "dmg"
-    },
-    "linux": {
-      "target": "AppImage"
-    }
+    "vite": "^6.0.0"
   }
 }

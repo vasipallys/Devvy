@@ -24,4 +24,4 @@ if (-not (Test-Path ".env")) { Copy-Item ".env.example" ".env" }
 Push-Location frontend
 npm install
 Pop-Location
-Write-Host "Setup complete. Add HF_TOKEN to .env, then start backend and desktop." -ForegroundColor Green
+Write-Host "Setup complete. Add HF_TOKEN to .env, then run scripts\start-backend.ps1 and, in a second terminal, 'cd frontend; npm run dev'." -ForegroundColor Green

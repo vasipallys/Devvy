@@ -1,12 +1,28 @@
-import { ArrowRight, BrainCircuit, Check, Code2, Database, LockKeyhole, MessageSquare, Mic2, ShieldCheck, Sparkles } from 'lucide-react'
+import { ArrowRight, BrainCircuit, Check, Code2, Database, LoaderCircle, LockKeyhole, MessageSquare, Mic2, ShieldCheck, Sparkles, Timer } from 'lucide-react'
 import { SystemStatusChip } from './SystemStatusChip'
 
-type Props = { onChat: () => void; onTalk: () => void; onSmartCode: () => void; onEstimateCode: () => void }
+type Props = {
+  onChat: () => void
+  onTalk: () => void
+  onSmartCode: () => void
+  onEstimateCode: () => void
+  onActivity: () => void
+  activeJobs: number
+}
 
-export function HomeScreen({ onChat, onTalk, onSmartCode, onEstimateCode }: Props) {
+export function HomeScreen({ onChat, onTalk, onSmartCode, onEstimateCode, onActivity, activeJobs }: Props) {
   return <div className="home-screen">
     <div className="home-glow" />
-    <header className="home-header"><div className="brand-lockup"><div className="brand-mark"><Sparkles size={18}/></div><span><b>Devvy</b><small>Evidence-based development</small></span></div><SystemStatusChip/></header>
+    <header className="home-header">
+      <div className="brand-lockup"><div className="brand-mark"><Sparkles size={18}/></div><span><b>Devvy</b><small>Evidence-based development</small></span></div>
+      <div className="home-header-actions">
+        <button className={`activity-chip ${activeJobs ? 'busy' : ''}`} onClick={onActivity}>
+          {activeJobs ? <LoaderCircle className="spin" size={14}/> : <Timer size={14}/>}
+          <span>{activeJobs ? `${activeJobs} running` : 'Activity'}</span>
+        </button>
+        <SystemStatusChip/>
+      </div>
+    </header>
     <main className="home-content">
       <div className="home-kicker"><ShieldCheck/> PRIVATE BY ARCHITECTURE</div>
       <h1>One local intelligence.<br/><em>Four focused workflows.</em></h1>

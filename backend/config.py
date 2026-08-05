@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     smart_code_max_output_tokens: int = 4096
     estimate_max_output_tokens: int = 3072
     agent_run_retention_days: int = 30
+    #: Completed background jobs stay queryable for this long so a returning browser can
+    #: still read a result it never collected. Older jobs and their events are purged.
+    job_retention_days: int = 7
     whisper_model: str = "base.en"
     whisper_compute_type: str = "int8"
     tts_rate: int = 170

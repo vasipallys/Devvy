@@ -6,6 +6,7 @@ import shutil
 from importlib.util import find_spec
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -26,6 +27,7 @@ from backend.estimate_code import (
     EstimateRequest,
     EstimateService,
     JiraWriteRequest,
+    Story,
     jira_issues,
     parse_upload as parse_estimate_upload,
     rows_to_stories,
@@ -40,6 +42,7 @@ from backend.estimation_framework import (
     StackProfile,
 )
 from backend.harness import RunLedger
+from backend.jobs import FINISHED as FINISHED_JOB_STATES, JobContext, JobRunner
 from backend.model import GemmaRuntime
 from backend.observability import configure_observability
 from backend.schemas import ChatRequest, RenameRequest
@@ -58,20 +61,30 @@ animation_engine = AnimationEngine(settings)
 smart_code_service = SmartCodeService(runtime, settings)
 estimate_service = EstimateService(runtime, settings)
 run_ledger = RunLedger(settings.app_data_dir, settings.agent_run_retention_days)
+job_runner = JobRunner(engine, retention_days=settings.job_retention_days)
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     init_db()
     configure_observability(settings, application)
-    yield
+    # The worker owns all model execution. Starting it here — not per request — is what
+    # lets a run outlive the connection that submitted it.
+    await job_runner.start()
+    try:
+        yield
+    finally:
+        await job_runner.stop()
 
 
 app = FastAPI(title=f"{settings.app_name} API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_origin_regex=r"^(https?://(localhost|127\.0\.0\.1)(:\d+)?|null)$",
+    # Any loopback origin is accepted so the dev server can move ports. The literal "null"
+    # origin is deliberately not allowed: it was only ever needed by the Electron renderer
+    # loading over file://, and it would otherwise match sandboxed iframes and local files.
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -230,131 +243,387 @@ def attachment_data(ids: list[str]) -> tuple[list[dict], str]:
     return attachments, "\n\n".join(contexts)
 
 
-@app.post("/api/chat/stream")
-async def chat(payload: ChatRequest):
+async def drain_tokens(generation: asyncio.Task, queue: asyncio.Queue[str], context: JobContext) -> bool:
+    """Relay tokens to the job while reporting progress during CPU prefill.
+
+    Returns whether anything streamed, so callers can emit tool-only answers that bypass
+    the LLM stream as a single token.
+    """
+    streamed = False
+    elapsed = 0
+    while not generation.done() or not queue.empty():
+        try:
+            await context.token(await asyncio.wait_for(queue.get(), timeout=2))
+            streamed = True
+        except TimeoutError:
+            elapsed += 2
+            await context.progress(
+                "Preparing the local model…" if elapsed < 10 else f"Generating on CPU… {elapsed}s"
+            )
+    return streamed
+
+
+async def run_chat_job(request: dict, context: JobContext) -> dict:
+    """Generate and persist one assistant turn. Owned by the worker, not by a connection."""
+    conversation_id = UUID(request["conversation_id"])
+    mode = request["mode"]
+    message = request["message"]
+    attachment_context = request.get("attachment_context", "")
+    run = run_ledger.start(
+        "chat",
+        metadata={
+            "requested_mode": mode,
+            "attachments": request.get("attachment_count", 0),
+            "model": settings.model_id,
+        },
+    )
+    try:
+        with Session(engine) as session:
+            prior = [
+                item for item in list_messages(session, conversation_id) if item.role != "system"
+            ]
+        # The submitted message is already persisted, so drop it from the replayed history.
+        history = [
+            AIMessage(content=item.content) if item.role == "assistant"
+            else HumanMessage(content=item.content)
+            for item in prior[-21:-1]
+        ]
+        await context.event(
+            "context", "completed", "Context assembled",
+            evidence={
+                "history_messages": len(history),
+                "attachments": request.get("attachment_count", 0),
+                "characters": len(attachment_context),
+                "budget": settings.document_max_chars,
+            },
+        )
+        await context.event(
+            "route", "running", "Selecting the safest workflow", detail=f"Requested mode: {mode}"
+        )
+        token_queue: asyncio.Queue[str] = asyncio.Queue()
+        generation = asyncio.create_task(
+            agent.invoke(history, message, mode, attachment_context, token_queue)
+        )
+        streamed = await drain_tokens(generation, token_queue, context)
+        result = await generation
+
+        await context.event(
+            "route", "completed",
+            f"{str(result.get('mode') or mode).title()} workflow selected",
+            detail=result.get("route_reason") or None,
+            evidence={"mode": result.get("mode") or mode},
+        )
+        sources = result.get("sources") or []
+        if sources or result.get("research_failed"):
+            await context.event(
+                "research",
+                "failed" if result.get("research_failed") else "completed",
+                (
+                    "Live research unavailable — the answer must say so"
+                    if result.get("research_failed")
+                    else f"{len(sources)} public source(s) retrieved"
+                ),
+                evidence={
+                    "sources": [item["url"] for item in sources if item.get("url")],
+                    "titles": [item["title"] for item in sources],
+                    "retrieved_characters": sum(int(item["characters"]) for item in sources),
+                },
+            )
+        answer = str(result["messages"][-1].content)
+        if not streamed:
+            await context.token(answer)
+        with Session(engine) as session:
+            saved = Message(
+                conversation_id=conversation_id, role="assistant", content=answer,
+                message_metadata={
+                    "mode": result.get("mode"), "artifact_url": result.get("artifact_url")
+                },
+            )
+            session.add(saved)
+            conversation = session.get(Conversation, conversation_id)
+            if conversation:
+                conversation.updated_at = now()
+                session.add(conversation)
+            session.commit()
+            session.refresh(saved)
+            payload = message_dict(saved)
+        await context.event(
+            "finalize", "completed", "Response persisted locally",
+            evidence={
+                "response_characters": len(answer),
+                "context_sources": result.get("context_manifest", []),
+                "artifact": bool(result.get("artifact_url")),
+            },
+        )
+        run.finish(
+            "completed",
+            summary={"mode": result.get("mode"), "artifact": bool(result.get("artifact_url"))},
+        )
+        return {
+            "message": payload,
+            "mode": result.get("mode"),
+            "artifact_url": result.get("artifact_url"),
+        }
+    except asyncio.CancelledError:
+        run.event("cancelled", "failed", "The run was cancelled by the user")
+        run.finish("cancelled")
+        raise
+    except Exception as exc:
+        run.event("error", "failed", "The run could not complete", detail=str(exc)[:500])
+        run.finish("failed", summary={"error_type": type(exc).__name__})
+        await context.event("error", "failed", "The run could not complete", detail=str(exc)[:500])
+        raise
+
+
+job_runner.register("chat", run_chat_job)
+
+
+@app.post("/api/chat/jobs", status_code=202)
+def submit_chat(payload: ChatRequest):
+    """Accept a chat turn and return immediately with a job to follow.
+
+    The user message and conversation are persisted before the response is sent, so the UI
+    can render the turn instantly and the work is recoverable even if the client never
+    reconnects.
+    """
     conversation_id = payload.conversation_id
     with Session(engine) as session:
         conversation = session.get(Conversation, conversation_id) if conversation_id else None
         if not conversation:
             conversation = create_conversation(session, payload.message[:60])
-            conversation_id = conversation.id
-        attachments, context = attachment_data(payload.attachment_ids)
-        user_message = Message(conversation_id=conversation_id, role="user", content=payload.message, attachments=attachments)
+        conversation_id = conversation.id
+        attachments, attachment_context = attachment_data(payload.attachment_ids)
+        user_message = Message(
+            conversation_id=conversation_id, role="user",
+            content=payload.message, attachments=attachments,
+        )
         session.add(user_message)
         conversation.updated_at = now()
         session.add(conversation)
         session.commit()
-        prior = list_messages(session, conversation_id)[:-1]
-    history = [AIMessage(content=x.content) if x.role == "assistant" else HumanMessage(content=x.content) for x in prior[-20:]]
-    run = run_ledger.start(
+        session.refresh(user_message)
+        user_payload = message_dict(user_message)
+
+    job = job_runner.submit(
         "chat",
-        metadata={"requested_mode": payload.mode, "attachments": len(attachments), "model": settings.model_id},
+        payload.message[:120],
+        {
+            "conversation_id": str(conversation_id),
+            "message": payload.message,
+            "mode": payload.mode,
+            "attachment_context": attachment_context,
+            "attachment_count": len(attachments),
+        },
+        conversation_id=conversation_id,
     )
+    return {
+        "job_id": str(job.id),
+        "conversation_id": str(conversation_id),
+        "message": user_payload,
+        "model": settings.model_id,
+        "local": True,
+    }
+
+
+# --------------------------------------------------------------------------------------
+# Job surface: the only way a client observes work. Nothing here drives execution.
+# --------------------------------------------------------------------------------------
+
+
+@app.get("/api/jobs")
+def list_jobs(
+    limit: int = Query(default=50, ge=1, le=200),
+    kind: str | None = Query(default=None, max_length=20),
+):
+    """Everything the activity view needs on reopening the browser."""
+    return {"jobs": job_runner.list(limit=limit, kind=kind), "active": job_runner.active_count()}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: UUID):
+    detail = job_runner.snapshot(job_id)
+    if detail is None:
+        raise HTTPException(404, "Job not found")
+    return detail
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: UUID):
+    if not job_runner.cancel(job_id):
+        raise HTTPException(409, "That request has already finished.")
+    return {"status": "cancelling", "job_id": str(job_id)}
+
+
+@app.get("/api/jobs/{job_id}/stream")
+async def stream_job(job_id: UUID):
+    """Attach to a job: a full snapshot, then live deltas until it finishes.
+
+    Subscribing happens *before* the snapshot is taken, so no event can fall between the
+    two. Deltas already contained in the snapshot are filtered by the client using each
+    token's offset, which makes attaching at any point safe and repeatable.
+    """
+    queue = job_runner.subscribe(job_id)
+    snapshot = job_runner.snapshot(job_id)
+    if snapshot is None:
+        job_runner.unsubscribe(job_id, queue)
+        raise HTTPException(404, "Job not found")
 
     async def events():
-        yield f"data: {json.dumps({'type': 'start', 'run_id': run.id, 'conversation_id': str(conversation_id), 'message_id': str(user_message.id), 'model': settings.model_id, 'local': True})}\n\n"
         try:
-            context_event = run.event(
-                "context",
-                "completed",
-                "Context assembled",
-                evidence={
-                    "history_messages": len(history),
-                    "attachments": len(attachments),
-                    "characters": len(context),
-                    "budget": settings.document_max_chars,
-                },
-            )
-            yield f"data: {json.dumps({'type': 'agent_event', **context_event})}\n\n"
-            route_event = run.event(
-                "route", "running", "Selecting the safest workflow", detail=f"Requested mode: {payload.mode}"
-            )
-            yield f"data: {json.dumps({'type': 'agent_event', **route_event})}\n\n"
-            token_queue: asyncio.Queue[str] = asyncio.Queue()
-            generation = asyncio.create_task(
-                agent.invoke(history, payload.message, payload.mode, context, token_queue)
-            )
-            elapsed = 0
-            streamed = False
-            while not generation.done() or not token_queue.empty():
+            yield sse("snapshot", snapshot)
+            if snapshot["status"] in FINISHED_JOB_STATES:
+                yield sse("done", {"status": snapshot["status"], "result": snapshot["result"]})
+                return
+            while True:
                 try:
-                    token = await asyncio.wait_for(token_queue.get(), timeout=2)
-                    streamed = True
-                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+                    message = await asyncio.wait_for(queue.get(), timeout=15)
                 except TimeoutError:
-                    elapsed += 2
-                    detail = (
-                        "Preparing the local model…"
-                        if elapsed < 10
-                        else f"Generating on CPU… {elapsed}s"
-                    )
-                    yield f"data: {json.dumps({'type': 'status', 'content': detail})}\n\n"
-            result = await generation
-            completed_route = run.event(
-                "route",
-                "completed",
-                f"{str(result.get('mode') or payload.mode).title()} workflow selected",
-                detail=result.get("route_reason") or None,
-                evidence={"mode": result.get("mode") or payload.mode},
+                    # Keeps proxies and idle browsers from dropping a long, quiet run.
+                    yield sse("heartbeat", {"job_id": str(job_id)})
+                    continue
+                yield sse(message.get("type", "message"), message)
+                if message.get("type") == "done":
+                    return
+        finally:
+            job_runner.unsubscribe(job_id, queue)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def run_talk_job(request: dict, context: JobContext) -> dict:
+    """One spoken turn: generate, then produce optional audio and video.
+
+    Runs on the worker like every other request, so closing the tab mid-sentence still
+    finishes the answer and the media. The socket is only a listener.
+    """
+    transcript = request["transcript"]
+    mode = request["mode"]
+    history = [
+        AIMessage(content=item["content"]) if item["role"] == "assistant"
+        else HumanMessage(content=item["content"])
+        for item in request.get("history", [])
+    ]
+    run = run_ledger.start(
+        "talk",
+        metadata={
+            "mode": mode,
+            "attachments": request.get("attachment_count", 0),
+            "model": settings.model_id,
+        },
+    )
+    try:
+        await context.event(
+            "context", "completed", "Turn context prepared locally",
+            evidence={
+                "history_messages": len(history),
+                "attachments": request.get("attachment_count", 0),
+            },
+        )
+        await context.event("generate", "running", "Devvy is composing a grounded response")
+        token_queue: asyncio.Queue[str] = asyncio.Queue()
+        if mode == "talk":
+            generation = asyncio.create_task(
+                talk_agent.invoke(history, transcript, {}, token_queue)
             )
-            yield f"data: {json.dumps({'type': 'agent_event', **completed_route})}\n\n"
-            # Research sources are the citable basis for the answer, so they are reported
-            # individually rather than collapsed into a character count.
-            sources = result.get("sources") or []
-            if sources or result.get("research_failed"):
-                research_event = run.event(
-                    "research",
-                    "failed" if result.get("research_failed") else "completed",
-                    (
-                        "Live research unavailable — the answer must say so"
-                        if result.get("research_failed")
-                        else f"{len(sources)} public source(s) retrieved"
-                    ),
-                    evidence={
-                        "sources": [item["url"] for item in sources if item.get("url")],
-                        "titles": [item["title"] for item in sources],
-                        "retrieved_characters": sum(int(item["characters"]) for item in sources),
-                    },
+        else:
+            generation = asyncio.create_task(
+                agent.invoke(
+                    history, transcript, mode, request.get("attachment_context", ""), token_queue
                 )
-                yield f"data: {json.dumps({'type': 'agent_event', **research_event})}\n\n"
-            answer = str(result["messages"][-1].content)
-            # Tool-only responses (for example image errors) do not pass through the LLM stream.
-            if not streamed:
-                yield f"data: {json.dumps({'type': 'token', 'content': answer})}\n\n"
-            with Session(engine) as session:
-                saved = Message(conversation_id=conversation_id, role="assistant", content=answer, message_metadata={"mode": result.get("mode"), "artifact_url": result.get("artifact_url")})
-                session.add(saved)
-                session.commit()
-                session.refresh(saved)
-            final_event = run.event(
-                "finalize",
-                "completed",
-                "Response persisted locally",
+            )
+        await drain_tokens(generation, token_queue, context)
+        result = await generation
+        response = result["response"] if mode == "talk" else str(result["messages"][-1].content)
+
+        if result.get("route_reason"):
+            await context.event(
+                "route", "completed", "Turn routed", detail=str(result["route_reason"]),
                 evidence={
-                    "response_characters": len(answer),
-                    "context_sources": result.get("context_manifest", []),
-                    "artifact": bool(result.get("artifact_url")),
+                    "research": bool(result.get("requires_research")),
+                    "animation": bool(result.get("requires_animation")),
                 },
             )
-            yield f"data: {json.dumps({'type': 'agent_event', **final_event})}\n\n"
-            run.finish("completed", summary={"mode": result.get("mode"), "artifact": bool(result.get("artifact_url"))})
-            yield f"data: {json.dumps({'type': 'done', 'run_id': run.id, 'message': message_dict(saved)})}\n\n"
-        except Exception as exc:
-            logging.exception("Chat failed")
-            run.event("error", "failed", "The run could not complete", detail=str(exc)[:500])
-            run.finish("failed", summary={"error_type": type(exc).__name__})
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        sources = result.get("sources") or []
+        if sources or result.get("research_failed"):
+            await context.event(
+                "research",
+                "failed" if result.get("research_failed") else "completed",
+                (
+                    "Live research unavailable — the answer must say so"
+                    if result.get("research_failed")
+                    else f"{len(sources)} public source(s) retrieved"
+                ),
+                evidence={
+                    "sources": [item["url"] for item in sources if item.get("url")],
+                    "titles": [item["title"] for item in sources],
+                },
+            )
+        await context.event(
+            "generate", "completed", "Response completed",
+            evidence={
+                "response_characters": len(response),
+                "context_sources": result.get("context_manifest", []),
+            },
+        )
+        job_result: dict[str, Any] = {
+            "response": response,
+            "mode": mode,
+            "artifact_url": result.get("artifact_url"),
+            "audio_url": None,
+            "video_url": None,
+            "warnings": [],
+        }
 
-    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        # Media is best-effort: a TTS or Manim failure MUST NOT discard completed text.
+        tts_task = asyncio.create_task(voice_engine.synthesize(response))
+        animation_task = None
+        if mode == "talk" and result.get("requires_animation"):
+            animation_task = asyncio.create_task(
+                animation_engine.render(transcript[:60], response)
+            )
+        try:
+            job_result["audio_url"] = await tts_task
+        except Exception as exc:
+            logger.warning("Talk TTS failed: %s", exc)
+            job_result["warnings"].append(str(exc))
+        if animation_task:
+            try:
+                job_result["video_url"] = await animation_task
+            except Exception as exc:
+                logger.warning("Talk animation failed: %s", exc)
+                job_result["warnings"].append(str(exc))
+
+        await context.event(
+            "media", "completed", "Optional media processing finished",
+            evidence={
+                "audio": bool(job_result["audio_url"]),
+                "animation": bool(job_result["video_url"]),
+                "warnings": len(job_result["warnings"]),
+            },
+        )
+        run.finish("completed", summary={"mode": mode})
+        return job_result
+    except asyncio.CancelledError:
+        run.finish("cancelled")
+        raise
+    except Exception as exc:
+        run.event("error", "failed", "The Talk turn could not complete", detail=str(exc)[:500])
+        run.finish("failed", summary={"error_type": type(exc).__name__})
+        raise
+
+
+job_runner.register("talk", run_talk_job)
 
 
 @app.websocket("/api/talk/ws")
 async def talk_socket(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
-    history: list = []
-    preferences: dict[str, str] = {}
-    active_run = None
+    history: list[dict[str, str]] = []
 
     async def send(event_type: str, **data):
         await websocket.send_json({"type": event_type, **data})
@@ -364,141 +633,81 @@ async def talk_socket(websocket: WebSocket):
         mode: str = "chat",
         attachment_ids: list[str] | None = None,
     ):
-        nonlocal history, active_run
+        """Submit the turn as a job, then relay its events onto the Talk protocol."""
+        nonlocal history
         if not transcript.strip():
             await send("error", message="I could not hear any speech. Please try again.")
             await send("state", value="idle")
             return
-        await send("transcript", content=transcript)
-        await send("state", value="thinking")
-        active_run = run_ledger.start(
-            "talk",
-            metadata={
-                "mode": mode,
-                "attachments": len(attachment_ids or []),
-                "model": settings.model_id,
-            },
-        )
-        await send(
-            "agent_event",
-            **active_run.event(
-                "context",
-                "completed",
-                "Turn context prepared locally",
-                evidence={
-                    "history_messages": len(history),
-                    "attachments": len(attachment_ids or []),
-                },
-            ),
-        )
-        await send(
-            "agent_event",
-            **active_run.event("generate", "running", "Devvy is composing a grounded response"),
-        )
-        token_queue: asyncio.Queue[str] = asyncio.Queue()
-        if mode == "talk":
-            generation = asyncio.create_task(
-                talk_agent.invoke(history, transcript, preferences, token_queue)
-            )
-        else:
-            if mode not in {"auto", "chat", "code", "research", "image", "document"}:
-                raise ValueError("Unsupported Talk mode")
-            requested_ids = attachment_ids or []
-            if len(requested_ids) > 10:
-                raise ValueError("Talk messages support up to 10 attachments")
-            attachments, context = attachment_data(requested_ids)
+        if mode != "talk" and mode not in {"auto", "chat", "code", "research", "image", "document"}:
+            raise ValueError("Unsupported Talk mode")
+        requested_ids = attachment_ids or []
+        if len(requested_ids) > 10:
+            raise ValueError("Talk messages support up to 10 attachments")
+        attachment_context = ""
+        if mode != "talk" and requested_ids:
+            attachments, attachment_context = attachment_data(requested_ids)
             if len(attachments) != len(requested_ids):
                 raise ValueError("One or more selected attachments are no longer available")
-            generation = asyncio.create_task(
-                agent.invoke(history, transcript, mode, context, token_queue)
-            )
-        while not generation.done() or not token_queue.empty():
-            try:
-                token = await asyncio.wait_for(token_queue.get(), timeout=1)
-                await send("token", content=token)
-            except TimeoutError:
-                await send("heartbeat")
-        result = await generation
-        response = result["response"] if mode == "talk" else str(result["messages"][-1].content)
-        history = list(result["messages"])[-settings.model_context_messages:]
-        await send("text_complete", content=response)
-        if result.get("route_reason"):
-            await send(
-                "agent_event",
-                **active_run.event(
-                    "route",
-                    "completed",
-                    "Turn routed",
-                    detail=str(result["route_reason"]),
-                    evidence={
-                        "research": bool(result.get("requires_research")),
-                        "animation": bool(result.get("requires_animation")),
-                    },
-                ),
-            )
-        talk_sources = result.get("sources") or []
-        if talk_sources or result.get("research_failed"):
-            await send(
-                "agent_event",
-                **active_run.event(
-                    "research",
-                    "failed" if result.get("research_failed") else "completed",
-                    (
-                        "Live research unavailable — the answer must say so"
-                        if result.get("research_failed")
-                        else f"{len(talk_sources)} public source(s) retrieved"
-                    ),
-                    evidence={
-                        "sources": [item["url"] for item in talk_sources if item.get("url")],
-                        "titles": [item["title"] for item in talk_sources],
-                    },
-                ),
-            )
-        await send(
-            "agent_event",
-            **active_run.event(
-                "generate",
-                "completed",
-                "Response completed",
-                evidence={
-                    "response_characters": len(response),
-                    "context_sources": result.get("context_manifest", []),
-                },
-            ),
+
+        await send("transcript", content=transcript)
+        await send("state", value="thinking")
+        job = job_runner.submit(
+            "talk",
+            transcript[:120],
+            {
+                "transcript": transcript,
+                "mode": mode,
+                "history": history[-settings.model_context_messages:],
+                "attachment_context": attachment_context,
+                "attachment_count": len(requested_ids),
+            },
         )
+        await send("job_started", job_id=str(job.id))
+        queue = job_runner.subscribe(job.id)
+        try:
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=1)
+                except TimeoutError:
+                    await send("heartbeat")
+                    continue
+                kind = message.get("type")
+                if kind == "token":
+                    await send("token", content=message["content"])
+                elif kind == "agent_event":
+                    await send("agent_event", **{k: v for k, v in message.items() if k != "type"})
+                elif kind == "status":
+                    await send("status", content=message.get("message", ""))
+                elif kind == "done":
+                    break
+        finally:
+            job_runner.unsubscribe(job.id, queue)
+
+        detail = job_runner.get(job.id) or {}
+        if detail.get("status") != "succeeded":
+            await send("error", message=detail.get("error") or "The turn could not complete.")
+            await send("state", value="idle")
+            return
+        result = detail.get("result") or {}
+        response = str(result.get("response", ""))
+        history = (history + [
+            {"role": "user", "content": transcript},
+            {"role": "assistant", "content": response},
+        ])[-settings.model_context_messages:]
+
+        await send("text_complete", content=response)
         if result.get("artifact_url"):
             await send("image_ready", url=result["artifact_url"])
-        await send("state", value="speaking")
-
-        tts_task = asyncio.create_task(voice_engine.synthesize(response))
-        animation_task = None
-        if mode == "talk" and result["requires_animation"]:
-            await send("animation_state", value="rendering")
-            animation_task = asyncio.create_task(
-                animation_engine.render(transcript[:60], response)
-            )
-        try:
-            audio_url = await tts_task
-            await send("audio_ready", url=audio_url)
-        except Exception as exc:
-            logger.warning("Talk TTS failed: %s", exc)
-            await send("media_warning", message=str(exc))
-        if animation_task:
-            try:
-                video_url = await animation_task
-                await send("video_ready", url=video_url)
-            except Exception as exc:
-                logger.warning("Talk animation failed: %s", exc)
-                await send("media_warning", message=str(exc))
-        await send("state", value="idle")
-        active_run.event(
-            "media",
-            "completed",
-            "Optional media processing finished",
-            evidence={"audio_requested": True, "animation_requested": bool(animation_task)},
-        )
-        active_run.finish("completed", summary={"mode": mode})
-        active_run = None
+        for warning in result.get("warnings") or []:
+            await send("media_warning", message=warning)
+        if result.get("audio_url"):
+            await send("state", value="speaking")
+            await send("audio_ready", url=result["audio_url"])
+        if result.get("video_url"):
+            await send("video_ready", url=result["video_url"])
+        if not result.get("audio_url"):
+            await send("state", value="idle")
 
     try:
         await send("state", value="idle")
@@ -547,11 +756,9 @@ async def talk_socket(websocket: WebSocket):
             return
         raise
     except Exception as exc:
+        # The turn itself records its own failure through the job; this only covers socket
+        # and protocol errors, which the client still needs to see.
         logger.exception("Talk session failed")
-        if active_run is not None:
-            active_run.event("error", "failed", "The Talk turn could not complete", detail=str(exc)[:500])
-            active_run.finish("failed", summary={"error_type": type(exc).__name__})
-            active_run = None
         try:
             await send("error", message=str(exc))
             await send("state", value="error")
@@ -564,95 +771,92 @@ async def talk_socket(websocket: WebSocket):
 SMART_CODE_STAGES = ("classify", "retrieve", "plan", "code", "verify", "critique", "gate")
 
 
-@app.post("/api/smart-code/preview")
-async def smart_code_preview(payload: SmartCodeRequest):
-    async def events():
-        run = run_ledger.start(
-            "smart-code",
-            metadata={"mode": payload.mode, "risk": payload.risk, "targets": len(payload.target_paths)},
-        )
-        yield sse(
-            "started",
-            {
-                "run_id": run.id,
-                "stage": "classify",
-                "message": "Task contract accepted; no files will be written during preview",
+async def run_smart_code_job(request: dict, context: JobContext) -> dict:
+    payload = SmartCodeRequest.model_validate(request)
+    run = run_ledger.start(
+        "smart-code",
+        metadata={
+            "mode": payload.mode, "risk": payload.risk, "targets": len(payload.target_paths),
+        },
+    )
+    progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    def progress(event: dict):
+        progress_queue.put_nowait(event)
+
+    task = asyncio.create_task(smart_code_service.preview(payload, progress))
+    elapsed = 0
+    emitted: set[str] = {"classify"}
+    stages: dict[str, str] = {"classify": "completed"}
+    try:
+        while not task.done() or not progress_queue.empty():
+            try:
+                event = await asyncio.wait_for(progress_queue.get(), timeout=2)
+                stage = str(event.get("stage", "generate"))
+                status = str(event.get("status", "running"))
+                run.event(
+                    stage, status, str(event.get("label", "Agent workflow update")),
+                    detail=event.get("detail"), evidence=event.get("evidence"),
+                )
+                await context.event(
+                    stage, status, str(event.get("label", "Agent workflow update")),
+                    detail=event.get("detail"), evidence=event.get("evidence"),
+                )
+                # Forward pipeline stages the moment the service reaches them, so a
+                # multi-minute CPU generation shows real movement instead of a frozen
+                # checklist that fills in all at once at the end.
+                if stage in SMART_CODE_STAGES and status != "running":
+                    emitted.add(stage)
+                    stages[stage] = status
+            except TimeoutError:
+                elapsed += 2
+                await context.progress(
+                    f"Devvy is planning and coding locally ({elapsed}s)"
+                    if "plan" not in emitted
+                    else f"Devvy is verifying the proposed change ({elapsed}s)"
+                )
+        result = await task
+        for stage in SMART_CODE_STAGES:
+            stages.setdefault(stage, "completed")
+        await context.event(
+            "gate",
+            "waiting" if result.get("can_apply") else "completed",
+            "Waiting for explicit human approval" if result.get("can_apply")
+            else "No write action available",
+            evidence={
+                "can_apply": result.get("can_apply"), "edits": len(result.get("edits", []))
             },
         )
-        progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+        run.finish(
+            "completed",
+            summary={"can_apply": result.get("can_apply"), "edits": len(result.get("edits", []))},
+        )
+        return {"preview": result, "stages": stages}
+    except asyncio.CancelledError:
+        task.cancel()
+        run.finish("cancelled")
+        raise
+    except ValueError as exc:
+        logger.warning("Smart Code preview rejected: %s", exc)
+        run.event("error", "failed", "Preview rejected safely", detail=str(exc)[:500])
+        run.finish("failed", summary={"error_type": type(exc).__name__})
+        raise
+    except Exception as exc:
+        logger.exception("Smart Code preview failed")
+        run.event("error", "failed", "Preview failed safely", detail=str(exc)[:500])
+        run.finish("failed", summary={"error_type": type(exc).__name__})
+        raise
 
-        def progress(event: dict):
-            progress_queue.put_nowait(event)
 
-        task = asyncio.create_task(smart_code_service.preview(payload, progress))
-        elapsed = 0
-        emitted: set[str] = {"classify"}
-        try:
-            while not task.done() or not progress_queue.empty():
-                try:
-                    event = await asyncio.wait_for(progress_queue.get(), timeout=2)
-                    stage = str(event.get("stage", "generate"))
-                    run_event = run.event(
-                        stage,
-                        str(event.get("status", "running")),
-                        str(event.get("label", "Agent workflow update")),
-                        detail=event.get("detail"),
-                        evidence=event.get("evidence"),
-                    )
-                    yield sse("agent_event", run_event)
-                    # Forward pipeline stages the moment the service reaches them, so a
-                    # multi-minute CPU generation shows real movement instead of a frozen
-                    # checklist that fills in all at once at the end.
-                    if stage in SMART_CODE_STAGES and event.get("status") != "running":
-                        yield sse("stage", {"stage": stage, "status": event.get("status")})
-                        emitted.add(stage)
-                    if stage == "structured_loop":
-                        yield sse("loop", event)
-                except TimeoutError:
-                    elapsed += 2
-                    yield sse(
-                        "status",
-                        {
-                            "stage": "generate",
-                            "message": (
-                                f"Devvy is planning and coding locally ({elapsed}s)"
-                                if "plan" not in emitted
-                                else f"Devvy is verifying the proposed change ({elapsed}s)"
-                            ),
-                        },
-                    )
-            result = await task
-            for stage in SMART_CODE_STAGES:
-                if stage not in emitted:
-                    yield sse("stage", {"stage": stage, "status": "completed"})
-            gate_event = run.event(
-                "gate",
-                "waiting" if result.get("can_apply") else "completed",
-                "Waiting for explicit human approval" if result.get("can_apply") else "No write action available",
-                evidence={"can_apply": result.get("can_apply"), "edits": len(result.get("edits", []))},
-            )
-            yield sse("agent_event", gate_event)
-            run.finish(
-                "completed",
-                summary={"can_apply": result.get("can_apply"), "edits": len(result.get("edits", []))},
-            )
-            yield sse("result", result)
-        except ValueError as exc:
-            logger.warning("Smart Code preview rejected: %s", exc)
-            run.event("error", "failed", "Preview rejected safely", detail=str(exc)[:500])
-            run.finish("failed", summary={"error_type": type(exc).__name__})
-            yield sse("error", {"message": str(exc)})
-        except Exception as exc:
-            logger.exception("Smart Code preview failed")
-            run.event("error", "failed", "Preview failed safely", detail=str(exc)[:500])
-            run.finish("failed", summary={"error_type": type(exc).__name__})
-            yield sse("error", {"message": str(exc)})
+job_runner.register("smart-code", run_smart_code_job)
 
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+
+@app.post("/api/smart-code/jobs", status_code=202)
+def submit_smart_code(payload: SmartCodeRequest):
+    job = job_runner.submit(
+        "smart-code", payload.objective[:120], payload.model_dump(mode="json")
     )
+    return {"job_id": str(job.id)}
 
 
 @app.post("/api/smart-code/apply")
@@ -716,24 +920,44 @@ def estimate_code_config():
 #: generation legible: the user watches context and calibration tick off immediately, then
 #: sees the arithmetic land the moment the model returns.
 ESTIMATE_NODES: dict[str, tuple[str, ...]] = {
+    "normalize": ("normalize",),
+    "readiness": ("readiness",),
     "assemble_context": ("assemble_context",),
     "declare_stack": ("declare_stack",),
+    "specialist_routing": ("specialist_routing",),
+    "specialist_analysis": ("specialist_analysis",),
+    "primary_estimate": ("primary_estimate",),
+    "blind_review": ("blind_review",),
+    "disagreement": ("disagreement",),
+    "critic": ("critic",),
+    "arbitration": ("arbitration",),
     "score_factors": ("score_factors",),
     "calculate": ("apply_base_adjustments", "apply_stack_adjustments", "map_to_fibonacci"),
     "policy_gate": ("evaluate_gates", "decide"),
+    "consistency_audit": ("consistency_audit",),
+    "human_review": ("human_review",),
 }
 
 
-async def estimate_events(story):
+ESTIMATE_NODE_ORDER = (
+    "normalize", "readiness", "assemble_context", "declare_stack", "specialist_routing",
+    "primary_estimate", "specialist_analysis", "blind_review", "disagreement", "critic", "arbitration",
+    "score_factors", "apply_base_adjustments", "apply_stack_adjustments",
+    "map_to_fibonacci", "evaluate_gates", "decide", "consistency_audit", "human_review",
+)
+
+
+async def estimate_one(story, context: JobContext, index: int, total: int) -> dict:
+    """Estimate a single story, reporting progress against the shared job context."""
     run = run_ledger.start(
         "estimate-code", metadata={"source": story.source, "model": settings.model_id}
     )
-    yield sse("started", {"run_id": run.id, "title": story.title})
     progress_queue: asyncio.Queue[dict] = asyncio.Queue()
 
     def progress(event: dict):
         progress_queue.put_nowait(event)
 
+    prefix = f"[{index + 1}/{total}] " if total > 1 else ""
     task = asyncio.create_task(estimate_service.estimate(story, progress))
     elapsed = 0
     emitted: set[str] = set()
@@ -743,42 +967,30 @@ async def estimate_events(story):
                 event = await asyncio.wait_for(progress_queue.get(), timeout=2)
                 stage = str(event.get("stage", "estimate"))
                 status = str(event.get("status", "running"))
-                run_event = run.event(
-                    stage,
-                    status,
-                    str(event.get("label", "Estimation workflow update")),
-                    detail=event.get("detail"),
-                    evidence=event.get("evidence"),
+                label = str(event.get("label", "Estimation workflow update"))
+                run.event(
+                    stage, status, label,
+                    detail=event.get("detail"), evidence=event.get("evidence"),
                 )
-                yield sse("agent_event", run_event)
-                if stage == "structured_loop":
-                    yield sse("loop", event)
+                await context.event(
+                    stage, status, prefix + label,
+                    detail=event.get("detail"),
+                    evidence={**(event.get("evidence") or {}), "story_index": index},
+                )
                 if status in {"completed", "validated"}:
-                    for node in ESTIMATE_NODES.get(stage, ()):
-                        emitted.add(node)
-                        yield sse("node", {"node": node, "status": "completed"})
+                    emitted.update(ESTIMATE_NODES.get(stage, ()))
             except TimeoutError:
                 elapsed += 2
-                yield sse(
-                    "status",
-                    {
-                        "message": (
-                            "Devvy is scoring the 16 factors on CPU"
-                            if "score_factors" not in emitted
-                            else "Devvy is applying the framework arithmetic"
-                        )
-                        + f" ({elapsed}s)"
-                    },
+                await context.progress(
+                    prefix
+                    + (
+                        "Devvy is running independent evidence assessments on CPU"
+                        if "blind_review" not in emitted
+                        else "Devvy is applying the framework arithmetic"
+                    )
+                    + f" ({elapsed}s)"
                 )
         result = await task
-        # Backstop: any checkpoint the service did not report is still closed out, so the
-        # checklist can never finish in a half-ticked state.
-        for stage in (
-            "assemble_context", "declare_stack", "score_factors", "apply_base_adjustments",
-            "apply_stack_adjustments", "map_to_fibonacci", "evaluate_gates", "decide",
-        ):
-            if stage not in emitted:
-                yield sse("node", {"node": stage, "status": "completed"})
         run.finish(
             "completed",
             summary={
@@ -788,53 +1000,65 @@ async def estimate_events(story):
                 "confidence": result.get("confidence"),
             },
         )
-        yield sse("result", result)
+        return result
+    except asyncio.CancelledError:
+        task.cancel()
+        run.finish("cancelled")
+        raise
     except Exception as exc:
         logger.exception("Estimate Code failed")
         run.event("error", "failed", "Estimate failed validation", detail=str(exc)[:500])
         run.finish("failed", summary={"error_type": type(exc).__name__})
-        yield sse("error", {"message": str(exc), "retryable": True})
+        raise
 
 
-@app.post("/api/estimate-code/estimate")
-async def estimate_code(payload: EstimateRequest):
-    return StreamingResponse(
-        estimate_events(payload.story),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+async def run_estimate_job(request: dict, context: JobContext) -> dict:
+    """One job covers a single story or a whole batch; stories run sequentially."""
+    stories = [Story.model_validate(item) for item in request["stories"]]
+    total = len(stories)
+    results: list[dict] = []
+    failures: list[dict] = []
+    for index, story in enumerate(stories):
+        try:
+            results.append(await estimate_one(story, context, index, total))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A batch must not lose the stories that already succeeded.
+            failures.append({"index": index, "title": story.title, "error": str(exc)[:500]})
+            await context.event(
+                "estimate", "failed", f"{story.title} could not be estimated",
+                detail=str(exc)[:500], evidence={"story_index": index},
+            )
+            if total == 1:
+                raise
+    return {
+        "results": results,
+        "failures": failures,
+        "nodes": list(ESTIMATE_NODE_ORDER),
+        "count": total,
+    }
+
+
+job_runner.register("estimate", run_estimate_job)
+
+
+def submit_estimate_job(stories: list) -> dict:
+    title = stories[0].title if len(stories) == 1 else f"{len(stories)} stories"
+    job = job_runner.submit(
+        "estimate", title, {"stories": [item.model_dump(mode="json") for item in stories]}
     )
+    return {"job_id": str(job.id), "count": len(stories)}
 
 
-@app.post("/api/estimate-code/batch")
-async def estimate_code_batch(payload: BatchEstimateRequest):
-    async def events():
-        yield sse("batch_started", {"count": len(payload.stories)})
-        results = []
-        for index, story in enumerate(payload.stories):
-            yield sse("item_started", {"index": index, "title": story.title})
-            async for chunk in estimate_events(story):
-                if chunk.startswith("event: node"):
-                    data = json.loads(chunk.split("data: ", 1)[1])
-                    yield sse("item_node", {"index": index, **data})
-                elif chunk.startswith("event: result"):
-                    data = json.loads(chunk.split("data: ", 1)[1])
-                    results.append(data)
-                    yield sse("item_result", {"index": index, "result": data})
-                elif chunk.startswith("event: status"):
-                    data = json.loads(chunk.split("data: ", 1)[1])
-                    yield sse("status", {"index": index, **data})
-                elif chunk.startswith("event: agent_event"):
-                    data = json.loads(chunk.split("data: ", 1)[1])
-                    yield sse("agent_event", {"index": index, **data})
-                elif chunk.startswith("event: loop"):
-                    data = json.loads(chunk.split("data: ", 1)[1])
-                    yield sse("loop", {"index": index, **data})
-                elif chunk.startswith("event: error"):
-                    data = json.loads(chunk.split("data: ", 1)[1])
-                    yield sse("item_error", {"index": index, **data})
-        yield sse("batch_result", {"results": results})
+@app.post("/api/estimate-code/jobs", status_code=202)
+def submit_estimate(payload: EstimateRequest):
+    return submit_estimate_job([payload.story])
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+
+@app.post("/api/estimate-code/batch-jobs", status_code=202)
+def submit_estimate_batch(payload: BatchEstimateRequest):
+    return submit_estimate_job(list(payload.stories))
 
 
 @app.post("/api/estimate-code/upload/parse")
@@ -850,14 +1074,14 @@ async def estimate_upload(file: UploadFile = File(...)):
         raise HTTPException(400, str(exc)) from exc
 
 
-@app.post("/api/estimate-code/upload/estimate")
-async def estimate_upload_rows(payload: dict = Body(...)):
+@app.post("/api/estimate-code/upload/estimate", status_code=202)
+def estimate_upload_rows(payload: dict = Body(...)):
     try:
         stack = StackProfile.model_validate(payload.get("stack") or {})
         stories = rows_to_stories(payload.get("rows") or [], payload.get("mapping") or {}, stack)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return await estimate_code_batch(BatchEstimateRequest(stories=stories))
+    return submit_estimate_job(stories)
 
 
 @app.get("/api/estimate-code/jira/issues")

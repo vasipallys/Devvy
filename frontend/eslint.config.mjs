@@ -22,9 +22,4 @@ export default tseslint.config(
       }],
     },
   },
-  {
-    files: ['electron/**/*.cjs'],
-    languageOptions: { sourceType: 'commonjs', globals: globals.node },
-    rules: { ...eslint.configs.recommended.rules },
-  },
 )

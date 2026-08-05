@@ -51,6 +51,44 @@ button:disabled{cursor:not-allowed}
 .evidence-list span{padding:2px 6px;border-radius:9px;background:#1b211d;color:#b6c0b8}
 .evidence-panel.compact{width:auto;max-width:1180px;margin:12px auto;border:1px solid #2b332e;border-radius:12px;overflow:visible}.evidence-panel.compact .evidence-heading{height:48px;position:static;border-radius:12px 12px 0 0}.evidence-panel.compact .evidence-timeline{display:flex;gap:7px;overflow:auto}.evidence-panel.compact .evidence-timeline details{min-width:220px;max-width:310px;margin:0}.evidence-panel.compact .evidence-empty{min-height:75px;flex-direction:row;gap:10px;text-align:left}.evidence-panel.compact .evidence-empty p{max-width:680px}
 
+/* Activity: durable background jobs, visible whenever the user returns. */
+.home-header-actions{display:flex;align-items:center;gap:10px}
+.activity-chip{height:40px;padding:0 14px;border:1px solid var(--md-outline);border-radius:20px;display:flex;align-items:center;gap:7px;background:rgba(20,26,22,.82);color:var(--md-on-surface);font-size:10px}
+.activity-chip:hover{border-color:#6f8a68}
+.activity-chip.busy{border-color:#5f8f52;color:#c6f0ae;background:#18251a}
+.activity-screen{background:#0b0e0d;color:var(--md-on-surface);overflow:hidden}
+.activity-layout{display:grid;grid-template-columns:360px minmax(0,1fr);height:calc(100vh - 64px);overflow:hidden}
+.activity-list{border-right:1px solid #262e29;overflow:auto;padding:14px}
+.activity-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.activity-group{margin:14px 0 7px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#77827b}
+.activity-empty{color:#7d8880;font-size:11px;line-height:1.7}
+.job-row{display:flex;align-items:stretch;gap:6px;border:1px solid #272f2a;border-radius:10px;margin-bottom:7px;background:#111614;overflow:hidden}
+.job-row.selected{border-color:#5f8f52;background:#151d16}
+.job-row:hover{border-color:#3f4b43}
+.job-open{flex:1;min-width:0;display:flex;align-items:flex-start;gap:10px;padding:11px;background:transparent;color:inherit;text-align:left}
+.job-status{width:24px;height:24px;flex:none;border-radius:50%;display:grid;place-items:center}
+.tone-run{background:#1f2e3d;color:#a8c7fa}.tone-wait{background:#332c1d;color:#ffd38b}
+.tone-ok{background:#223122;color:#a9e68e}.tone-bad{background:#3a2221;color:#ffb4ab}
+.tone-muted{background:#242926;color:#96a09a}
+.job-body{display:flex;flex-direction:column;min-width:0;gap:4px}
+.job-body b{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-body small{display:flex;align-items:center;gap:5px;font-size:9px;color:#828d86}
+.job-error{font-style:normal;font-size:9px;color:#e0a89f;line-height:1.5}
+.job-cancel{flex:none;padding:0 11px;background:transparent;border-left:1px solid #272f2a;color:#9aa69e;font-size:9px}
+.job-cancel:hover{color:#ffb4ab}
+.activity-detail{overflow:auto;padding:20px 24px 40px}
+.activity-placeholder{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#6d776f}
+.activity-placeholder p{font-size:11px;max-width:320px;text-align:center;line-height:1.7}
+.activity-summary{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:14px;border-bottom:1px solid #262e29;margin-bottom:16px}
+.activity-summary h2{font-size:19px;letter-spacing:-.02em;margin:6px 0 8px}
+.activity-outcome{display:flex;align-items:center;gap:7px;font-size:10px;padding:5px 10px;border-radius:14px;width:max-content}
+.activity-response{margin-bottom:16px}
+.activity-response pre{margin:8px 0 0;padding:13px;border:1px solid #262e29;border-radius:10px;background:#101413;color:#c6cfc8;font-size:11px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto}
+.pipeline-note{margin-top:8px;color:#7d8b82;font-size:9px;line-height:1.6}
+.cancel-run{background:transparent;border:1px solid #48413a;border-radius:8px;color:#c2b09c;font-size:10px;padding:0 12px;min-height:34px;margin-top:8px}
+.cancel-run:hover{border-color:#8a6a52;color:#ffd0ad}
+@media(max-width:900px){.activity-layout{grid-template-columns:1fr;height:auto;overflow:visible}.activity-list{border-right:0;border-bottom:1px solid #262e29}}
+
 /* Crash screen: a render error must never present as an empty black window. */
 .crash-screen{position:fixed;inset:0;z-index:99;display:grid;place-items:center;padding:24px;background:radial-gradient(700px 420px at 50% 30%,#241b1a 0,#0b0e0d 62%);overflow:auto}
 .crash-card{width:min(620px,100%);border:1px solid #4a332f;border-radius:var(--radius-l);background:#141a17;padding:24px;color:var(--md-on-surface)}

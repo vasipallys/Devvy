@@ -194,7 +194,7 @@ async def test_estimate_mixes_model_scores_with_heuristics_and_labels_the_differ
         )
     )
 
-    assert runtime.calls == 1, "a sufficient scorecard must not trigger the repair loop"
+    assert runtime.calls == 2, "primary and blind passes each accept a sufficient scorecard"
     assert len(result["scorecard"]) == 16
     provenance = result["evidence"]["scoring_provenance"]
     assert provenance["model_scored"] == 9
@@ -274,7 +274,7 @@ async def test_estimate_falls_back_to_heuristics_when_the_model_cannot_hold_the_
         )
     )
 
-    assert runtime.calls == 2, "the repair loop must run before giving up"
+    assert runtime.calls == 4, "both independent passes repair once before degrading"
     assert result["evidence"]["scoring_provenance"]["model_scored"] == 0
     assert result["evidence"]["scoring_provenance"]["heuristic_filled"] == 16
     assert result["points"] in (3, 5, 8, 13, 21, 34)

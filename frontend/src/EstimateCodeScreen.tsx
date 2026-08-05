@@ -4,28 +4,69 @@ import {
   FileSpreadsheet, FlaskConical, GitBranch, Keyboard, Layers, Lightbulb, LoaderCircle,
   PanelsTopLeft, Plus, ShieldCheck, Sigma, Target, TrendingDown, Trash2, X,
 } from 'lucide-react'
-import { api } from './api'
+import { api, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
+import { EstimationPipelineReport } from './EstimationPipelineReport'
 import { SystemStatusChip } from './SystemStatusChip'
+import { isJobActive } from './types'
 import type {
   AgentEvent, Calculation, EstimateConfig, EstimateResult, FactorScore, Level, PolicyCheck,
   Recommendation, StackProfile, Story,
 } from './types'
 
 const steps = [
-  'assemble_context', 'declare_stack', 'score_factors', 'apply_base_adjustments',
-  'apply_stack_adjustments', 'map_to_fibonacci', 'evaluate_gates', 'decide',
+  'normalize', 'readiness', 'assemble_context', 'declare_stack', 'specialist_routing',
+  'primary_estimate', 'specialist_analysis', 'blind_review', 'disagreement', 'critic', 'arbitration',
+  'score_factors', 'apply_base_adjustments', 'apply_stack_adjustments', 'map_to_fibonacci',
+  'evaluate_gates', 'decide', 'consistency_audit', 'human_review',
 ]
 const labels: Record<string, string> = {
+  normalize: 'Normalize evidence & create input hash',
+  readiness: 'Evaluate story readiness',
   assemble_context: 'Bound the story evidence',
   declare_stack: 'Load stack calibration',
-  score_factors: 'Score 16 factors',
+  specialist_routing: 'Route specialist lenses',
+  primary_estimate: 'Run primary evidence assessment',
+  specialist_analysis: 'Apply routed specialist lenses',
+  blind_review: 'Run independent blind review',
+  disagreement: 'Detect material disagreements',
+  critic: 'Challenge conflicting claims',
+  arbitration: 'Apply resolution policy',
+  score_factors: 'Build final 16-factor scorecard',
   apply_base_adjustments: 'Apply base adjustments',
   apply_stack_adjustments: 'Apply stack adjustments',
   map_to_fibonacci: 'Map to Fibonacci',
   evaluate_gates: 'Evaluate spike & split gates',
-  decide: 'Reach a decision',
+  decide: 'Reach framework recommendation',
+  consistency_audit: 'Replay and audit consistency',
+  human_review: 'Hand off for human consensus',
 }
+
+/** Service stage → pipeline checkpoints it completes. Mirrors ESTIMATE_NODES on the server;
+ *  the job stream carries agent events, and the checklist is derived from them so a
+ *  reattaching client reconstructs the same progress from the snapshot alone. */
+const NODE_MAP: Record<string, string[]> = {
+  normalize: ['normalize'],
+  readiness: ['readiness'],
+  assemble_context: ['assemble_context'],
+  declare_stack: ['declare_stack'],
+  specialist_routing: ['specialist_routing'],
+  primary_estimate: ['primary_estimate'],
+  specialist_analysis: ['specialist_analysis'],
+  blind_review: ['blind_review'],
+  disagreement: ['disagreement'],
+  critic: ['critic'],
+  arbitration: ['arbitration'],
+  score_factors: ['score_factors'],
+  calculate: ['apply_base_adjustments', 'apply_stack_adjustments', 'map_to_fibonacci'],
+  policy_gate: ['evaluate_gates', 'decide'],
+  consistency_audit: ['consistency_audit'],
+  human_review: ['human_review'],
+}
+const nodesFor = (event: AgentEvent): string[] =>
+  event.status === 'completed' || event.status === 'validated' ? NODE_MAP[event.stage] ?? [] : []
+const derivedSteps = (events: AgentEvent[]): string[] =>
+  [...new Set(events.flatMap(nodesFor))]
 
 const RECOMMENDATIONS: Record<Recommendation, { label: string; tone: string; blurb: string }> = {
   proceed: { label: 'Proceed', tone: 'ok', blurb: 'Every gate passed. This is committable.' },
@@ -296,9 +337,20 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
   const [jiraQuery, setJiraQuery] = useState('')
   const [jiraStories, setJiraStories] = useState<Story[]>([])
   const [selectedJira, setSelectedJira] = useState<string[]>([])
+  const [jobId, setJobId] = useState<string>()
   const abortRef = useRef<AbortController | undefined>(undefined)
 
   useEffect(() => { api.estimateConfig().then(setConfig).catch(cause => setError(cause.message)) }, [])
+  // Reopening the screen rejoins an estimate still running on the server rather than
+  // presenting an idle form while work is in flight.
+  useEffect(() => {
+    let disposed = false
+    api.jobs().then(({ jobs }) => {
+      const live = jobs.find(job => job.kind === 'estimate' && isJobActive(job.status))
+      if (live && !disposed) follow(live.id)
+    }).catch(() => undefined)
+    return () => { disposed = true }
+  }, [])
   const setField = <K extends keyof Story>(field: K, value: Story[K]) => setStory(current => ({ ...current, [field]: value }))
   function setCriterion(index: number, value: string) {
     setField('acceptance_criteria', story.acceptance_criteria.map((item, i) => i === index ? value : item))
@@ -308,35 +360,70 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
     setLoading(true); setError(''); setResult(undefined); setResults([]); setStepsDone([])
     setRunEvents([]); setStatus('Starting local estimation…'); abortRef.current = new AbortController()
   }
+  /** Attach to an estimation job; also used to resume one already running on the server. */
+  async function follow(jobId: string) {
+    setJobId(jobId)
+    setLoading(true)
+    abortRef.current = new AbortController()
+    try {
+      await attachToJob(jobId, {
+        onSnapshot: job => {
+          setRunEvents(job.events)
+          setStepsDone(derivedSteps(job.events))
+          if (job.progress) setStatus(job.progress)
+        },
+        onEvent: event => {
+          setRunEvents(current => [...current, event])
+          setStepsDone(current => [...new Set([...current, ...nodesFor(event)])])
+        },
+        onStatus: message => setStatus(message),
+        onDone: (status, result, failure) => {
+          setStepsDone(steps)
+          if (status === 'succeeded' && result) {
+            const produced: EstimateResult[] = result.results || []
+            setResults(produced)
+            setResult(produced[0])
+            const failed = result.failures?.length ?? 0
+            setStatus(
+              produced.length > 1
+                ? `Estimated ${produced.length} of ${result.count} stories`
+                : 'Estimate complete',
+            )
+            if (failed) setError(`${failed} story/stories could not be estimated.`)
+          } else if (status !== 'succeeded') {
+            setError(failure || `The estimate ${status}.`)
+            setStatus(`Estimate ${status}`)
+          }
+        },
+      }, abortRef.current.signal)
+    } catch (cause) {
+      if ((cause as Error).name !== 'AbortError') setError((cause as Error).message)
+    } finally { setLoading(false); setJobId(undefined) }
+  }
+
   async function estimateOne(next: Story) {
     begin()
     try {
-      await api.estimate(
-        { ...next, acceptance_criteria: next.acceptance_criteria.filter(Boolean), stack },
-        (event, data) => {
-          if (event === 'agent_event') setRunEvents(current => [...current, data as AgentEvent])
-          if (event === 'status') setStatus(data.message)
-          if (event === 'node') setStepsDone(current => [...new Set([...current, data.node])])
-          if (event === 'result') { setResult(data); setStatus('Estimate complete') }
-          if (event === 'error') throw new Error(data.message)
-        }, abortRef.current?.signal)
-    } catch (cause) { if ((cause as Error).name !== 'AbortError') setError((cause as Error).message) }
-    finally { setLoading(false) }
+      const { job_id } = await api.submitEstimate({
+        ...next, acceptance_criteria: next.acceptance_criteria.filter(Boolean), stack,
+      })
+      await follow(job_id)
+    } catch (cause) { setLoading(false); setError((cause as Error).message) }
   }
+
   async function estimateMany(items: Story[]) {
     if (!items.length) return setError('Select at least one story.')
     begin()
     try {
-      await api.estimateBatch(items.map(item => ({ ...item, stack })), (event, data) => {
-        if (event === 'agent_event') setRunEvents(current => [...current, data as AgentEvent])
-        if (event === 'status') setStatus(data.message)
-        if (event === 'item_started') { setStatus(`Estimating ${data.title}`); setStepsDone([]) }
-        if (event === 'item_node') setStepsDone(current => [...new Set([...current, data.node])])
-        if (event === 'item_result') setResults(current => [...current, data.result])
-        if (event === 'item_error' || event === 'error') setError(data.message)
-      }, abortRef.current?.signal)
-    } catch (cause) { if ((cause as Error).name !== 'AbortError') setError((cause as Error).message) }
-    finally { setLoading(false); setStatus('Batch complete') }
+      const { job_id } = await api.submitEstimateBatch(items.map(item => ({ ...item, stack })))
+      await follow(job_id)
+    } catch (cause) { setLoading(false); setError((cause as Error).message) }
+  }
+
+  async function cancelRun() {
+    if (!jobId) return
+    try { await api.cancelJob(jobId) } catch { /* already finished */ }
+    abortRef.current?.abort()
   }
   async function parseFile(file?: File) {
     if (!file) return
@@ -395,19 +482,19 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
       <section className="estimate-hero">
         <div>
           <span className="eyebrow">DEFENSIBLE BY DESIGN</span>
-          <h1>A point is only useful when<br />everyone understands <em>why.</em></h1>
-          <p>Score 16 calibrated factors, apply your stack's known costs, and let fixed arithmetic
-            reach the number. Every adjustment is shown, so anyone can replay the maths by hand.</p>
+          <h1>Independent judgement.<br />Replayable <em>evidence.</em></h1>
+          <p>Two independent assessments examine the same bounded evidence. Explicit disagreement
+            controls reconcile their scores, then fixed framework arithmetic reaches the number.</p>
         </div>
         <div className="method-card">
           <Target />
           <div>
             <b>How it works</b>
             <ol>
-              <li>Score 16 factors, 1–5</li>
-              <li>Calibrate for your stack</li>
-              <li>Apply fixed adjustments</li>
-              <li>Map, then check the gates</li>
+              <li>Check readiness and route risk</li>
+              <li>Run primary and blind reviews</li>
+              <li>Challenge and resolve differences</li>
+              <li>Replay arithmetic, then human review</li>
             </ol>
             {config && <small className="method-version">Framework v{config.framework.version}</small>}
           </div>
@@ -447,6 +534,7 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
             </fieldset>
             <label>Technical breakdown <span>optional</span><textarea rows={3} value={story.technical_breakdown} onChange={event => setField('technical_breakdown', event.target.value)} placeholder="Known services, components, migrations, or constraints" /></label>
             <button className="estimate-action" disabled={loading}>{loading ? <LoaderCircle className="spin" /> : <BrainCircuit />}Build justified estimate</button>
+            {loading && <button type="button" className="cancel-run" onClick={cancelRun}>Cancel request</button>}
           </form>}
 
           {source === 'upload' && <div className="upload-pane">
@@ -490,6 +578,10 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
         <section className={`estimate-pipeline ${loading ? 'active' : ''}`}>
           <span className="eyebrow">LIVE REASONING</span>
           <h2>{status || 'Your evidence pipeline'}</h2>
+          {loading && <p className="pipeline-note">
+            This runs on the server. You can close the tab — the estimate keeps going and
+            waits for you in Activity.
+          </p>}
           {steps.map((step, index) => {
             const done = stepsDone.includes(step)
             const current = loading && index === stepsDone.length
@@ -551,7 +643,9 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
             <button className="jira-write" onClick={writePoints}>Write {result.points} to Jira</button>}
         </div>
 
-        <Detail title="Detailed estimation reasoning" open>
+        <EstimationPipelineReport result={result} />
+
+        <Detail title="Framework appendix: detailed reasoning">
           <p className="detail-lede"><BrainCircuit size={17} />Replayable rationale from story evidence and deterministic framework rules. Private chain-of-thought is neither requested nor shown.</p>
           <DetailedReasoningPanel result={result} />
         </Detail>
