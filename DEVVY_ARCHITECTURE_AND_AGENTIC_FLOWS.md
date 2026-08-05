@@ -16,7 +16,7 @@ Devvy is a local-first AI development workspace with four user workflows:
 1. **Chat** — conversational assistance, document analysis, research, and image requests.
 2. **Talk** — voice-first assistance with optional research and generated visual explanations.
 3. **Smart Code** — repository-aware code-change preview, verification, human approval, and safe apply.
-4. **Estimate Code** — evidence-based Agile story-point estimation with deterministic arithmetic, independent review, disagreement handling, and a replayable audit trail.
+4. **Estimate Code** — evidence-based Agile story-point estimation with deterministic arithmetic, independent review, disagreement handling, a replayable audit trail, a drawn agent flow, and a durable searchable history of past estimates.
 
 All model-backed workflows share one lazily loaded local Gemma runtime. Requests become durable SQLite jobs, allowing the browser to disconnect and later reattach without losing completed results. Untrusted inputs are bounded, labelled, and separated from system instructions. Model outputs are validated before use, and safety-critical decisions are performed by deterministic application code rather than delegated to the model.
 
@@ -445,6 +445,68 @@ The UI presents the result as an evidence report rather than a single number:
 - risks, assumptions, suggestions, and story-splitting advice;
 - pipeline degradation disclosures and audit trail.
 
+### 10.7 Agent flow visualisation
+
+The pipeline is also drawn, not only listed. A checklist answers *how far along is this*; a flow
+answers *which agent is working, what did it produce, and how did that become a number* — which is
+the question a multi-minute CPU run actually raises.
+
+The visualisation reuses the pipeline drawn in section 10, grouped into five lanes a reader can
+name. The lanes are the contribution: they map each stage onto *who is accountable for it*.
+
+| Lane | Stages | What the lane asserts |
+|---|---|---|
+| Intake | normalize, readiness, route lenses, bound context, load calibration | The evidence is frozen and bounded before anything reasons over it |
+| Two independent assessments | primary estimator, specialist lenses \| blind reviewer | Drawn as **parallel branches**; the reviewer node is marked blind |
+| Reconciliation | compare, critic, arbitrate | Differences are surfaced and resolved by policy, not persuasion |
+| Deterministic calculation | final scorecard, arithmetic, gates, audit | No model runs here |
+| Human authority | human decision | Terminal, and always waiting |
+
+Design decisions that carry meaning rather than decoration:
+
+- **The two model passes are drawn side by side.** Independence is the basis for trusting the
+  arbitration, so it is shown structurally instead of asserted in prose. The reviewer node is
+  explicitly marked blind.
+- **Specialist lenses are labelled as a projection, not as agents.** There are exactly two model
+  passes; the lenses re-view the same scored evidence. Drawing them as additional agents would
+  overstate what runs.
+- **Every node carries the output it produced** — scored counts, cross-check points, material
+  disagreements, gate outcome — so the diagram explains rather than merely tracks.
+- **The arithmetic is a flow too**: 16 scores → base sum → base adjustments → stack adjustments →
+  adjusted score → band → capped points, carrying the real numbers.
+- **`human_review` never renders complete.** The pipeline always terminates waiting on a person.
+
+Node state comes from the live event stream during a run. A stored estimate has no event stream, so
+a finished pipeline is itself treated as proof every stage ran, with metrics read from the saved
+payload — otherwise a recalled estimate would render as entirely pending, which is worse than
+showing nothing. A node whose fields have not arrived shows no metric rather than a partial one:
+every progress event carries an evidence object, so its presence is not proof the stage's results
+are inside it.
+
+### 10.8 Estimate history
+
+A completed estimate is recorded automatically in its own store, separate from the job that
+produced it.
+
+The separation is deliberate. A job is keyed by *execution* and purged on a short retention so the
+job table stays bounded. An estimate is keyed by *story* and is the artefact a team returns to — to
+recall what was said, to compare new work against what they actually sized, and to see whether
+their own scoring drifts. It is therefore indexed on the fields people search and is not purged on
+a timer.
+
+The **complete result payload is stored verbatim**, so a recalled entry renders through the same
+component as a fresh run: full scorecard, calculation ledger, gates, and provenance. Denormalised
+columns exist only for listing, filtering, and calibration statistics. Summarising a stored
+estimate into a few columns would defeat the reason for keeping it.
+
+Writing history is a side effect of estimating. A failure there is logged and swallowed; it never
+costs the user the estimate they are waiting for.
+
+Aggregates turn the log into a calibration record: points distribution, median, recommendation and
+confidence mix, and what share of factors the model scored rather than the application inferring
+them. A list of past estimates is a log; the distribution is what says something about how a team
+estimates.
+
 ---
 
 ## 11. Evidence design
@@ -497,6 +559,9 @@ Important UI invariants:
 - Smart Code makes workspace and target paths explicit because browsers cannot expose native absolute file paths from file inputs.
 - Estimate Code progressively discloses summary, reasoning, evidence, calculation, review, risks, suggestions, and audit details.
 - Failed checkpoints remain visually failed; they are never converted into completed states by a backstop update.
+- `useEffect` callbacks use a block body. A concise arrow returns its expression, which React calls as the cleanup function; TypeScript cannot catch this, so an ESLint rule enforces it.
+- Timestamps are rendered from UTC-qualified strings. SQLite drops timezone information, and a bare ISO string is parsed by browsers as local time, silently shifting every displayed time by the viewer's offset.
+- The agent flow and the estimate result render identically from a live run and from stored history; a completed estimate recalled from history is never shown as pending.
 
 ---
 
@@ -511,6 +576,7 @@ The exact route declarations live in `backend/api.py`; this table describes the 
 | Smart Code preview | HTTP job submission | Durable job stream and preview result |
 | Smart Code apply | HTTP approval request | Synchronous validation/apply result |
 | Estimate Code | HTTP job submission | Durable job stream and structured report |
+| Estimate history | HTTP search/detail/delete | Stored estimates, calibration statistics |
 | Job activity | HTTP list/detail | Snapshot and live job events |
 | Conversations | HTTP CRUD | SQLite-backed chat history |
 
@@ -522,6 +588,7 @@ The exact route declarations live in `backend/api.py`; this table describes the 
 |---|---|---|
 | Chat conversations and messages | SQLite | Persist until user deletion or data removal |
 | Durable jobs and event history | SQLite | Retained for the configured job-retention period |
+| Completed estimates | SQLite | Keyed by story, kept verbatim, and **not** purged on a timer |
 | Talk conversational history | Connection memory | Ends with the connection; durable job records remain separately |
 | Smart Code preview tokens | Process memory | Short-lived, expiring, single-use |
 | Smart Code backups | Local filesystem | Created before overwriting existing files |
@@ -555,7 +622,8 @@ Operationally, preview-token state is process-local: restarting the backend inva
 - Running model inference cannot resume across a backend restart.
 - Smart Code checks structure and write safety; language-specific compilation and tests still need project-aware execution policies.
 - Keyword routing is transparent and predictable but less capable than a learned or policy-based classifier.
-- Primary and reviewer estimation passes share the same model and therefore are not fully independent.
+- Primary and reviewer estimation passes share the same model and therefore are not fully independent; they are blind to each other's scores, which is weaker than true model diversity.
+- Estimate history has no retention limit by design; a long-lived installation should gain an archival or export policy.
 - Artifact, upload, and backup retention should be governed by explicit cleanup limits.
 - Any non-loopback deployment requires TLS, authentication, authorization, CSRF/origin policy, secrets management, rate limiting, and tenant-aware storage isolation.
 
@@ -572,7 +640,8 @@ The architecture exposes both machine-operational and user-facing state:
 - structured-output validation and repair attempts;
 - explicit fallback/degradation notices;
 - deterministic calculation steps;
-- audit summaries suitable for diagnosis without exposing unnecessary raw data.
+- audit summaries suitable for diagnosis without exposing unnecessary raw data;
+- a drawn agent flow showing which stage is executing and the output each produced.
 
 For a production multi-user deployment, add metrics for queue wait, model load time, time to first token, tokens per second, validation repair rate, fallback rate, job interruption rate, Smart Code apply rejection reasons, and estimation disagreement frequency.
 
@@ -596,7 +665,8 @@ For a production multi-user deployment, add metrics for queue wait, model load t
 | `backend/estimate_code.py` | Estimation orchestration, two-pass model interaction, fallback, explanation |
 | `backend/estimation_pipeline.py` | Evidence model, readiness, specialist findings, disagreement and arbitration audit |
 | `backend/estimation_framework.py` | Authoritative numerical estimation policy |
-| `backend/db.py` | Conversation and message persistence |
+| `backend/estimate_history.py` | Durable, searchable record of completed estimates and calibration statistics |
+| `backend/db.py` | Conversation and message persistence; UTC-safe timestamp serialisation |
 | `backend/config.py` | Environment-backed settings |
 | `frontend/src/DesktopApp.tsx` | Global navigation, page selection, job activity |
 | `frontend/src/api.ts` | API client and stream/reconnect behavior |
@@ -604,7 +674,12 @@ For a production multi-user deployment, add metrics for queue wait, model load t
 | `frontend/src/TalkScreen.tsx` | Voice interaction and media states |
 | `frontend/src/SmartCodeScreen.tsx` | Code preview, diff review, approval, apply |
 | `frontend/src/EstimateCodeScreen.tsx` | Estimation input, progress, summary, detailed output |
+| `frontend/src/EstimateResultView.tsx` | Single estimate rendering, shared by live runs and history |
+| `frontend/src/AgentFlowDiagram.tsx` | Agent flow visualisation and calculation flow |
+| `frontend/src/EstimateHistoryPanel.tsx` | Estimate search, calibration summary, recall, re-estimate |
 | `frontend/src/EstimationPipelineReport.tsx` | Detailed evidence and agent-pipeline report |
+| `frontend/src/ActivityScreen.tsx` | Cross-workflow request status and responses |
+| `frontend/src/useJobs.ts` | Global job polling, active count, unload guard |
 | `frontend/src/EvidencePanel.tsx` | Shared human-readable execution evidence |
 
 ---
