@@ -4,14 +4,15 @@ import {
   Layers, LoaderCircle, PanelsTopLeft, Plus, Target, Trash2,
 } from 'lucide-react'
 import { AgentFlowDiagram } from './AgentFlowDiagram'
+import { Tooltip } from './Tooltip'
 import { api, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { EstimateHistoryPanel } from './EstimateHistoryPanel'
-import { EstimateResultView } from './EstimateResultView'
+import { EstimateResultView, RECOMMENDATIONS } from './EstimateResultView'
 import { SystemStatusChip } from './SystemStatusChip'
 import { isJobActive } from './types'
 import type {
-  AgentEvent, EstimateConfig, EstimateResult, Level, Recommendation, StackProfile, Story,
+  AgentEvent, EstimateConfig, EstimateResult, Level, StackProfile, Story,
 } from './types'
 
 const steps = [
@@ -68,13 +69,6 @@ const nodesFor = (event: AgentEvent): string[] =>
 const derivedSteps = (events: AgentEvent[]): string[] =>
   [...new Set(events.flatMap(nodesFor))]
 
-const RECOMMENDATIONS: Record<Recommendation, { label: string; tone: string; blurb: string }> = {
-  proceed: { label: 'Proceed', tone: 'ok', blurb: 'Every gate passed. This is committable.' },
-  decompose: { label: 'Decompose', tone: 'warn', blurb: 'Too large to commit as one story.' },
-  spike_first: { label: 'Spike first', tone: 'warn', blurb: 'Buy the missing knowledge before committing.' },
-  upgrade_framework_first: { label: 'Evaluate the framework first', tone: 'danger', blurb: 'The stack is too new to estimate against.' },
-  epic_discovery: { label: 'Epic — run discovery', tone: 'danger', blurb: 'A migration is not a story.' },
-}
 
 const defaultStack: StackProfile = {
   frontend: 'none', backend: 'none', database: '', maturity_level: 3, team_experience: 3,
@@ -111,9 +105,14 @@ function StackPanel({ stack, config, onChange }: {
     <header>
       <Layers size={17} />
       <span><b>Technology stack calibration</b><small>Adjusts the score before it maps to points</small></span>
-      <span className={`stack-total ${penalties.length ? 'active' : ''}`}>
-        {penalties.length ? `+${penalties.reduce((sum, item) => sum + Number(item.match(/\d+/)?.[0] ?? 0), 0)}` : 'No penalty'}
-      </span>
+      <Tooltip label="Stack penalty total"
+        detail={penalties.length
+          ? `Added to the scored total before it maps to points: ${penalties.join(', ')}. The same story on a different stack gets a different number, deliberately.`
+          : 'Nothing about the declared stack adds to this estimate. A mature framework and an experienced team carry no penalty.'}>
+        <span className={`stack-total ${penalties.length ? 'active' : ''}`}>
+          {penalties.length ? `+${penalties.reduce((sum, item) => sum + Number(item.match(/\d+/)?.[0] ?? 0), 0)}` : 'No penalty'}
+        </span>
+      </Tooltip>
     </header>
     <div className="stack-grid">
       <label>Frontend
@@ -136,18 +135,22 @@ function StackPanel({ stack, config, onChange }: {
       </label>
     </div>
     <div className="stack-sliders">
+      <Tooltip label="Framework maturity"
+        detail="How settled the framework is. Newer frameworks cost more — fewer answered questions, more churn — so this adds to the score and also caps how many points a single story may carry.">
       <label>
         <span>Framework maturity<b>{stack.maturity_level} · {maturity?.name ?? '—'}</b></span>
         <input type="range" min={1} max={5} value={stack.maturity_level}
           onChange={event => set('maturity_level', Number(event.target.value) as Level)} />
         <small>{maturity ? `${maturity.definition} Caps estimates at ${maturity.cap} points.` : ''}</small>
-      </label>
+      </label></Tooltip>
+      <Tooltip label="Team experience"
+        detail="Experience with this stack specifically, not seniority. A strong team new to a framework still pays the learning curve, and scores of 2 or below add to the estimate.">
       <label>
         <span>Team experience with this stack<b>{stack.team_experience} / 5</b></span>
         <input type="range" min={1} max={5} value={stack.team_experience}
           onChange={event => set('team_experience', Number(event.target.value) as Level)} />
         <small>{stack.team_experience <= 2 ? 'Scores 2 or below add +2 for the learning curve.' : 'No experience penalty applies.'}</small>
-      </label>
+      </label></Tooltip>
     </div>
     <div className="stack-flags">
       {([
@@ -172,9 +175,14 @@ function StackPanel({ stack, config, onChange }: {
 
 
 
-export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
+export function EstimateCodeScreen({ onHome, initialView = 'new', initialHistoryId, onViewChange }: {
+  onHome: () => void
+  initialView?: 'new' | 'history'
+  initialHistoryId?: string
+  onViewChange?: (view: 'new' | 'history', id?: string) => void
+}) {
   const [source, setSource] = useState<'manual' | 'upload' | 'jira'>('manual')
-  const [view, setView] = useState<'new' | 'history'>('new')
+  const [view, setView] = useState<'new' | 'history'>(initialView)
   const [story, setStory] = useState<Story>(emptyStory)
   const [stack, setStack] = useState<StackProfile>(defaultStack)
   const [config, setConfig] = useState<EstimateConfig>()
@@ -195,6 +203,11 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
   const abortRef = useRef<AbortController | undefined>(undefined)
 
   useEffect(() => { api.estimateConfig().then(setConfig).catch(cause => setError(cause.message)) }, [])
+  // The route can change without remounting — Back, or a pasted hash, both land here while
+  // the page key stays the same — so the view follows the URL rather than only its first value.
+  useEffect(() => {
+    setView(initialView)
+  }, [initialView])
   // Reopening the screen rejoins an estimate still running on the server rather than
   // presenting an idle form while work is in flight.
   useEffect(() => {
@@ -229,6 +242,15 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
         onEvent: event => {
           setRunEvents(current => [...current, event])
           setStepsDone(current => [...new Set([...current, ...nodesFor(event)])])
+        },
+        // A ten-story batch takes half an hour; story one is done in the first three
+        // minutes. Show each result as it lands rather than all of them at the end.
+        onPartial: partial => {
+          const produced: EstimateResult[] = partial.results || []
+          if (produced.length) {
+            setResults(produced)
+            setResult(current => current ?? produced[0])
+          }
         },
         onStatus: message => setStatus(message),
         onDone: (status, result, failure) => {
@@ -360,7 +382,7 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
           { id: 'upload', label: 'Upload Excel / CSV', Icon: FileSpreadsheet },
         ] as const).map(item =>
           <button key={item.id} className={view === 'new' && source === item.id ? 'active' : ''}
-            onClick={() => { setView('new'); setSource(item.id) }}>
+            onClick={() => { setView('new'); onViewChange?.('new'); setSource(item.id) }}>
             <item.Icon />{item.label}
           </button>)}
         <button className={view === 'history' ? 'active' : ''} onClick={() => setView('history')}>
@@ -372,7 +394,9 @@ export function EstimateCodeScreen({ onHome }: { onHome: () => void }) {
 
       {view === 'history' && <EstimateHistoryPanel
         config={config}
-        onBack={() => setView('new')}
+        initialEntryId={initialHistoryId}
+        onEntryChange={id => onViewChange?.('history', id)}
+        onBack={() => { setView('new'); onViewChange?.('new') }}
         onReEstimate={recalled => {
           // Reload the stored story and its stack into the form so a past estimate can be
           // re-run against current knowledge, rather than retyped.

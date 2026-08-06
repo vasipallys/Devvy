@@ -289,3 +289,27 @@
 
 @media(max-width:900px){.flow-branches{grid-template-columns:1fr}.flow-node{min-width:100%}.calc-arrow{display:none}}
 @media(prefers-reduced-motion:reduce){.flow-node,.flow-chevron{transition:none}}
+
+/* ---- Human decision: where "human decision required" is actually answered ---- */
+.decision-panel{border:1px solid #dfe5da;border-radius:12px;background:#fbfdf9;padding:16px 18px;margin-bottom:16px}
+.decision-panel>header{display:flex;align-items:flex-start;gap:11px;padding-bottom:13px;border-bottom:1px solid #eaefe6;margin-bottom:13px}
+.decision-panel>header>svg{color:#28795f;flex:none;margin-top:2px}
+.decision-panel>header>span{display:flex;flex-direction:column;gap:3px;flex:1}
+.decision-panel header b{font-size:12px}
+.decision-panel header small{font-size:10px;color:#5f6d64;line-height:1.55}
+.decision-chip{flex:none;align-self:flex-start;padding:5px 10px;border-radius:14px;font-size:9px;font-weight:600;background:#e7f1e4;color:#3f7358}
+.decision-chip.override{background:#fdf0d4;color:#7a5613}
+.decision-chip.spike,.decision-chip.decompose{background:#fbe9e4;color:#8a4433}
+.decision-options{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:13px}
+.decision-options button{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:10px 11px;border:1px solid #dde4d9;border-radius:9px;background:#fff;color:#3f5148;text-align:left}
+.decision-options button b{font-size:11px}
+.decision-options button small{font-size:9px;color:#5f6d64;line-height:1.45}
+.decision-options button:hover{border-color:#b5c9b0}
+.decision-options button.active{border-color:#17684f;background:#eef5ec;box-shadow:0 0 0 2px #17684f22}
+.decision-fields{display:flex;flex-wrap:wrap;gap:11px;margin-bottom:12px}
+.decision-fields label{display:flex;flex-direction:column;gap:5px;font-size:10px;color:#415149;min-width:150px}
+.decision-fields label>span{color:#5f6d64;font-size:9px}
+.decision-fields .decision-note{flex:1;min-width:220px}
+.decision-fields input,.decision-fields select{min-height:34px;border:1px solid #d4ddd2;border-radius:8px;background:#fff;color:#17251e;padding:0 9px;font-size:11px}
+.history-stat b em{font-style:normal;font-size:13px;color:#93a097}
+@media(max-width:900px){.decision-options{grid-template-columns:1fr 1fr}.history-stats{grid-template-columns:1fr 1fr}}

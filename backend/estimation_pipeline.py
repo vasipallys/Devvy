@@ -519,6 +519,7 @@ def consistency_audit(
     final_calculation: Calculation,
     final_scores: dict[str, int],
     stack: StackProfile,
+    blind_review_executed: bool = True,
 ) -> dict[str, Any]:
     deltas = [
         abs(left.score_most_likely - right.score_most_likely)
@@ -533,9 +534,15 @@ def consistency_audit(
         if protected
         else "PASS_WITH_WARNINGS" if material or stable < 0.9 else "PASS"
     )
+    if not blind_review_executed:
+        # The reviewer mirrors the primary when the second pass did not run, so a perfect
+        # stability index would be an artefact of that mirroring rather than evidence of
+        # two assessments agreeing. Say so instead of reporting agreement.
+        status = "PASS_WITH_WARNINGS" if status == "PASS" else status
     return {
         "status": status,
-        "dimension_stability_index": round(stable, 4),
+        "blind_review_executed": blind_review_executed,
+        "dimension_stability_index": round(stable, 4) if blind_review_executed else None,
         "point_stability": {
             "primary": primary.point_cross_check,
             "reviewer": reviewer.point_cross_check,
@@ -552,6 +559,11 @@ def consistency_audit(
                 (stable < 0.9, "Independent dimension agreement is below 90%."),
                 (bool(material), "Material disagreements required deterministic arbitration."),
                 (bool(protected), "Protected disagreements require human specialist approval."),
+                (
+                    not blind_review_executed,
+                    "An independent second pass was not run for this story, so cross-assessment "
+                    "stability is not measured.",
+                ),
             )
             if condition
         ],

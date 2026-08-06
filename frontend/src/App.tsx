@@ -3,6 +3,7 @@ import { Bot, Code2, FileText, Globe2, Home, Image, Menu, MessageSquare, Papercl
 import { marked } from 'marked'
 import { api, API, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
+import { Tooltip } from './Tooltip'
 import { SystemStatusChip } from './SystemStatusChip'
 import { isJobActive, type AgentEvent, type Attachment, type Conversation, type Message, type Mode } from './types'
 
@@ -11,6 +12,17 @@ const modes: { id: Mode; label: string; icon: typeof Bot }[] = [
   { id: 'code', label: 'Code', icon: Code2 }, { id: 'research', label: 'Research', icon: Globe2 },
   { id: 'image', label: 'Image', icon: Image }, { id: 'document', label: 'Document', icon: FileText },
 ]
+
+/** What picking a mode actually changes, since the difference is a routing decision the
+ *  user cannot otherwise see. */
+const MODE_WHY: Record<Mode, string> = {
+  auto: 'The router reads your message and picks a mode itself, then tells you which phrase decided it. Attachments outrank everything else.',
+  chat: 'Answers from the model alone. Nothing leaves this machine and no sources are retrieved.',
+  code: 'Asks for complete, runnable code rather than a sketch, with the reasoning kept short.',
+  research: 'The only mode that reaches the internet. It searches, fetches pages, and answers from what it retrieved — citing each source, and saying plainly when live data was unavailable rather than inventing it.',
+  image: 'Generates an image locally with the diffusion extra. Without it installed the run reports that instead of failing silently.',
+  document: 'Answers from your attached files. Their text is capped and marked untrusted evidence, so instructions inside a document cannot redirect the answer.',
+}
 
 function renderMarkdown(content: string): string {
   // Generated files are served by FastAPI, not the Vite frontend origin.
@@ -48,7 +60,11 @@ function renderMarkdown(content: string): string {
   return document.body.innerHTML
 }
 
-export function App({ onHome, initialConversationId }: { onHome?: () => void; initialConversationId?: string }) {
+export function App({ onHome, initialConversationId, onConversationChange }: {
+  onHome?: () => void
+  initialConversationId?: string
+  onConversationChange?: (id: string) => void
+}) {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState<string | undefined>(initialConversationId)
   const [messages, setMessages] = useState<Message[]>([])
@@ -66,6 +82,12 @@ export function App({ onHome, initialConversationId }: { onHome?: () => void; in
 
   const refresh = async () => setConversations(await api.conversations())
   useEffect(() => { refresh().catch(e => setError(e.message)) }, [])
+  // Keep the URL pointing at whatever conversation is open, so a reload or a shared link
+  // lands in the same place. Replaces rather than pushes: opening a chat is not a
+  // separate history entry from selecting one within it.
+  useEffect(() => {
+    if (activeId) onConversationChange?.(activeId)
+  }, [activeId, onConversationChange])
   useEffect(() => {
     if (activeId === streamingRef.current) return
     if (!activeId) { setMessages([]); return }
@@ -195,7 +217,7 @@ export function App({ onHome, initialConversationId }: { onHome?: () => void; in
         {attachments.length > 0 && <div className="attachment-row">{attachments.map(a => <span key={a.id}><FileText size={14}/>{a.name}<button onClick={() => setAttachments(x => x.filter(y => y.id !== a.id))}><X size={13}/></button></span>)}</div>}
         <div className="composer"><textarea aria-label="Message Devvy" value={input} onChange={e => setInput(e.target.value)} placeholder="Message Devvy…" rows={1} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}/>
           <div className="composer-actions"><input ref={fileRef} hidden type="file" multiple accept=".pdf,.docx,.txt,.md,.py,.js,.ts,.json,.csv" onChange={e => pickFiles(e.target.files)}/><button className="tool" title="Attach documents" onClick={() => fileRef.current?.click()}><Paperclip size={18}/></button>
-            <div className="mode-picker">{modes.map(item => <button key={item.id} className={mode === item.id ? 'selected' : ''} onClick={() => setMode(item.id)}><item.icon size={15}/><span>{item.label}</span></button>)}</div><div className="grow"/>
+            <div className="mode-picker">{modes.map(item => <Tooltip key={item.id} label={item.label} detail={MODE_WHY[item.id]}><button className={mode === item.id ? 'selected' : ''} onClick={() => setMode(item.id)}><item.icon size={15}/><span>{item.label}</span></button></Tooltip>)}</div><div className="grow"/>
             {sending ? <button className="send" title="Stop generating" aria-label="Stop generating" onClick={stop}><Square size={14}/></button> : <button className="send" disabled={!input.trim()} onClick={send}><Send size={17}/></button>}
           </div></div><small className="disclaimer">Devvy runs locally and can make mistakes. Verify important information.</small>
       </footer>

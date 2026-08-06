@@ -6,6 +6,7 @@ content. This makes runs inspectable without turning private prompts into a seco
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -55,6 +56,28 @@ def assemble_context(sources: list[ContextSource], max_chars: int) -> tuple[str,
     return "\n".join(blocks), manifest
 
 
+def sweep_directory(directory: Path, retention_days: int, patterns: tuple[str, ...]) -> int:
+    """Delete files older than the retention window. Best-effort, never raises.
+
+    Retention has to cover artefacts as well as records. Jobs, their events, and the ledger
+    are all pruned, but the uploads and generated media they refer to were not — so the only
+    thing that grew forever was the part holding whole documents and rendered video.
+    """
+    if not directory.is_dir():
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))).timestamp()
+    removed = 0
+    for pattern in patterns:
+        for path in directory.glob(pattern):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    return removed
+
+
 class RunLedger:
     """Append privacy-preserving workflow summaries to a local JSONL evidence ledger."""
 
@@ -82,6 +105,8 @@ class RunLedger:
 
 
 class AgentRun:
+    """One workflow's trajectory, appended to the ledger when it ends."""
+
     def __init__(self, ledger: RunLedger, workflow: str, metadata: dict[str, Any]):
         self.ledger = ledger
         self.id = str(uuid4())
@@ -116,6 +141,7 @@ class AgentRun:
         return item
 
     def finish(self, status: str, *, summary: dict[str, Any] | None = None) -> None:
+        """Write the trajectory. Safe to call from async code — see ``finish_async``."""
         if self._finished:
             return
         self._finished = True
@@ -133,3 +159,15 @@ class AgentRun:
                 "privacy": "No prompt, source content, or model response is stored in this ledger.",
             }
         )
+
+    async def finish_async(self, status: str, *, summary: dict[str, Any] | None = None) -> None:
+        """Finish from async code without blocking the event loop on disk.
+
+        Every workflow ends by writing its trajectory. Doing that inline stalls the single
+        thread that is also streaming tokens to every attached viewer, for the length of a
+        file append plus an fsync — small individually, and paid on the completion of every
+        request in the application.
+        """
+        if self._finished:
+            return
+        await asyncio.to_thread(self.finish, status, summary=summary)

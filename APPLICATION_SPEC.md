@@ -2,7 +2,7 @@
 
 **Document status:** As-built implementation and reproducible rebuild specification
 **Application version:** 0.1.0
-**Last verified against source:** 2026-08-03
+**Last verified against source:** 2026-08-06
 **Repository:** `Devvy`
 **Product name:** Devvy — Evidence-Based Development
 
@@ -145,7 +145,8 @@ flowchart TD
    `SmartCodeService`, `EstimateService`, and `RunLedger`.
 3. FastAPI lifespan initializes SQLite and optional observability.
 4. The SPA assumes the API is already reachable and reports clearly when it is not.
-5. Pages are selected by in-memory React state. There is no router and no URL persistence.
+5. Pages are selected by a hash route (`useRoute`), so Back works, a reload keeps its place,
+   and a conversation or stored estimate can be linked to a colleague.
 6. Generated media is served by FastAPI under `/generated`.
 
 Because singletons are built at import time, tests MUST set `PHOENIX_ENABLED=false` in the
@@ -163,7 +164,15 @@ All model-backed work MUST use one `GemmaRuntime`. It:
 - MAY enable 4-bit/8-bit loading only when explicitly configured;
 - serializes **all** generation behind one `asyncio.Lock`;
 - runs blocking generation in a worker thread;
-- streams tokens via `TextIteratorStreamer` drained into an `asyncio.Queue`;
+- streams tokens via `TextIteratorStreamer`, drained by **one** long-lived thread that MUST be
+  stoppable by a flag. The thread cannot be cancelled from the event loop — cancelling the task
+  that wraps it only abandons the result — so without the flag it outlives every generation that
+  ends without a sentinel (any failure, and every abandoned stream), waking once a second
+  forever: one leaked thread per failed request. A drain that sees the generation fail MUST
+  publish the sentinel and return, so the consumer is never left waiting;
+- drains tokens into an
+  `asyncio.Queue` rather than a threadpool dispatch per token;
+- accepts a per-call temperature override, used to make the blind review genuinely independent;
 - samples only when `TEMPERATURE > 0`, otherwise overrides inherited sampling values to `None`;
 - accepts a per-workflow `max_new_tokens` override.
 
@@ -214,9 +223,24 @@ it alive.
 | Live (in-memory broadcast) | token deltas and events | clients attached right now |
 
 Submission persists a `queued` row and returns immediately with a job id. The worker claims
-work **from the database**, not an in-memory queue: submissions arrive on FastAPI's threadpool
-where signalling an asyncio primitive would not be thread-safe, and a queued row already
-survives a restart.
+work **from the database**, not an in-memory queue: a queued row survives a restart, whereas an
+in-memory queue silently loses everything that had not started.
+
+Submission then *wakes* the worker. The wake is an optimisation layered on top of the durable
+claim, never a substitute for it: losing a wake costs latency until the next poll, never work.
+Because submission runs on FastAPI's threadpool, the wake MUST cross threads safely
+(`loop.call_soon_threadsafe`) and MUST tolerate a missing or closed loop silently.
+
+The backstop poll MUST be slow (`IDLE_POLL_SECONDS`, 5s). A tight poll makes an idle
+application run continuous database queries forever — on a laptop that is a wakeup cost paid
+for nothing, and it is the only work the process does when nobody is using it.
+
+The wake event MUST be created in `start()`, not in `__init__`. An `asyncio.Event` binds to the
+first loop that awaits it and rejects every later one, and the runner is a module-level
+singleton that outlives any single loop — every test client and every in-place restart brings a
+new one. For the same reason `start()` MUST reset the stop flag, or a restarted worker
+evaluates an already-false loop condition, exits immediately, and every later submission sits
+queued forever with no error anywhere.
 
 Concurrency MUST be one job at a time. `GemmaRuntime` already serializes generation behind a
 single lock, so a wider pool would only queue inside the model while making progress reporting
@@ -227,6 +251,13 @@ dishonest.
 `GET /api/jobs/{id}/stream` sends a `snapshot` of the durable state, then live deltas until the
 job finishes. Subscribing happens **before** the snapshot is taken, so no event can fall between
 the two.
+
+Live fan-out MUST NOT be able to grow the worker's memory without limit. Each subscriber queue
+is bounded (`MAX_PENDING_MESSAGES`); when a viewer stops reading — a backgrounded tab, a paused
+debugger, a dropped connection not yet reaped — its backlog is trimmed rather than the run being
+slowed or the process growing for the length of a multi-minute generation. A trimmed viewer
+recovers from the next snapshot, which is exactly what the offset protocol below already exists
+to handle. Terminal messages MUST NOT be dropped: they are what tell a viewer to stop waiting.
 
 Each token delta carries the character `offset` it starts at. A client attaching mid-run may
 receive deltas already contained in its snapshot; it MUST drop any delta whose offset is below
@@ -243,10 +274,29 @@ Attaching is idempotent and safe at any point in a job's life, including after i
 
 Statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted`.
 
+**Terminal is terminal.** The transition into a terminal state MUST be a conditional UPDATE
+(`WHERE status NOT IN (terminal)`), and the caller MUST only announce the transition it
+actually made. Two paths race here for real: a handler returns and the row is written
+`succeeded` from a database thread, and only then is a cancellation from shutdown delivered to
+the worker — whose handler would otherwise rewrite the row as `cancelled` and discard a result
+the user had already earned and watched complete. Persisting a completed result MUST be
+shielded from cancellation for the same reason.
+
+**Shutdown MUST be bounded.** Cancelling a task that is inside `asyncio.to_thread` does not
+interrupt the thread; the cancellation lands only once the thread returns, and if its result can
+no longer be delivered to the loop it never lands at all. An unbounded await in `stop()`
+therefore turns "close the app" into a hang — which also makes any test that stops a runner
+hang intermittently. Wait at most `STOP_TIMEOUT_SECONDS` and then abandon the worker: nothing is
+lost, because the row is durable and the next `start()` reconciles it.
+
 On startup the runner MUST reconcile: any job left `queued` or `running` by a previous process
 is marked `interrupted` with an explanatory error. A generation cannot be resumed, so an orphan
 MUST NOT be silently retried, and MUST NOT be left claiming to be running forever. Jobs older
 than `JOB_RETENTION_DAYS` (default 7) are purged with their events.
+
+Reconciliation MUST be set-based (bulk `UPDATE`, bulk `DELETE` with a subquery). Loading every
+expired job and each of its events as ORM objects purely to delete them makes the first request
+after a long gap the slowest one the user ever experiences, and gets worse with use.
 
 Cancellation cancels the running task, or marks a still-queued job `cancelled` so the worker
 never claims it. Partial output produced before cancellation MUST remain readable. A finished
@@ -305,6 +355,7 @@ rather than reporting a generic failure; a compact model otherwise reproduces th
 | `SMART_CODE_MAX_OUTPUT_TOKENS` | `4096` | Smart Code generation cap |
 | `ESTIMATE_MAX_OUTPUT_TOKENS` | `3072` | Estimate generation cap |
 | `AGENT_RUN_RETENTION_DAYS` | `30` | Ledger retention |
+| `UPLOAD_RETENTION_DAYS` | `7` | Uploads and generated media retention |
 | `WHISPER_MODEL` / `WHISPER_COMPUTE_TYPE` | `base.en` / `int8` | STT |
 | `TTS_RATE` / `TTS_VOICE` | `170` / `female` | TTS |
 | `MANIM_EXECUTABLE` | `manim` | Visual explanations |
@@ -328,11 +379,34 @@ loading over `file://`, and would otherwise match sandboxed iframes and local fi
 
 ---
 
+## 5.5 Schema migrations
+
+`SQLModel.metadata.create_all` only *creates* missing tables; it will not add a column to a
+table that already exists. A released build that gains a field would therefore read an existing
+user's database and fail at query time — silently, and only for people who already had data.
+
+`backend/migrations.py` applies ordered, recorded, exactly-once migrations against a
+`schema_version` table. Each runs in its own transaction and records its version in the same
+transaction, so an interrupted upgrade never marks a migration applied whose changes are not.
+A migration MUST NOT be edited or renumbered once released. Alembic is deliberately not used:
+a single-file, single-user, local SQLite database needs ordering and exactly-once semantics,
+not a migration environment.
+
 ## 6. Persistence
 
 SQLite at `APP_DATA_DIR/gemma_studio.db` via SQLModel. On connect the engine MUST set
-`journal_mode=WAL`, `foreign_keys=ON`, and `busy_timeout=30000`; the connection uses
-`check_same_thread=False` and a 30-second timeout.
+`journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=30000`, and `synchronous=NORMAL`; the
+connection uses `check_same_thread=False` and a 30-second timeout.
+
+`synchronous=NORMAL` is deliberate and safe under WAL: durability against process crashes is
+retained, and only a power loss can cost the last commits. It matters because the job runner
+commits on every progress update, every evidence event, and every throttled output flush — the
+default `FULL` makes each of those an fsync, on the hot path of every run.
+
+**Counting MUST happen in SQL.** Any "how many" question — active jobs, events already recorded
+for a job, history aggregates — MUST use `func.count()`, not `len()` over loaded rows. Loading a
+trajectory to count it turns a run that emits *n* events into O(n²) row loads, and an estimate
+emits one event per pipeline stage per story.
 
 | Table | Columns |
 | --- | --- |
@@ -341,6 +415,25 @@ SQLite at `APP_DATA_DIR/gemma_studio.db` via SQLModel. On connect the engine MUS
 
 Messages are always listed ordered by `created_at`. Only Chat persists; Talk history is
 connection-scoped and MUST NOT be written to disk.
+
+### 6.1 Retention
+
+Everything the application writes MUST have a retention rule. Records without one are the part
+of a local-first product that grows silently until the user notices their disk, and artefacts
+are the largest of them.
+
+| Data | Setting | Swept |
+| --- | --- | --- |
+| Jobs and their events | `JOB_RETENTION_DAYS` (7) | Startup reconciliation, set-based |
+| Run ledger JSONL | `AGENT_RUN_RETENTION_DAYS` (30) | `RunLedger` construction |
+| Uploads and generated media | `UPLOAD_RETENTION_DAYS` (7) | Startup, off the event loop |
+| Estimate history | none, by design | Never — an estimate is the artefact a team refers back to, and it is small |
+| Smart Code previews | `PREVIEW_TTL` (30 min) | On preview, **and enforced again at apply** |
+
+Sweeping at startup rather than on a timer keeps a running application free of a background
+sweeper for a job that only needs doing once a session. It MUST run off the event loop and MUST
+never prevent startup: retention is best-effort, and a locked file is not a reason to refuse to
+launch.
 
 ---
 
@@ -573,8 +666,14 @@ Generate/Modify with an instruction to return the smallest concrete whole-file c
 
 ### 10.5 Apply contract
 
-Apply MUST require: `approved=true`; a known, unexpired, single-use token (popped on use);
-unchanged SHA-256 for every target since preview; and passing verification. Each write re-checks
+Apply MUST require: `approved=true`; a known, single-use token (popped on use); a token within
+`PREVIEW_TTL`; unchanged SHA-256 for every target since preview; and passing verification.
+
+Expiry MUST be checked **in apply itself**, not only by the sweep that runs when a new preview
+starts. Otherwise a token outlives its lifetime for as long as nobody previews again, and can
+then write files from a proposal made hours ago against a workspace that has moved on since.
+The hash check would usually catch that, but a safety property must not depend on another check
+happening to fire. Each write re-checks
 workspace containment, backs up any existing file to
 `APP_DATA_DIR/smart-code/backups/<run-id>/`, then writes via temp file + `flush` + `fsync` +
 atomic `os.replace`. Run evidence is written to `APP_DATA_DIR/smart-code/runs/<run-id>.json`.
@@ -774,6 +873,33 @@ Batch: `batch_started {count}`, `item_started {index,title}`, `item_node`, `stat
 `loop`, `item_result`, `item_error`, `batch_result {results}`. An item failure MUST NOT stop later
 items.
 
+### 11.7.1 Conditional independent review
+
+A second full generation roughly doubles the wall-clock cost of an estimate on a CPU model, so
+the blind review runs where a second opinion can change the answer: within `BAND_EDGE_MARGIN`
+of a Fibonacci band edge, on an elevated protected risk dimension, with three or more factors
+at 4+, when heuristics filled more factors than the model scored, or under a stack maturity or
+experience penalty. The decision and its reason are reported as evidence.
+
+The reviewer runs at a **higher temperature** than the primary pass. At the shared default both
+passes converge on nearly identical scores, so the second generation costs minutes and produces
+no independent signal to arbitrate between.
+
+When the review does not run — skipped or degraded — the reviewer assessment MUST mirror the
+primary. It MUST NOT fall back to the keyword heuristic scorecard: that is a fallback for
+*missing* scores, not an independent opinion, and arbitrating against it manufactures
+disagreement. On one story it read "no frontend declared" as 1 against the model's 3, and the
+midpoint rule silently moved the final score — meaning *not* running a review changed the
+estimate, which is worse than either running it or skipping it.
+
+The consistency audit MUST report `blind_review_executed`, omit the stability index when no
+second pass ran, and warn rather than imply agreement that never happened.
+
+For the same reason `agentic_pipeline.model_policy.independent_model_passes` MUST report what
+actually ran (1 or 2), alongside `blind_review_executed` and the reason. A record whose whole
+purpose is to be checkable against the run cannot state a second opinion that, for most stories,
+never happened.
+
 ### 11.8 Estimate history
 
 Every completed estimate MUST be recorded in a durable store (`backend/estimate_history.py`),
@@ -795,12 +921,26 @@ the model/heuristic scoring split.
 Recording history is a side effect of estimating. A failure to write it MUST be logged and
 swallowed; it MUST NOT fail the estimate the user is waiting for.
 
+**The human decision closes the pipeline.** Every estimate ends at "human decision required", so
+history stores what the team actually chose — `accept`, `override` (with the agreed points),
+`spike`, or `decompose` — plus an optional note and, after delivery, the actual points. Without
+this the recommendation is the last word and calibration can only report what was estimated,
+never whether it held. A decision is deliberately **not** validated against the recommendation:
+a team may accept a number the framework wanted decomposed, and recording that disagreement is
+more useful than preventing it.
+
+Statistics MUST aggregate in SQL. History is never purged, so counting in Python would degrade
+steadily for exactly the teams whose calibration data is worth the most. Beyond volume they
+report `decided`, `overridden`, `override_bias` (mean signed gap between an overridden number
+and the recommendation), `with_actuals`, and `actual_accuracy`.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/estimate-code/history` | Search with `query`, `source`, `points`, `recommendation`, `limit`, `offset` |
 | GET | `/api/estimate-code/history/stats` | Points distribution, medians, recommendation and confidence mix |
 | GET | `/api/estimate-code/history/{id}` | One record including its full result |
 | DELETE | `/api/estimate-code/history/{id}` | Remove one record |
+| POST | `/api/estimate-code/history/{id}/decision` | Record the team decision and optional actuals |
 | POST | `/api/estimate-code/history/clear` | Remove all; requires `confirm: true` |
 
 Search matches title, Jira key, and summary. Listing is newest first and MUST report the total
@@ -849,6 +989,21 @@ an effect's return value as the cleanup function; a non-callable value there cra
 `destroy is not a function` on the next re-run or unmount. TypeScript does **not** catch this,
 because `EffectCallback` permits `void` and DOM methods are typed `void` regardless of their runtime
 return. An ESLint `no-restricted-syntax` rule enforces it.
+
+#### 12.1.1 Client-side cost
+
+The SPA is open for hours and mostly idle, so its background cost is a feature of the product.
+
+**Polling MUST stop while the tab is hidden.** A hidden tab has nobody to show a result to, and
+the work does not depend on being watched — that is the whole point of the job runner. It MUST
+resume on `visibilitychange` so nothing is stale on return.
+
+**Streamed text MUST be coalesced to one update per animation frame.** Tokens arrive faster than
+a screen can usefully change; a state update per token re-renders the whole transcript roughly a
+thousand times for one answer, and all but ~60 of those renders are discarded by the compositor
+anyway. The pending text MUST be flushed on `done` and on stream end without waiting for a
+frame, because a backgrounded tab stops firing them and the last words of an answer would
+otherwise never appear.
 
 Styling uses the local system font stack, dark near-black/green surfaces for Home, Chat, Talk and
 Smart Code, and a light editorial layout for Estimate Code. Responsive breakpoints collapse grids
@@ -935,6 +1090,31 @@ Evidence values MUST stay legible: URL lists render as clickable hostname chips,
 chips, booleans as yes/no. Retrieved source URLs MUST NOT be collapsed to a count. The empty state
 MUST state that hidden chain-of-thought is never shown or stored.
 
+### 12.6.1 Explanation on hover
+
+Evidence answers *what happened*. The interface must also answer *why it is that way*, without
+requiring the reader to open a panel first. `src/Tooltip.tsx` provides that layer, and it MUST be
+applied to any control or indicator whose meaning is not self-evident from its label: job and run
+statuses, factor scores and their provenance, calculation steps, policy gates, stack calibration
+controls, pipeline stages, Chat modes, Talk session states, decision options, and calibration
+statistics. The text MUST explain the reasoning, not restate the label — "Blind to the first pass"
+earns its place by saying that independence is what makes the disagreement meaningful.
+
+Required behaviour, all of it load-bearing:
+
+- **WCAG 1.4.13** — dismissible with Escape, hoverable (the pointer may enter the tooltip), and
+  persistent until pointer or focus leaves.
+- **Opens on keyboard focus, not only hover.** An element that nothing can focus — a badge, a
+  status icon — MUST be given a tab stop, or its explanation is mouse-only (2.1.1). An element
+  that is already focusable MUST NOT gain a second stop.
+- **Adds no DOM node.** Handlers are cloned onto the element being explained. A wrapper — even
+  `display: contents`, which is invisible to layout — breaks every `parent > child` CSS rule that
+  targets the wrapped element. Only a child that cannot be cloned gets a wrapper.
+- **Repositions on scroll rather than closing.** Focusing an off-screen element scrolls it into
+  view; closing on scroll would dismiss the tooltip that focus just opened. It closes only when
+  its anchor leaves the viewport.
+- Rendered through a portal, because several panels use `overflow: hidden`.
+
 ### 12.7 API client
 
 `src/api.ts` exposes typed helpers over `VITE_API_URL`. It provides a generic JSON helper that
@@ -987,6 +1167,40 @@ database. There is no packaged installer and nothing supervises the Python proce
 | Phoenix unreachable | Tracing skipped after a 0.3 s probe; app unaffected |
 | Renderer exception | Error boundary shows message, stack, and recovery actions |
 | API unreachable | System chip shows "API offline"; screens surface an error banner |
+
+---
+
+## 14.1 Performance and resource rules
+
+These are correctness rules, not tuning preferences: each one names a cost that grows without
+limit, or a stall on the single thread every user is waiting on.
+
+| Rule | Why it is not optional |
+| --- | --- |
+| Count in SQL, never `len()` over loaded rows | An n-event run becomes O(n²) row loads |
+| Purge and reconcile with set-based statements | Otherwise the first request after a gap is the slowest, and worsens with use |
+| Bound every fan-out queue | A stalled viewer must not grow the worker for a whole generation |
+| Bound shutdown | An unbounded await on a thread-blocked task means the process never exits |
+| Wake the worker; poll only as a backstop | A tight poll is continuous work while the app does nothing |
+| `synchronous=NORMAL` under WAL | Commits are on the hot path of every run |
+| No blocking file I/O on the event loop | The loop is also streaming tokens to every viewer |
+| One drain thread per generation, stoppable | Otherwise one thread leaks per failed request |
+| Retention for every artefact | Uploads and media are the largest thing written |
+| Coalesce token renders to a frame | ~1000 renders per answer, ~940 of them discarded |
+| Stop polling in a hidden tab | Requests every few seconds, forever, for nobody |
+
+**Measured on the reference machine** (Windows 11, CPU-only, Gemma 3 1B, `float32`):
+
+| Path | Budget |
+| --- | --- |
+| Test suite | < 10s, no intermittent hangs |
+| Idle backend | no repeating database queries |
+| Smart Code review, one file | ~3 min, live progress throughout |
+| Frontend bundle | < 400 KB raw / < 120 KB gzip |
+
+Generation itself is 1–3 minutes on CPU and dominates every request. That is exactly why the
+rules above matter: the user is already waiting, so nothing else may add avoidable cost, and
+progress MUST be emitted as it happens rather than in a burst at the end.
 
 ---
 
@@ -1044,11 +1258,38 @@ cd frontend; npm run preview                             # serve dist/
 34. The agent flow shows which stage is running, with each completed node's real output.
 35. A completed estimate recalled from history renders its flow fully, not as pending.
 36. No node ever renders a partial metric while its stage is still running.
+37. An existing database gains new columns on upgrade, and its rows survive.
+38. Skipping the blind review never changes a score.
+39. A batch renders each story as it completes, not only at the end.
+40. Every page is reachable by URL, Back works, and a stored estimate can be linked.
+41. Every status, score, badge, gate, stage, and mode control explains on hover what it is and
+    why, reachable by keyboard and dismissible with Escape.
+42. Stopping the backend exits promptly, even with a job mid-flight.
+43. A job that has already succeeded is never relabelled by a later cancel or shutdown.
+44. A runner stopped and started again in the same process still executes work.
+45. The audit reports the number of model passes that actually ran.
+46. An expired Smart Code preview is refused at apply, not only swept at the next preview.
+47. Uploads and generated media older than their retention window are removed at startup.
+48. An idle backend issues no repeating database queries.
+49. A hidden tab stops polling and refreshes on return.
+50. The test suite passes repeatedly with no intermittent hang.
 
 ### 15.2 Regression suite
 
 `tests/` covers the API surface, chat routing and research degradation, Talk routing and research,
 harness context assembly and the ledger, structured-output repair, Smart Code preview/apply safety
-and prompt-injection marking, Estimate Code behaviour, and the estimation framework's own worked
-examples. All tests, `ruff`, `eslint`, and `tsc -b && vite build` MUST pass before a change is
-considered complete.
+and prompt-injection marking, Estimate Code behaviour, the estimation framework's own worked
+examples, schema migrations, estimate history and calibration, and job durability. All tests,
+`ruff`, `eslint`, and `tsc -b && vite build` MUST pass before a change is considered complete.
+
+**The suite MUST be run more than once.** Concurrency defects here are timing-dependent by
+nature: the completion-versus-cancellation race and the unbounded shutdown wait both passed on
+a first run and hung or corrupted a result on a later one. A single green run is not evidence
+that either is fixed.
+
+| File | Guards |
+| --- | --- |
+| `test_jobs.py` | Durability with no client attached; snapshot/delta reconstruction; event sequencing; cancellation including the claim window; restart reconciliation; **bounded shutdown**; **restart-after-stop**; **terminal states are final** |
+| `test_migrations.py` | An existing database gains columns and keeps its rows |
+| `test_estimate_history.py` | History outlives its job; aggregates computed in SQL |
+| `test_estimation_framework.py` | The four published §12 walkthroughs, and ledger reconciliation |

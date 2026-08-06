@@ -37,6 +37,7 @@ from backend.estimate_code import (
 )
 from backend.estimate_history import (
     clear_estimates,
+    record_decision,
     delete_estimate,
     estimate_stats,
     get_estimate,
@@ -51,7 +52,7 @@ from backend.estimation_framework import (
     MATURITY_TAXONOMY,
     StackProfile,
 )
-from backend.harness import RunLedger
+from backend.harness import RunLedger, sweep_directory
 from backend.jobs import FINISHED as FINISHED_JOB_STATES, JobContext, JobRunner
 from backend.model import GemmaRuntime
 from backend.observability import configure_observability
@@ -78,6 +79,17 @@ job_runner = JobRunner(engine, retention_days=settings.job_retention_days)
 async def lifespan(application: FastAPI):
     init_db()
     configure_observability(settings, application)
+    # Artefact retention runs alongside the job reconciliation below, off the event loop.
+    # Doing it at startup rather than on a timer keeps the running application free of a
+    # background sweeper for a job that only needs doing once a session.
+    swept = await asyncio.to_thread(
+        sweep_directory, settings.uploads_dir, settings.upload_retention_days, ("*",),
+    )
+    swept += await asyncio.to_thread(
+        sweep_directory, settings.generated_dir, settings.upload_retention_days, ("*",),
+    )
+    if swept:
+        logger.info("Removed %d expired upload/generated file(s)", swept)
     # The worker owns all model execution. Starting it here — not per request — is what
     # lets a run outlive the connection that submitted it.
     await job_runner.start()
@@ -365,7 +377,7 @@ async def run_chat_job(request: dict, context: JobContext) -> dict:
                 "artifact": bool(result.get("artifact_url")),
             },
         )
-        run.finish(
+        await run.finish_async(
             "completed",
             summary={"mode": result.get("mode"), "artifact": bool(result.get("artifact_url"))},
         )
@@ -376,11 +388,13 @@ async def run_chat_job(request: dict, context: JobContext) -> dict:
         }
     except asyncio.CancelledError:
         run.event("cancelled", "failed", "The run was cancelled by the user")
+        # Synchronous on purpose: awaiting inside a cancelled task raises immediately, which
+        # would drop the very record that says the run was cancelled.
         run.finish("cancelled")
         raise
     except Exception as exc:
         run.event("error", "failed", "The run could not complete", detail=str(exc)[:500])
-        run.finish("failed", summary={"error_type": type(exc).__name__})
+        await run.finish_async("failed", summary={"error_type": type(exc).__name__})
         await context.event("error", "failed", "The run could not complete", detail=str(exc)[:500])
         raise
 
@@ -615,14 +629,14 @@ async def run_talk_job(request: dict, context: JobContext) -> dict:
                 "warnings": len(job_result["warnings"]),
             },
         )
-        run.finish("completed", summary={"mode": mode})
+        await run.finish_async("completed", summary={"mode": mode})
         return job_result
     except asyncio.CancelledError:
-        run.finish("cancelled")
+        run.finish("cancelled")  # see run_chat_job: no awaiting on the cancellation path
         raise
     except Exception as exc:
         run.event("error", "failed", "The Talk turn could not complete", detail=str(exc)[:500])
-        run.finish("failed", summary={"error_type": type(exc).__name__})
+        await run.finish_async("failed", summary={"error_type": type(exc).__name__})
         raise
 
 
@@ -837,24 +851,24 @@ async def run_smart_code_job(request: dict, context: JobContext) -> dict:
                 "can_apply": result.get("can_apply"), "edits": len(result.get("edits", []))
             },
         )
-        run.finish(
+        await run.finish_async(
             "completed",
             summary={"can_apply": result.get("can_apply"), "edits": len(result.get("edits", []))},
         )
         return {"preview": result, "stages": stages}
     except asyncio.CancelledError:
         task.cancel()
-        run.finish("cancelled")
+        run.finish("cancelled")  # see run_chat_job: no awaiting on the cancellation path
         raise
     except ValueError as exc:
         logger.warning("Smart Code preview rejected: %s", exc)
         run.event("error", "failed", "Preview rejected safely", detail=str(exc)[:500])
-        run.finish("failed", summary={"error_type": type(exc).__name__})
+        await run.finish_async("failed", summary={"error_type": type(exc).__name__})
         raise
     except Exception as exc:
         logger.exception("Smart Code preview failed")
         run.event("error", "failed", "Preview failed safely", detail=str(exc)[:500])
-        run.finish("failed", summary={"error_type": type(exc).__name__})
+        await run.finish_async("failed", summary={"error_type": type(exc).__name__})
         raise
 
 
@@ -1001,7 +1015,7 @@ async def estimate_one(story, context: JobContext, index: int, total: int) -> di
                     + f" ({elapsed}s)"
                 )
         result = await task
-        run.finish(
+        await run.finish_async(
             "completed",
             summary={
                 "points": result.get("points"),
@@ -1022,12 +1036,12 @@ async def estimate_one(story, context: JobContext, index: int, total: int) -> di
         return result
     except asyncio.CancelledError:
         task.cancel()
-        run.finish("cancelled")
+        run.finish("cancelled")  # see run_chat_job: no awaiting on the cancellation path
         raise
     except Exception as exc:
         logger.exception("Estimate Code failed")
         run.event("error", "failed", "Estimate failed validation", detail=str(exc)[:500])
-        run.finish("failed", summary={"error_type": type(exc).__name__})
+        await run.finish_async("failed", summary={"error_type": type(exc).__name__})
         raise
 
 
@@ -1040,6 +1054,12 @@ async def run_estimate_job(request: dict, context: JobContext) -> dict:
     for index, story in enumerate(stories):
         try:
             results.append(await estimate_one(story, context, index, total))
+            # Publish after each story. Waiting for all of them means a long batch shows
+            # nothing for half an hour despite having finished useful work minutes in.
+            if total > 1:
+                await context.partial(
+                    {"results": results, "failures": failures, "count": total}
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1105,6 +1125,33 @@ def estimate_history_stats():
 @app.get("/api/estimate-code/history/{record_id}")
 def estimate_history_detail(record_id: UUID):
     record = get_estimate(engine, record_id)
+    if record is None:
+        raise HTTPException(404, "That estimate is no longer in history.")
+    return record
+
+
+@app.post("/api/estimate-code/history/{record_id}/decision")
+def estimate_history_decision(record_id: UUID, payload: dict = Body(...)):
+    """Record what the team decided. This is the step that closes the pipeline.
+
+    Every estimate ends at "human decision required". Without somewhere to put the answer the
+    recommendation is the last word, and calibration can only ever report what was estimated
+    rather than whether the estimate held.
+    """
+    decision = str(payload.get("decision", "")).strip()
+    points = payload.get("points")
+    actual = payload.get("actual_points")
+    if decision == "override" and points is None:
+        raise HTTPException(400, "An override must supply the points the team agreed on.")
+    try:
+        record = record_decision(
+            engine, record_id, decision,
+            points=int(points) if points is not None else None,
+            note=str(payload.get("note", "")),
+            actual_points=int(actual) if actual is not None else None,
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
     if record is None:
         raise HTTPException(404, "That estimate is no longer in history.")
     return record

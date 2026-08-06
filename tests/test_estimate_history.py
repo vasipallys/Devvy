@@ -17,6 +17,7 @@ from backend.estimate_history import (
     estimate_stats,
     get_estimate,
     list_estimates,
+    record_decision,
     save_estimate,
 )
 
@@ -161,10 +162,84 @@ def test_stats_turn_a_log_into_a_calibration_record(engine):
 
 def test_stats_on_empty_history_does_not_divide_by_zero(engine):
     stats = estimate_stats(engine)
-    assert stats == {
-        "total": 0, "points": {}, "recommendations": {}, "confidence": {},
-        "median_points": None, "model_scored_share": None,
-    }
+    assert stats["total"] == 0
+    assert stats["median_points"] is None
+    assert stats["model_scored_share"] is None
+    assert stats["override_bias"] is None
+    assert stats["actual_accuracy"] is None
+    assert stats["points"] == stats["decisions"] == {}
+
+
+def test_recording_a_decision_closes_the_loop(engine):
+    """The pipeline ends at "human decision required"; this is where the answer goes."""
+    record = save_estimate(engine, estimate("Publish order events", 8))
+    assert get_estimate(engine, record.id)["decision"] is None
+
+    updated = record_decision(engine, record.id, "accept", note="Team agreed in refinement")
+    assert updated["decision"] == "accept"
+    assert updated["decided_points"] == 8, "accepting keeps the recommended number"
+    assert updated["decision_note"] == "Team agreed in refinement"
+    assert updated["decided_at"].endswith("+00:00")
+
+
+def test_an_override_records_the_number_the_team_chose(engine):
+    record = save_estimate(engine, estimate("Add biometric login", 5))
+    updated = record_decision(engine, record.id, "override", points=13, note="Auth is riskier")
+
+    assert updated["decided_points"] == 13
+    assert updated["points"] == 5, "the recommendation is preserved alongside the override"
+
+
+def test_a_team_may_decide_against_the_recommendation(engine):
+    """Recording the disagreement is more useful than preventing it."""
+    record = save_estimate(engine, estimate("Migrate auth", 21, recommendation="spike_first"))
+    updated = record_decision(engine, record.id, "accept")
+    assert updated["decision"] == "accept"
+    assert updated["recommendation"] == "spike_first"
+
+
+def test_an_unknown_decision_is_rejected(engine):
+    record = save_estimate(engine, estimate("Anything", 5))
+    with pytest.raises(ValueError, match="must be one of"):
+        record_decision(engine, record.id, "maybe-later")
+
+
+def test_deciding_on_a_missing_record_reports_a_miss(engine):
+    assert record_decision(engine, uuid4(), "accept") is None
+
+
+def test_stats_report_calibration_not_just_volume(engine):
+    """What a team decided, and how far they move the number, is the useful signal."""
+    a = save_estimate(engine, estimate("A", 5))
+    b = save_estimate(engine, estimate("B", 8))
+    c = save_estimate(engine, estimate("C", 8))
+    save_estimate(engine, estimate("D", 13))  # left undecided
+
+    record_decision(engine, a.id, "accept")
+    record_decision(engine, b.id, "override", points=13)   # +5
+    record_decision(engine, c.id, "override", points=13)   # +5
+    record_decision(engine, a.id, "accept", actual_points=8)  # estimated 5, actually 8
+
+    stats = estimate_stats(engine)
+    assert stats["total"] == 4
+    assert stats["decided"] == 3, "the undecided estimate is not counted as decided"
+    assert stats["decisions"] == {"accept": 1, "override": 2}
+    assert stats["accepted_as_recommended"] == 1
+    assert stats["overridden"] == 2
+    # Both overrides moved 8 -> 13, so the team reads this work as five points larger.
+    assert stats["override_bias"] == 5.0
+    assert stats["with_actuals"] == 1
+    assert stats["actual_accuracy"] == 3.0
+
+
+def test_stats_aggregate_in_sql_rather_than_loading_every_row(engine):
+    """History is never purged, so counting must not scale with the table."""
+    for index in range(120):
+        save_estimate(engine, estimate(f"Story {index}", 8 if index % 2 else 13))
+    stats = estimate_stats(engine)
+    assert stats["total"] == 120
+    assert stats["points"] == {"8": 60, "13": 60}
+    assert stats["median_points"] in (8, 13)
 
 
 def test_history_outlives_the_job_that_produced_it(engine):

@@ -1,0 +1,4 @@
+D:\vasipallys-github\Devvy\.venv\Lib\site-packages\phoenix\server\api\routers\oauth2.py:12: AuthlibDeprecationWarning: authlib.jose module is deprecated, please use joserfc instead.
+It will be compatible before version 2.0.0.
+  from authlib.jose import jwt
+..........................................................

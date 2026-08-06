@@ -54,11 +54,27 @@ def configure_sqlite(connection, _record) -> None:
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA busy_timeout=30000")
+    # WAL keeps its durability guarantee against process crashes at NORMAL; only a power
+    # loss can cost the last commits. The job runner commits on every progress update,
+    # event, and output flush, so an fsync per commit is the difference between a write
+    # costing microseconds and costing milliseconds — on the hot path of every run.
+    cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.close()
 
 
 def init_db() -> None:
+    """Create missing tables, then bring existing ones up to the current schema.
+
+    Order matters. ``create_all`` handles a fresh install, where every table arrives with
+    today's columns. Migrations handle an upgrade, where the tables already exist and
+    ``create_all`` would leave them untouched — including any column added since.
+    """
+    # Imported here so every table is registered on SQLModel.metadata before create_all.
+    from backend import estimate_history, jobs  # noqa: F401
+    from backend.migrations import run_migrations
+
     SQLModel.metadata.create_all(engine)
+    run_migrations(engine)
 
 
 def create_conversation(session: Session, title: str = "New conversation") -> Conversation:

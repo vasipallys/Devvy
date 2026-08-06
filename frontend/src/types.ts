@@ -403,7 +403,15 @@ export interface EstimateHistoryEntry {
   model_scored: number
   heuristic_filled: number
   tldr: string
+  /** What the team decided. Null until somebody actually answers. */
+  decision: EstimateDecision | null
+  decided_points: number | null
+  decision_note: string | null
+  decided_at: string | null
+  actual_points: number | null
 }
+
+export type EstimateDecision = 'accept' | 'override' | 'spike' | 'decompose'
 
 export interface EstimateHistoryPage {
   total: number
@@ -417,8 +425,18 @@ export interface EstimateHistoryStats {
   points: Record<string, number>
   recommendations: Record<string, number>
   confidence: Record<string, number>
+  decisions: Record<string, number>
   median_points: number | null
   model_scored_share: number | null
+  /** Calibration: what teams did with the recommendation, and how it held up. */
+  decided: number
+  accepted_as_recommended: number
+  overridden: number
+  /** Mean signed gap between the overridden number and the recommended one. */
+  override_bias: number | null
+  with_actuals: number
+  /** Mean absolute gap between recommended points and what it actually took. */
+  actual_accuracy: number | null
 }
 
 export interface Story {

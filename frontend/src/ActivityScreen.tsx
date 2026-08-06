@@ -6,6 +6,7 @@ import {
 import { api } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { SystemStatusChip } from './SystemStatusChip'
+import { Tooltip } from './Tooltip'
 import { useJobs } from './useJobs'
 import { isJobActive, type JobDetail, type JobKind, type JobStatus, type JobSummary } from './types'
 
@@ -16,13 +17,19 @@ const KIND_META: Record<JobKind, { label: string; Icon: typeof MessageSquare }> 
   talk: { label: 'Talk', Icon: Mic },
 }
 
-const STATUS_META: Record<JobStatus, { label: string; tone: string }> = {
-  queued: { label: 'Queued', tone: 'wait' },
-  running: { label: 'Running', tone: 'run' },
-  succeeded: { label: 'Completed', tone: 'ok' },
-  failed: { label: 'Failed', tone: 'bad' },
-  cancelled: { label: 'Cancelled', tone: 'muted' },
-  interrupted: { label: 'Interrupted', tone: 'bad' },
+const STATUS_META: Record<JobStatus, { label: string; tone: string; why: string }> = {
+  queued: { label: 'Queued', tone: 'wait',
+    why: 'Accepted and waiting its turn. Only one request runs at a time, because the local model can only generate one answer at a time.' },
+  running: { label: 'Running', tone: 'run',
+    why: 'Working on the server right now. Closing the tab will not stop it, and the result will be here when you return.' },
+  succeeded: { label: 'Completed', tone: 'ok',
+    why: 'Finished, with its full response and evidence kept — whether or not anyone was watching when it landed.' },
+  failed: { label: 'Failed', tone: 'bad',
+    why: 'Could not complete. The error is recorded rather than swallowed, and any output produced before the failure is kept.' },
+  cancelled: { label: 'Cancelled', tone: 'muted',
+    why: 'Stopped on request. Work completed before cancelling is still readable.' },
+  interrupted: { label: 'Interrupted', tone: 'bad',
+    why: 'The backend restarted mid-run. A partly finished generation cannot be resumed, so it is marked honestly instead of left claiming to be in progress.' },
 }
 
 function StatusIcon({ status }: { status: JobStatus }) {
@@ -71,7 +78,9 @@ function JobRow({ job, onOpen, onCancel, selected }: {
   const status = STATUS_META[job.status]
   return <div className={`job-row ${selected ? 'selected' : ''}`}>
     <button className="job-open" onClick={onOpen}>
-      <span className={`job-status tone-${status.tone}`}><StatusIcon status={job.status} /></span>
+      <Tooltip label={status.label} detail={status.why}>
+        <span className={`job-status tone-${status.tone}`}><StatusIcon status={job.status} /></span>
+      </Tooltip>
       <span className="job-body">
         <b>{job.title || meta.label}</b>
         <small>

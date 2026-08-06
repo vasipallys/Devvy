@@ -11,6 +11,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -191,13 +192,56 @@ def _words(value: str) -> set[str]:
     return {item.lower() for item in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", value)}
 
 
-def _scan(root: Path, objective: str, limit: int = 40) -> list[Path]:
-    goal = _words(objective)
-    ranked: list[tuple[int, int, Path]] = []
+#: Directory listings cached per workspace. A preview walks the entire tree, which is slow on
+#: a large repository and repeated on every run against the same unchanged workspace.
+_SCAN_CACHE: dict[Path, tuple[float, list[tuple[Path, int]]]] = {}
+_SCAN_CACHE_LOCK = threading.Lock()
+_SCAN_CACHE_TTL_SECONDS = 30.0
+
+
+def _ignored_globs(root: Path) -> list[str]:
+    """Patterns from .gitignore, so a preview does not read files the repo excludes.
+
+    Deliberately simple: plain names and directory prefixes, which is what SKIP_DIRS already
+    handled by hardcoding. Full gitignore semantics (negation, nested files) are not needed
+    to keep build output and vendored trees out of a model prompt.
+    """
+    candidate = root / ".gitignore"
+    if not candidate.is_file():
+        return []
+    patterns = []
+    try:
+        for line in candidate.read_text(encoding="utf-8", errors="replace").splitlines():
+            entry = line.strip()
+            if entry and not entry.startswith(("#", "!")):
+                patterns.append(entry.strip("/").replace("\\", "/"))
+    except OSError:
+        return []
+    return patterns[:200]
+
+
+def _walk(root: Path) -> list[tuple[Path, int]]:
+    """Every candidate source file with its size, cached briefly per workspace."""
+    now = time.monotonic()
+    with _SCAN_CACHE_LOCK:
+        cached = _SCAN_CACHE.get(root)
+        if cached and now - cached[0] < _SCAN_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    ignored = _ignored_globs(root)
+    files: list[tuple[Path, int]] = []
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in SOURCE_EXTENSIONS:
             continue
-        if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
+        parts = path.relative_to(root).parts
+        if any(part in SKIP_DIRS for part in parts):
+            continue
+        relative = "/".join(parts)
+        if any(
+            relative == pattern or relative.startswith(f"{pattern}/") or part == pattern
+            for pattern in ignored
+            for part in parts
+        ):
             continue
         try:
             size = path.stat().st_size
@@ -205,9 +249,21 @@ def _scan(root: Path, objective: str, limit: int = 40) -> list[Path]:
             continue
         if size > 512_000:
             continue
-        rel = _relative(root, path)
-        score = len(goal & _words(rel)) * 3
-        ranked.append((score, -size, path.resolve()))
+        files.append((path.resolve(), size))
+
+    with _SCAN_CACHE_LOCK:
+        _SCAN_CACHE[root] = (now, files)
+    return files
+
+
+def _scan(root: Path, objective: str, limit: int = 40) -> list[Path]:
+    goal = _words(objective)
+    ranked: list[tuple[int, int, Path]] = []
+    for path, size in _walk(root):
+        if not path.is_file() or path.suffix.lower() not in SOURCE_EXTENSIONS:
+            continue
+        score = len(goal & _words(_relative(root, path))) * 3
+        ranked.append((score, -size, path))
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
     relevant = [path for score, _, path in ranked if score > 0]
     return (relevant or [path for _, _, path in ranked])[:limit]
@@ -265,6 +321,12 @@ def _verify(path: Path, content: str) -> dict:
         return {"path": str(path), "passed": False, "detail": str(exc)}
 
 
+#: How long an approved-but-unapplied preview stays valid. A diff is only meaningful against
+#: the tree it was computed from, and the file hashes are checked too — this bounds how far
+#: the workspace can have drifted before that check is even reached.
+PREVIEW_TTL = timedelta(minutes=30)
+
+
 class SmartCodeService:
     def __init__(self, runtime: GemmaRuntime, settings: Settings):
         self.runtime = runtime
@@ -273,7 +335,7 @@ class SmartCodeService:
         self._lock = threading.Lock()
 
     def _purge(self) -> None:
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        cutoff = datetime.now(timezone.utc) - PREVIEW_TTL
         with self._lock:
             stale = [key for key, value in self._previews.items() if value.created_at < cutoff]
             for key in stale:
@@ -504,6 +566,12 @@ RETRIEVED EVIDENCE:
             preview = self._previews.pop(request.preview_token, None)
         if preview is None:
             raise ValueError("This preview is missing, expired, or was already applied.")
+        # Expiry is enforced here, not only by the sweep. The sweep runs when a *new*
+        # preview starts, so a token could outlive its lifetime indefinitely simply because
+        # nobody previewed again — and then write files from a proposal made hours ago
+        # against a workspace that has moved on since.
+        if datetime.now(timezone.utc) - preview.created_at > PREVIEW_TTL:
+            raise ValueError("This preview has expired. Generate a fresh diff before applying.")
         if any(_hash(path) != expected for path, expected in preview.hashes.items()):
             raise ValueError("A target changed after preview. Generate a fresh diff before applying.")
         if not all(item["passed"] for item in preview.verification):

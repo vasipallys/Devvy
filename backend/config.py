@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     #: Completed background jobs stay queryable for this long so a returning browser can
     #: still read a result it never collected. Older jobs and their events are purged.
     job_retention_days: int = 7
+    #: Uploaded documents and generated artefacts are swept after this long. They are inputs
+    #: and outputs of a run, not a library: without a sweep the data directory is the one
+    #: part of the application that grows without bound for as long as it is used.
+    upload_retention_days: int = 7
     whisper_model: str = "base.en"
     whisper_compute_type: str = "int8"
     tts_rate: int = 170

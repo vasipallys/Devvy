@@ -122,3 +122,24 @@ button:disabled{cursor:not-allowed}
 @media(max-width:900px){.shell>.evidence-panel{position:absolute;right:0;top:64px;bottom:0;z-index:8;width:245px;box-shadow:-20px 0 40px rgba(0,0,0,.35);opacity:.96}.home-content{padding-inline:20px}.trust-strip{grid-template-columns:1fr}.trust-strip small{display:none}}
 @media(max-width:700px){.choice-grid{grid-template-columns:1fr}.home-content h1{font-size:36px}.home-header{padding:0 16px}.home-header .system-chip{min-width:40px;width:40px;padding:0;justify-content:center}.home-header .system-chip>div{display:none}.choice-card{min-height:166px}.trust-strip{display:none}.shell>.evidence-panel{display:none}.product-brand{position:static;transform:none}.product-header .system-chip,.estimate-header .system-chip{min-width:40px;width:40px;padding:0;justify-content:center}.product-header .system-chip>div,.estimate-header .system-chip>div{display:none}.evidence-panel.compact .evidence-timeline{display:block}.evidence-panel.compact .evidence-timeline details{min-width:0;max-width:none;margin-bottom:6px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
+
+/* Tooltip: the "why" one hover away. Portalled, so panels with overflow cannot clip it. */
+/* Handlers are cloned onto the explained element, so there is normally no wrapper at all.
+   The fallback wrapper is inline-flex rather than display:contents: a box-less element
+   cannot take focus, and it hides the child from every `parent > child` rule. */
+.tooltip-anchor{display:inline-flex}
+[data-tooltip-anchor]:focus-visible{outline:2px solid #a8c7fa;outline-offset:2px}
+.tooltip{position:fixed;z-index:200;max-width:280px;transform:translateX(-50%);pointer-events:auto;
+  display:flex;flex-direction:column;gap:4px;padding:9px 11px;border-radius:8px;
+  border:1px solid #33403a;background:#0f1512;color:#e4ebe6;
+  box-shadow:0 10px 30px rgba(0,0,0,.42);animation:tooltip-in .12s ease-out}
+.tooltip-top{transform:translate(-50%,-100%)}
+.tooltip b{font-size:11px;line-height:1.4;color:#f2f7f3}
+.tooltip span{font-size:10px;line-height:1.6;color:#a9b6ae}
+.tooltip::after{content:'';position:absolute;left:50%;margin-left:-5px;border:5px solid transparent}
+.tooltip-top::after{top:100%;border-top-color:#0f1512}
+.tooltip-bottom::after{bottom:100%;border-bottom-color:#0f1512}
+@keyframes tooltip-in{from{opacity:0;transform:translateX(-50%) scale(.97)}}
+.tooltip-top{animation-name:tooltip-in-top}
+@keyframes tooltip-in-top{from{opacity:0;transform:translate(-50%,-100%) scale(.97)}}
+@media(prefers-reduced-motion:reduce){.tooltip{animation:none}}

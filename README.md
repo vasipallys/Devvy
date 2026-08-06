@@ -333,6 +333,13 @@ verbatim so a recalled estimate looks exactly as it did the day it was produced.
 be downloaded as JSON, deleted, or re-estimated: re-estimating reloads the story *and its stack
 profile* into the form so you can re-run it against current knowledge instead of retyping it.
 
+**Recording the decision closes the loop.** Every estimate ends at "human decision required", so
+each history entry can record what the team actually chose — accept, override (with the agreed
+points), spike, or decompose — plus an optional note and, after delivery, the actual points. The
+calibration summary then reports more than volume: how many estimates were decided, how often the
+team overrode the recommendation, which direction they moved it, and how close the number was to
+what it really took.
+
 History is stored separately from the background job that produced it. Jobs are purged after
 `JOB_RETENTION_DAYS`; estimates are not purged on a timer, because they are the record a team
 refers back to.

@@ -1,4 +1,5 @@
 import { Check, ChevronDown, CircleAlert, Clock3, Database, LoaderCircle, RotateCw, ShieldCheck } from 'lucide-react'
+import { Tooltip } from './Tooltip'
 import type { AgentEvent } from './types'
 
 function StatusIcon({ status }: { status: string }) {
@@ -7,6 +8,16 @@ function StatusIcon({ status }: { status: string }) {
   if (status === 'running') return <LoaderCircle className="spin" />
   if (status === 'waiting') return <Clock3 />
   return <Check />
+}
+
+/** What each status means for the run, rather than just its name. */
+const STATUS_MEANING: Record<string, { label: string; why: string }> = {
+  running: { label: 'Running', why: 'This stage is working now. On a CPU model a single stage can take minutes; the run is not stuck.' },
+  completed: { label: 'Completed', why: 'The stage finished and produced the evidence shown below it.' },
+  validated: { label: 'Validated', why: 'The model returned output that satisfied the schema and the workflow rules, so no repair was needed.' },
+  retrying: { label: 'Repairing', why: 'The output did not satisfy the contract. One repair attempt runs with the specific defect named — it cannot loop indefinitely.' },
+  waiting: { label: 'Waiting for you', why: 'The workflow deliberately stops here. Nothing further happens until a person decides.' },
+  failed: { label: 'Failed', why: 'This stage could not complete. Where possible the workflow degrades honestly rather than inventing a result.' },
 }
 
 const isUrl = (value: unknown): value is string =>
@@ -48,7 +59,9 @@ export function EvidencePanel({ events, title = 'Run evidence', compact = false 
     </div>
     {!events.length ? <div className="evidence-empty"><ShieldCheck/><p>Actions, context sources, validation loops, and approval gates will appear here. Hidden chain-of-thought is never shown or stored.</p></div>
       : <div className="evidence-timeline">{events.map((event, index) => <details key={`${event.stage}-${index}`} open={event.status === 'running' || event.status === 'failed' || index === events.length - 1}>
-        <summary><span className={`evidence-icon ${event.status}`}><StatusIcon status={event.status}/></span><span><b>{event.label}</b><small>{event.stage.replaceAll('_', ' ')} · {(event.elapsed_ms / 1000).toFixed(1)}s</small></span><ChevronDown/></summary>
+        <summary><Tooltip label={STATUS_MEANING[event.status]?.label ?? event.status}
+          detail={STATUS_MEANING[event.status]?.why ?? 'A stage of the run reported this state.'}>
+          <span className={`evidence-icon ${event.status}`}><StatusIcon status={event.status}/></span></Tooltip><span><b>{event.label}</b><small>{event.stage.replaceAll('_', ' ')} · {(event.elapsed_ms / 1000).toFixed(1)}s</small></span><ChevronDown/></summary>
         {(event.detail || event.evidence) && <div className="evidence-detail">{event.detail && <p>{event.detail}</p>}{event.evidence && Object.entries(event.evidence).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><EvidenceValue value={value}/></div>)}</div>}
       </details>)}</div>}
   </aside>

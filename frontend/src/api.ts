@@ -1,5 +1,5 @@
 import type {
-  AgentEvent, Attachment, Conversation, EstimateHistoryEntry, EstimateHistoryPage,
+  AgentEvent, Attachment, Conversation, EstimateDecision, EstimateHistoryEntry, EstimateHistoryPage,
   EstimateHistoryStats, JobDetail, JobStatus, JobSummary, Message, Mode,
   SmartCodeRequest, SystemStatus,
 } from './types'
@@ -61,17 +61,37 @@ export async function attachToJob(
     onText?: (text: string) => void
     onEvent?: (event: AgentEvent) => void
     onStatus?: (message: string) => void
+    /** A result the job has produced but not finished with — a batch emits one per story. */
+    onPartial?: (result: Record<string, any>) => void
     onDone?: (status: JobStatus, result?: Record<string, any>, error?: string) => void
   },
   signal?: AbortSignal,
 ) {
   let text = ''
   let lastSeq = 0
+  // Tokens arrive faster than a screen can usefully change. Calling onText for each one
+  // makes React re-render the whole transcript per token — roughly a thousand renders for
+  // one answer, all but sixty of which are discarded by the compositor anyway. Coalescing
+  // to one update per animation frame keeps the text exactly as live to the eye while the
+  // main thread stays free to scroll and paint.
+  let frame = 0
+  let pendingText = false
+  const flushText = () => {
+    frame = 0
+    if (!pendingText) return
+    pendingText = false
+    handlers.onText?.(text)
+  }
+  const scheduleText = () => {
+    pendingText = true
+    if (!frame) frame = requestAnimationFrame(flushText)
+  }
   await consumeSSE(`/api/jobs/${jobId}/stream`, undefined, (event, data) => {
     if (event === 'snapshot') {
       text = data.output_text || ''
       handlers.onSnapshot?.(data as JobDetail)
-      handlers.onText?.(text)
+      handlers.onText?.(text)   // immediate: this is the initial paint, not a delta
+      if (data.result) handlers.onPartial?.(data.result)
       for (const item of (data.events ?? []) as AgentEvent[]) {
         lastSeq = Math.max(lastSeq, item.seq ?? 0)
       }
@@ -79,7 +99,7 @@ export async function attachToJob(
       // Deltas already inside the snapshot start before its length; skip those.
       if (data.offset >= text.length) {
         text += data.content
-        handlers.onText?.(text)
+        scheduleText()
       }
     } else if (event === 'agent_event') {
       // Same overlap as tokens: the snapshot already carried everything up to lastSeq.
@@ -88,12 +108,20 @@ export async function attachToJob(
         lastSeq = Math.max(lastSeq, seq)
         handlers.onEvent?.(data as AgentEvent)
       }
+    } else if (event === 'partial') {
+      handlers.onPartial?.(data.result)
     } else if (event === 'status') {
       handlers.onStatus?.(data.message)
     } else if (event === 'done') {
+      // Never let the final characters wait on a frame that may not come — a backgrounded
+      // tab stops firing them, and the last words of an answer would be missing.
+      if (frame) cancelAnimationFrame(frame)
+      flushText()
       handlers.onDone?.(data.status, data.result, data.error)
     }
   }, signal, 'GET')
+  if (frame) cancelAnimationFrame(frame)
+  flushText()
 }
 
 export const api = {
@@ -144,6 +172,12 @@ export const api = {
   estimateHistoryStats: () => json<EstimateHistoryStats>('/api/estimate-code/history/stats'),
   estimateHistoryDetail: (id: string) =>
     json<EstimateHistoryEntry & { result: any }>(`/api/estimate-code/history/${id}`),
+  decideEstimate: (id: string, payload: {
+    decision: EstimateDecision; points?: number; note?: string; actual_points?: number
+  }) => json<EstimateHistoryEntry & { result: any }>(
+    `/api/estimate-code/history/${id}/decision`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+  ),
   deleteEstimateHistory: (id: string) =>
     json<void>(`/api/estimate-code/history/${id}`, { method: 'DELETE' }),
   clearEstimateHistory: () => json<{ deleted: number }>('/api/estimate-code/history/clear', {

@@ -2,8 +2,11 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { ArrowLeft, Code2, FileText, Globe2, Image, MessageSquare, Mic, Paperclip, RotateCcw, Send, Sparkles, Square, Video, X } from 'lucide-react'
 import { api, API } from './api'
 import { EvidencePanel } from './EvidencePanel'
+import { Tooltip } from './Tooltip'
 import type { AgentEvent, Attachment, Mode } from './types'
-import robotGirl from './assets/robot-girl.png'
+// 640px WebP: the avatar renders at 178px, so the 1254px PNG it replaced shipped
+// 2.5 MB — roughly seven times the JavaScript bundle — to fill a small circle.
+import robotGirl from './assets/robot-girl.webp'
 
 type AgentState = 'connecting' | 'idle' | 'listening' | 'thinking' | 'speaking' | 'error'
 const modes: { id: Mode; label: string; icon: typeof Sparkles }[] = [
@@ -26,6 +29,16 @@ function GeometricAgentFace({ mouthOpen, speaking }: { mouthOpen: number; speaki
     <span className="portrait-mouth" style={{ transform: `translate(-50%,-50%) scale(${1 + mouthOpen * .12},${.18 + mouthOpen * 1.3})`, opacity: .2 + mouthOpen * .75 }}/>
     <span className="portrait-halo"/>
   </div>
+}
+
+/** The orbit is Talk's only status display, so each state says what is happening and why. */
+const STATE_WHY: Record<string, { label: string; why: string }> = {
+  connecting: { label: 'Connecting', why: 'Opening the WebSocket to the local backend. Talk keeps its history in this connection only — nothing is written to disk.' },
+  idle: { label: 'Ready', why: 'Waiting for you. Speak by pressing Talk, or type — both take the same path through the agent.' },
+  listening: { label: 'Listening', why: 'Recording your turn. Transcription runs locally on this machine; no audio leaves it.' },
+  thinking: { label: 'Thinking', why: 'The agent is deciding whether this turn needs live research or a rendered animation, then generating. On a CPU model this is the slow part.' },
+  speaking: { label: 'Speaking', why: 'Reading the answer aloud with the local voice while the text streams alongside it.' },
+  error: { label: 'Error', why: 'Something in the turn failed. The reason is shown rather than hidden, and the session stays open so you can try again.' },
 }
 
 export function TalkScreen({ onHome }: { onHome: () => void }) {
@@ -179,10 +192,15 @@ export function TalkScreen({ onHome }: { onHome: () => void }) {
     <header className="talk-header"><button onClick={onHome}><ArrowLeft size={18}/> Home</button><div><Sparkles size={18}/><b>Talk with Devvy</b><span>Local voice companion</span></div><button onClick={reset}><RotateCcw size={16}/> Reset</button></header>
     <main className="talk-main">
       <section className="voice-stage">
-        <div className={`voice-orbit state-${state}`}><div className="orbit-ring ring-one"/><div className="orbit-ring ring-two"/><div className="voice-core face-core"><GeometricAgentFace mouthOpen={mouthOpen} speaking={state === 'speaking'}/></div></div>
+        <Tooltip label={STATE_WHY[state]?.label ?? state} detail={STATE_WHY[state]?.why ?? 'The voice session is in this state.'}>
+        <div className={`voice-orbit state-${state}`}><div className="orbit-ring ring-one"/><div className="orbit-ring ring-two"/><div className="voice-core face-core"><GeometricAgentFace mouthOpen={mouthOpen} speaking={state === 'speaking'}/></div></div></Tooltip>
         <div className="state-label">{state}</div><h1>{status}</h1>
         {state === 'speaking' && response && <div className="live-subtitles" aria-live="polite">{response.split(/\s+/).slice(Math.max(0, subtitleWord - 5), subtitleWord + 7).map((word, index) => { const absolute = Math.max(0, subtitleWord - 5) + index; return <span key={`${absolute}-${word}`} className={absolute === subtitleWord ? 'current' : absolute < subtitleWord ? 'spoken' : ''}>{word} </span>})}</div>}
-        <button className={`talk-button ${state === 'listening' ? 'recording' : ''}`} disabled={!['idle','listening','error'].includes(state)} onClick={state === 'listening' ? stopListening : beginListening}>{state === 'listening' ? <Square size={21}/> : <Mic size={23}/>}<span>{state === 'listening' ? 'Finish' : 'Talk'}</span></button>
+        <Tooltip label={state === 'listening' ? 'Stop recording' : 'Hold a spoken turn'}
+          detail={state === 'listening'
+            ? 'Recording now. Audio is transcribed on this machine by the local Whisper model and never uploaded.'
+            : 'Records a spoken turn, transcribes it locally, and answers out loud. Requires the voice extra; without it, type instead.'}>
+        <button className={`talk-button ${state === 'listening' ? 'recording' : ''}`} disabled={!['idle','listening','error'].includes(state)} onClick={state === 'listening' ? stopListening : beginListening}>{state === 'listening' ? <Square size={21}/> : <Mic size={23}/>}<span>{state === 'listening' ? 'Finish' : 'Talk'}</span></button></Tooltip>
       </section>
       <section className="talk-dialogue">
         <EvidencePanel events={runEvents} compact title="Conversation evidence"/>

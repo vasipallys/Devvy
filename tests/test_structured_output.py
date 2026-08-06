@@ -11,7 +11,7 @@ class RepairRuntime:
     def __init__(self):
         self.calls = 0
 
-    async def generate(self, _messages, max_new_tokens):
+    async def generate(self, _messages, max_new_tokens, **_options):
         assert max_new_tokens == 64
         self.calls += 1
         return '{"wrong": true}' if self.calls == 1 else '{"value": 7}'

@@ -3,10 +3,22 @@ import { AlertTriangle, ArrowLeft, Check, Code2, FileCode2, FolderOpen, LoaderCi
 import { api, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { SystemStatusChip } from './SystemStatusChip'
+import { Tooltip } from './Tooltip'
 import { isJobActive } from './types'
 import type { AgentEvent, SmartCodePreview, SmartCodeRequest } from './types'
 
 const pipeline = ['classify', 'retrieve', 'plan', 'code', 'verify', 'critique', 'gate']
+
+/** Why each checkpoint exists, for hover. */
+const STAGE_WHY: Record<string, string> = {
+  classify: 'The request is validated before anything reads your disk — mode, workspace containment, and target file types.',
+  retrieve: 'Repository files are read and marked untrusted evidence, so a comment or docstring cannot redirect the change.',
+  plan: 'The smallest complete change is planned before any code is written, so the diff stays reviewable.',
+  code: 'Whole-file edits are drafted. Nothing is written to disk at this point — this is still a proposal.',
+  verify: 'Deterministic structural checks: Python parses, JSON parses, brackets balance. It does not run your tests or build.',
+  critique: 'Review findings are recorded against the proposal, including ones that do not block applying it.',
+  gate: 'Nothing is written until you approve. Approval needs unchanged files, passing checks, and a single-use token.',
+}
 
 /** Derive checkpoint statuses from agent events, so a reattaching client rebuilds the
  *  pipeline from the snapshot exactly as a client that watched from the start. */
@@ -165,10 +177,11 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
         <section className="pipeline-panel"><div className="panel-title"><b>PIPELINE</b><span>{status}</span></div><div className="smart-pipeline">{pipeline.map((step, index) => {
           const state = stages[step]
           const active = running && index === Object.keys(stages).length
-          return <div key={step} className={state === 'failed' ? 'failed' : state ? 'done' : active ? 'running' : ''}>
+          return <Tooltip key={step} label={step} detail={STAGE_WHY[step]}>
+            <div className={state === 'failed' ? 'failed' : state ? 'done' : active ? 'running' : ''}>
             {state === 'failed' ? <AlertTriangle/> : state ? <Check/> : active ? <LoaderCircle className="spin"/> : <i/>}
             <b>{step}</b><small>{step === 'gate' ? 'human approval' : step === 'verify' ? 'syntax · policy' : 'agent stage'}</small>
-          </div>
+          </div></Tooltip>
         })}</div></section>
         <EvidencePanel events={runEvents} compact title="Engineering evidence"/>
         {error && <div className="product-error">{error}</div>}

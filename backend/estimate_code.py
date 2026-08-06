@@ -52,6 +52,7 @@ from backend.estimation_framework import (
 )
 from backend.harness import ContextSource, assemble_context
 from backend.estimation_pipeline import (
+    PROTECTED_FACTORS,
     PIPELINE_VERSION,
     arbitrate,
     assessment,
@@ -760,6 +761,69 @@ def _validate_draft(draft: EstimateDraft) -> str | None:
     )
 
 
+#: The blind reviewer runs warmer than the primary pass. At a shared low temperature both
+#: passes converge on nearly identical scores, so the second generation costs minutes of CPU
+#: and produces no independent signal to arbitrate between.
+BLIND_REVIEW_TEMPERATURE = 0.7
+
+#: How close to a Fibonacci band edge counts as "a different opinion could move this".
+BAND_EDGE_MARGIN = 3
+
+
+def blind_review_warranted(primary, story: Story) -> tuple[bool, str]:
+    """Decide whether a second independent pass can change the outcome.
+
+    A second full generation roughly doubles the wall-clock cost of an estimate on a CPU
+    model. It is worth that when the answer is genuinely in play — near a band edge, on a
+    protected risk dimension, or where the primary pass was mostly guessing — and is not
+    worth it for a small, well-evidenced story sitting in the middle of its band.
+
+    Returns the decision and the reason, so the UI can show why it was or was not run.
+    """
+    scores = {item.factor: int(item.score_most_likely) for item in primary.dimensions}
+    calculation = calculate(scores, story.stack)
+
+    lower, _, upper = _band_edges(calculation.adjusted_score)
+    distance = min(calculation.adjusted_score - lower, upper - calculation.adjusted_score)
+    if distance <= BAND_EDGE_MARGIN:
+        return True, (
+            f"Adjusted score {calculation.adjusted_score} sits {distance} from a band edge, "
+            "so a different opinion could change the points."
+        )
+
+    elevated = [FACTOR_BY_ID[key].label for key, value in scores.items() if value >= 4]
+    protected = [
+        FACTOR_BY_ID[key].label
+        for key, value in scores.items()
+        if value >= 4 and key in PROTECTED_FACTORS
+    ]
+    if protected:
+        return True, f"Protected risk dimension elevated: {', '.join(protected)}."
+    if len(elevated) >= 3:
+        return True, f"{len(elevated)} factors scored 4 or above."
+    if primary.heuristic_filled > primary.model_scored:
+        return True, (
+            f"{primary.heuristic_filled} of 16 factors were inferred rather than scored, "
+            "so a second reading is worth the time."
+        )
+    if int(story.stack.maturity_level) >= 4 or int(story.stack.team_experience) <= 2:
+        return True, "The declared stack carries a maturity or experience penalty."
+
+    return False, (
+        f"Adjusted score {calculation.adjusted_score} is {distance} from either band edge with "
+        "no elevated risk factor, so a second pass cannot change the result."
+    )
+
+
+def _band_edges(score: int) -> tuple[int, int, int]:
+    """Inclusive lower bound, the score, and inclusive upper bound of its Fibonacci band."""
+    bounds = [(16, 24), (25, 34), (35, 44), (45, 54), (55, 64), (65, 80)]
+    for lower, upper in bounds:
+        if score <= upper:
+            return max(lower, 16), score, upper
+    return 65, score, 80
+
+
 class EstimateService:
     def __init__(self, runtime: GemmaRuntime, settings: Settings):
         self.runtime = runtime
@@ -915,40 +979,67 @@ class EstimateService:
                 }
             )
 
-        reviewer_system = (
-            "You are an independent blind technical estimator. You have not seen another "
-            "estimator's scores. Assess only the supplied evidence against the rubric. "
-            "Score every factor from 1 to 5, do not invent requirements, and never compute "
-            "or recommend story points. Keep each reason concise and evidence-specific."
-        )
-        try:
-            reviewer_draft = await generate_structured(
-                self.runtime,
-                EstimateDraft,
-                reviewer_system,
-                prompt,
-                max_new_tokens=self.settings.estimate_max_output_tokens,
-                validate_result=_validate_draft,
-                on_attempt=(
-                    lambda event: progress({"stage": "blind_review", **event})
-                    if progress else None
-                ),
+        # A second full generation doubles the wall-clock cost of an estimate on CPU, so it
+        # runs where a second opinion can actually change the answer rather than on every
+        # story. `review_reason` records which test triggered it, so the decision is visible.
+        review_needed, review_reason = blind_review_warranted(primary_assessment, story)
+        if not review_needed and progress:
+            progress(
+                {
+                    "stage": "blind_review",
+                    "status": "completed",
+                    "label": "Blind review not required for this story",
+                    "detail": review_reason,
+                    "evidence": {"executed": False, "reason": review_reason},
+                }
             )
-        except ValueError as exc:
-            if progress:
-                progress(
-                    {
-                        "stage": "blind_review",
-                        "status": "failed",
-                        "label": "Blind review degraded to independent evidence heuristics",
-                        "detail": str(exc)[:500],
-                    }
+
+        reviewer_draft: EstimateDraft | None = None
+        if review_needed:
+            reviewer_system = (
+                "You are an independent blind technical estimator. You have not seen another "
+                "estimator's scores. Assess only the supplied evidence against the rubric. "
+                "Score every factor from 1 to 5, do not invent requirements, and never compute "
+                "or recommend story points. Keep each reason concise and evidence-specific."
+            )
+            try:
+                reviewer_draft = await generate_structured(
+                    self.runtime,
+                    EstimateDraft,
+                    reviewer_system,
+                    prompt,
+                    max_new_tokens=self.settings.estimate_max_output_tokens,
+                    validate_result=_validate_draft,
+                    # Deliberately warmer than the primary pass. At the shared default
+                    # temperature both passes converge on nearly the same scores, which
+                    # costs a full generation and yields no independent signal.
+                    temperature=max(self.settings.temperature, BLIND_REVIEW_TEMPERATURE),
+                    on_attempt=(
+                        lambda event: progress({"stage": "blind_review", **event})
+                        if progress else None
+                    ),
                 )
-            reviewer_draft = EstimateDraft.model_construct(
-                scores={}, drivers=[], points=None, rationale="",
-                hidden_tasks=[], risks=[], assumptions=[], proposed_stories=[],
-            )
-        reviewer_scorecard = build_scorecard(reviewer_draft, story)
+            except ValueError as exc:
+                if progress:
+                    progress(
+                        {
+                            "stage": "blind_review",
+                            "status": "failed",
+                            "label": "Blind review degraded to independent evidence heuristics",
+                            "detail": str(exc)[:500],
+                        }
+                    )
+        blind_review_executed = reviewer_draft is not None
+        if blind_review_executed:
+            reviewer_scorecard = build_scorecard(reviewer_draft, story)
+        else:
+            # Skipped or degraded. Mirroring the primary is deliberate: the alternative is to
+            # score the reviewer from keyword heuristics, which is not an independent opinion
+            # but a fallback for *missing* scores. Arbitrating against it manufactures
+            # disagreement — on one story it read "no frontend declared" as 1 against the
+            # model's 3 and quietly moved the final score — so not running the review would
+            # change the estimate, which is worse than either running it or skipping it.
+            reviewer_scorecard = primary_scorecard
         reviewer_assessment = assessment("BLIND_REVIEWER", reviewer_scorecard, story)
         if progress:
             progress(
@@ -959,6 +1050,8 @@ class EstimateService:
                     "detail": "The reviewer received story evidence and rubric, never primary scores.",
                     "evidence": {
                         "blind": True,
+                        "executed": blind_review_executed,
+                        "reason": review_reason,
                         "model_scored": reviewer_assessment.model_scored,
                         "heuristic_filled": reviewer_assessment.heuristic_filled,
                         "point_cross_check": reviewer_assessment.point_cross_check,
@@ -1064,6 +1157,7 @@ class EstimateService:
             Calculation.model_validate(result["calculation"]),
             final_scores,
             story.stack,
+            blind_review_executed,
         )
         result["agentic_pipeline"] = {
             "version": PIPELINE_VERSION,
@@ -1112,7 +1206,13 @@ class EstimateService:
             "model_policy": {
                 "model": self.settings.model_id,
                 "serialized": True,
-                "independent_model_passes": 2,
+                # The blind review is conditional, so this must report what actually ran.
+                # Stating 2 unconditionally described a second opinion that, for most
+                # stories, never happened — in a record whose whole purpose is to be
+                # checkable against the run.
+                "independent_model_passes": 2 if blind_review_executed else 1,
+                "blind_review_executed": blind_review_executed,
+                "blind_review_reason": review_reason,
                 "hidden_chain_of_thought_stored": False,
             },
         }

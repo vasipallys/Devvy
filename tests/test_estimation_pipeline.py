@@ -20,7 +20,7 @@ class SequencedRuntime:
         self.responses = responses
         self.messages: list[list[dict[str, str]]] = []
 
-    async def generate(self, messages, max_new_tokens):
+    async def generate(self, messages, max_new_tokens, **_options):
         assert max_new_tokens > 0
         self.messages.append(messages)
         return json.dumps(self.responses[len(self.messages) - 1])

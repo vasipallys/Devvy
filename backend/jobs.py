@@ -29,8 +29,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, JSON, update
-from sqlmodel import Field, Session, SQLModel, select
+from sqlalchemy import Column, JSON, delete, func, update
+from sqlmodel import Field, Session, SQLModel, col, select
 
 from backend.db import utc_iso
 
@@ -50,9 +50,20 @@ FLUSH_INTERVAL_SECONDS = 0.75
 #: Evidence events retained per job. Bounds table growth on long runs.
 MAX_EVENTS_PER_JOB = 200
 
-#: How often the idle worker looks for newly queued work. Submission happens on FastAPI's
-#: threadpool, so a database poll is both simpler and safer than cross-thread signalling.
-IDLE_POLL_SECONDS = 0.2
+#: Live messages held for one attached viewer before its backlog is trimmed. Generous enough
+#: that no healthy client is ever affected, small enough that a stalled one cannot grow the
+#: worker's memory for the length of a run.
+MAX_PENDING_MESSAGES = 2048
+
+#: Longest shutdown will wait for the worker before abandoning it. Shutdown must be bounded:
+#: an unbounded await here means a stuck database call stops the process from exiting at all.
+STOP_TIMEOUT_SECONDS = 5.0
+
+#: Backstop poll for queued work. Submissions wake the worker directly, so this only has to
+#: catch a row this process did not insert itself — nothing in a single-process install. It is
+#: deliberately long: at the old 0.2s the idle application ran five SQLite queries every
+#: second forever, which on a laptop is a wakeup cost paid for nothing.
+IDLE_POLL_SECONDS = 5.0
 
 
 def now() -> datetime:
@@ -199,6 +210,16 @@ class JobContext:
         self.runner.publish(self.job_id, {"type": "agent_event", **payload})
         return payload
 
+    async def partial(self, result: dict[str, Any]) -> None:
+        """Publish a result the job has produced but not finished with.
+
+        A ten-story batch takes half an hour on CPU, and story one is done in the first
+        three minutes. Persisting the partial result means a reattaching client sees it in
+        its snapshot too, not only clients that happened to be watching when it landed.
+        """
+        await asyncio.to_thread(self.runner.merge_result, self.job_id, result)
+        self.runner.publish(self.job_id, {"type": "partial", "result": result})
+
     async def progress(self, message: str) -> None:
         await asyncio.to_thread(self.runner.set_progress, self.job_id, message)
         self.runner.publish(self.job_id, {"type": "status", "message": message})
@@ -221,6 +242,30 @@ class JobRunner:
         #: Authoritative streamed text for the in-flight job. The database copy lags behind
         #: it by up to FLUSH_INTERVAL_SECONDS, so snapshots read from here while running.
         self._live_text: dict[UUID, str] = {}
+        #: Cancellations that arrived while a job was claimed but its task not yet registered.
+        #: Without this the request is silently dropped and the job runs to completion while
+        #: the user is told it was cancelled.
+        self._cancel_requested: set[UUID] = set()
+        #: Set when work is submitted, so the worker starts immediately instead of waiting
+        #: out a poll interval. Captured at start() because submission runs on FastAPI's
+        #: threadpool and cannot touch loop primitives directly.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        #: Created in start(), not here. An asyncio.Event binds to the first loop that
+        #: awaits it and refuses every later one, and this runner is a module-level
+        #: singleton that outlives any single loop — each test client, and any in-place
+        #: restart, brings a new one.
+        self._wakeup: asyncio.Event | None = None
+        self._stopping = False
+
+    def _wake(self) -> None:
+        """Signal the worker from any thread. Failure is harmless — the poll still fires."""
+        loop, wakeup = self._loop, self._wakeup
+        if loop is None or wakeup is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(wakeup.set)
+        except RuntimeError:
+            pass
 
     def extend_live_text(self, job_id: UUID, text: str) -> int:
         """Append a delta and return the offset it started at."""
@@ -257,6 +302,16 @@ class JobRunner:
             session.add(job)
             session.commit()
 
+    def merge_result(self, job_id: UUID, partial: dict) -> None:
+        """Merge an in-flight result into the job so a snapshot carries it."""
+        with Session(self.engine) as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                return
+            job.result = {**(job.result or {}), **partial}
+            session.add(job)
+            session.commit()
+
     def set_progress(self, job_id: UUID, message: str) -> None:
         with Session(self.engine) as session:
             job = session.get(Job, job_id)
@@ -268,10 +323,13 @@ class JobRunner:
 
     def record_event(self, job_id: UUID, seq: int, payload: dict) -> None:
         with Session(self.engine) as session:
+            # COUNT in SQL. Loading the rows to call len() on them re-read the whole
+            # trajectory on every event, so a run emitting n events did O(n²) row loads —
+            # and an estimate emits one per pipeline stage, per story.
             existing = session.exec(
-                select(JobEvent).where(JobEvent.job_id == job_id)
-            ).all()
-            if len(existing) >= MAX_EVENTS_PER_JOB:
+                select(func.count()).select_from(JobEvent).where(JobEvent.job_id == job_id)
+            ).one()
+            if int(existing) >= MAX_EVENTS_PER_JOB:
                 return
             session.add(
                 JobEvent(
@@ -289,17 +347,24 @@ class JobRunner:
 
     def _finish(
         self, job_id: UUID, status: str, *, result: dict | None = None, error: str | None = None
-    ) -> None:
+    ) -> bool:
+        """Move a job to a terminal state, once. Returns whether this call is the one that did.
+
+        The guard is a conditional UPDATE, not a read-then-write, because two paths race
+        here for real. A job whose handler has just returned is written as ``succeeded``
+        from a database thread; if shutdown cancels the worker before that await resumes,
+        cancellation is delivered *after* the row already says succeeded, and the handler
+        for it would rewrite the row as ``cancelled`` — throwing away a result the user had
+        already earned and would see disappear on reopening the tab. Terminal is terminal.
+        """
         with Session(self.engine) as session:
-            job = session.get(Job, job_id)
-            if job is None:
-                return
-            job.status = status
-            job.completed_at = now()
-            job.result = result
-            job.error = error
-            session.add(job)
+            changed = session.execute(
+                update(Job)
+                .where(col(Job.id) == job_id, col(Job.status).not_in(tuple(FINISHED)))
+                .values(status=status, completed_at=now(), result=result, error=error)
+            ).rowcount
             session.commit()
+            return bool(changed)
 
     # -- public API --------------------------------------------------------------------
 
@@ -312,9 +377,10 @@ class JobRunner:
             session.add(job)
             session.commit()
             session.refresh(job)
-        # The worker claims from the database rather than an in-memory queue. Submissions
-        # arrive from FastAPI's threadpool, where signalling an asyncio primitive would not
-        # be thread-safe, and a queued row already survives a restart.
+        # The worker claims from the database rather than an in-memory queue, so a queued
+        # row survives a restart. The wake is only an optimisation on top of that: it saves
+        # the poll interval, and losing it costs latency, never work.
+        self._wake()
         return job
 
     def get(self, job_id: UUID) -> dict[str, Any] | None:
@@ -336,10 +402,11 @@ class JobRunner:
 
     def active_count(self) -> int:
         with Session(self.engine) as session:
-            return len(
+            return int(
                 session.exec(
-                    select(Job).where(Job.status.in_(("queued", "running")))
-                ).all()
+                    select(func.count()).select_from(Job)
+                    .where(col(Job.status).in_(("queued", "running")))
+                ).one()
             )
 
     def cancel(self, job_id: UUID) -> bool:
@@ -348,17 +415,25 @@ class JobRunner:
             job = session.get(Job, job_id)
             if job is None or job.status in FINISHED:
                 return False
+            status = job.status
         if self._current and self._current[0] == job_id:
             self._current[1].cancel()
-        else:
-            self._finish(job_id, "cancelled", error="Cancelled before it started")
+            return True
+        if status == "running":
+            # Claimed, but its task is not registered yet: the worker marks a job running in a
+            # database thread and only registers the task once control returns to the loop.
+            # Recording the request here means the worker cancels it the moment it can, rather
+            # than running the whole job while the user is told it stopped.
+            self._cancel_requested.add(job_id)
+            return True
+        if self._finish(job_id, "cancelled", error="Cancelled before it started"):
             self.publish(job_id, {"type": "done", "status": "cancelled"})
         return True
 
     # -- live broadcast ----------------------------------------------------------------
 
     def subscribe(self, job_id: UUID) -> asyncio.Queue[dict]:
-        queue: asyncio.Queue[dict] = asyncio.Queue()
+        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=MAX_PENDING_MESSAGES)
         self._subscribers.setdefault(job_id, set()).add(queue)
         return queue
 
@@ -371,8 +446,33 @@ class JobRunner:
             self._subscribers.pop(job_id, None)
 
     def publish(self, job_id: UUID, message: dict) -> None:
+        """Fan out to attached viewers, never blocking the run on a slow one.
+
+        A viewer that stops reading — a backgrounded tab, a paused debugger, a dropped
+        connection whose task has not been reaped yet — must not make the worker's memory
+        grow without limit for the rest of a multi-minute generation. Its backlog is
+        trimmed instead, and it recovers the lost text from the next snapshot, which is
+        exactly what the offset protocol already exists to handle. Terminal messages are
+        never dropped: they are what tell a viewer to stop waiting.
+        """
+        terminal = message.get("type") == "done"
         for queue in self._subscribers.get(job_id, ()):
-            queue.put_nowait(message)
+            while queue.full():
+                try:
+                    dropped = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if dropped.get("type") == "done":
+                    # Re-queueing is impossible here, so deliver it and let the trimmed
+                    # message go instead; a viewer that misses "done" waits forever.
+                    with contextlib.suppress(asyncio.QueueFull):
+                        queue.put_nowait(dropped)
+                    break
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                if terminal:
+                    logger.warning("Dropped a terminal message for job %s: viewer stalled", job_id)
 
     # -- lifecycle ---------------------------------------------------------------------
 
@@ -383,38 +483,62 @@ class JobRunner:
         being silently retried or left claiming to be running forever.
         """
         cutoff = now() - timedelta(days=self.retention_days)
-        orphaned = 0
         with Session(self.engine) as session:
-            for job in session.exec(
-                select(Job).where(Job.status.in_(("queued", "running")))
-            ).all():
-                job.status = "interrupted"
-                job.completed_at = now()
-                job.error = "The backend restarted before this request finished."
-                session.add(job)
-                orphaned += 1
-            for job in session.exec(select(Job).where(Job.created_at < cutoff)).all():
-                for event in session.exec(
-                    select(JobEvent).where(JobEvent.job_id == job.id)
-                ).all():
-                    session.delete(event)
-                session.delete(job)
+            # Set-based, so startup cost does not grow with history. The previous version
+            # loaded every expired job and each of its events as ORM objects purely to
+            # delete them, which made the first request after a long gap the slowest.
+            orphaned = int(
+                session.execute(
+                    update(Job)
+                    .where(col(Job.status).in_(("queued", "running")))
+                    .values(
+                        status="interrupted",
+                        completed_at=now(),
+                        error="The backend restarted before this request finished.",
+                    )
+                ).rowcount
+            )
+            expired = select(col(Job.id)).where(col(Job.created_at) < cutoff)
+            session.execute(
+                delete(JobEvent).where(col(JobEvent.job_id).in_(expired))
+            )
+            session.execute(delete(Job).where(col(Job.created_at) < cutoff))
             session.commit()
         if orphaned:
             logger.info("Marked %d unfinished job(s) as interrupted after restart", orphaned)
         return orphaned
 
     async def start(self) -> None:
+        # A runner can be started again after stopping — every TestClient does exactly that,
+        # and so does any process that restarts the app in place. Leaving the stop flag set
+        # would give the new worker a loop condition that is already false, so it would exit
+        # at once and every job submitted afterwards would sit queued forever.
+        self._stopping = False
+        self._wakeup = asyncio.Event()
+        self._loop = asyncio.get_running_loop()
         await asyncio.to_thread(self.reconcile)
         self._worker = asyncio.create_task(self._run_forever())
 
     async def stop(self) -> None:
+        """Stop the worker without ever blocking shutdown indefinitely.
+
+        Cancelling a task that is awaiting ``asyncio.to_thread`` does not interrupt the
+        thread: the cancellation only lands once the thread returns. A database call that
+        is waiting on a lock can therefore hold shutdown open for as long as SQLite's busy
+        timeout — and if the thread's result can no longer be delivered to this loop, the
+        await never finishes at all. Both of those turn "close the app" into a hang, so the
+        wait is bounded and the worker is abandoned rather than waited on forever. Nothing
+        is lost by giving up: the job row is durable, and the next start reconciles it.
+        """
+        self._stopping = True
+        if self._wakeup is not None:
+            self._wakeup.set()
         if self._current:
             self._current[1].cancel()
         if self._worker:
             self._worker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._worker
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(self._worker), STOP_TIMEOUT_SECONDS)
 
     def claim_next(self) -> tuple[UUID, str, dict] | None:
         """Take the oldest queued job and mark it running, exactly once.
@@ -441,10 +565,17 @@ class JobRunner:
             return candidate.id, candidate.kind, dict(candidate.request)
 
     async def _run_forever(self) -> None:
-        while True:
+        # Bound once here: the attribute is replaced on the next start(), and this loop must
+        # keep using the event belonging to the loop it is actually running on.
+        wakeup = self._wakeup or asyncio.Event()
+        while not self._stopping:
+            wakeup.clear()
             claimed = await asyncio.to_thread(self.claim_next)
             if claimed is None:
-                await asyncio.sleep(IDLE_POLL_SECONDS)
+                # Wait to be told, with a timeout so a row inserted by anything other than
+                # this process is still picked up.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(wakeup.wait(), timeout=IDLE_POLL_SECONDS)
                 continue
             job_id, kind, request = claimed
             try:
@@ -453,6 +584,12 @@ class JobRunner:
                 raise
             except Exception:
                 logger.exception("Job worker failed on %s", job_id)
+
+    async def _complete(self, context: JobContext, job_id: UUID, result: dict) -> None:
+        """Persist a finished run's output and announce it."""
+        await context.flush()
+        if await asyncio.to_thread(self._finish, job_id, "succeeded", result=result):
+            self.publish(job_id, {"type": "done", "status": "succeeded", "result": result})
 
     async def _execute(self, job_id: UUID, kind: str, request: dict) -> None:
         if kind not in self.handlers:
@@ -466,23 +603,29 @@ class JobRunner:
         context = JobContext(self, job_id, asyncio.get_running_loop().time())
         task = asyncio.create_task(self.handlers[kind](request, context))
         self._current = (job_id, task)
+        if job_id in self._cancel_requested:
+            task.cancel()
         try:
             result = await task
-            await context.flush()
-            await asyncio.to_thread(self._finish, job_id, "succeeded", result=result)
-            self.publish(job_id, {"type": "done", "status": "succeeded", "result": result})
+            # Shielded: once the handler has returned, the result exists and must be stored.
+            # Cancelling the worker at this instant — which is exactly what shutdown does —
+            # must not discard completed work between producing it and recording it.
+            await asyncio.shield(
+                asyncio.create_task(self._complete(context, job_id, result))
+            )
         except asyncio.CancelledError:
             await context.flush()
-            await asyncio.to_thread(
+            if await asyncio.to_thread(
                 self._finish, job_id, "cancelled", error="Cancelled by the user"
-            )
-            self.publish(job_id, {"type": "done", "status": "cancelled"})
+            ):
+                self.publish(job_id, {"type": "done", "status": "cancelled"})
         except Exception as exc:
             logger.exception("Job %s failed", job_id)
             await context.flush()
             message = str(exc)[:1000] or exc.__class__.__name__
-            await asyncio.to_thread(self._finish, job_id, "failed", error=message)
-            self.publish(job_id, {"type": "done", "status": "failed", "error": message})
+            if await asyncio.to_thread(self._finish, job_id, "failed", error=message):
+                self.publish(job_id, {"type": "done", "status": "failed", "error": message})
         finally:
             self._current = None
             self._live_text.pop(job_id, None)
+            self._cancel_requested.discard(job_id)

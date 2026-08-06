@@ -2,6 +2,7 @@ import { useState } from 'react'
 import {
   Check, ChevronDown, CircleAlert, CircleDashed, Eye, EyeOff, LoaderCircle, Scale, UserCheck,
 } from 'lucide-react'
+import { Tooltip } from './Tooltip'
 import type { AgentEvent, AgenticPipeline, Calculation } from './types'
 
 /** One node in the flow. `lane` groups nodes into the phases a reader can name. */
@@ -9,32 +10,34 @@ interface Node {
   stage: string
   label: string
   hint: string
+  /** Why this stage exists. Shown on hover, because the reasoning should not need a click. */
+  why: string
   lane: 'intake' | 'independent' | 'reconcile' | 'deterministic' | 'human'
   /** Which parallel branch this sits in, for the two independent model passes. */
   branch?: 'primary' | 'reviewer'
 }
 
 const NODES: Node[] = [
-  { stage: 'normalize', label: 'Normalize', hint: 'Freeze the evidence and hash it', lane: 'intake' },
-  { stage: 'readiness', label: 'Readiness', hint: 'Is this story estimable at all?', lane: 'intake' },
-  { stage: 'specialist_routing', label: 'Route lenses', hint: 'Pick the specialist views this story needs', lane: 'intake' },
-  { stage: 'assemble_context', label: 'Bound context', hint: 'Budget and label the evidence', lane: 'intake' },
-  { stage: 'declare_stack', label: 'Load calibration', hint: 'Apply the declared stack profile', lane: 'intake' },
+  { stage: 'normalize', label: 'Normalize', hint: 'Freeze the evidence and hash it', why: 'Estimating the same story twice must give the same evidence. The text is canonicalised and hashed so a later run can be compared against this one.', lane: 'intake' },
+  { stage: 'readiness', label: 'Readiness', hint: 'Is this story estimable at all?', why: 'Some stories cannot be estimated at all. Catching that here avoids producing a confident number from evidence that does not support one.', lane: 'intake' },
+  { stage: 'specialist_routing', label: 'Route lenses', hint: 'Pick the specialist views this story needs', why: 'Routing is deterministic and risk-based, so the lenses applied to a story are predictable and reviewable rather than whatever the model felt like considering.', lane: 'intake' },
+  { stage: 'assemble_context', label: 'Bound context', hint: 'Budget and label the evidence', why: 'The evidence is budgeted and labelled untrusted, so story text arriving from Jira or a spreadsheet is read as data and never as instructions.', lane: 'intake' },
+  { stage: 'declare_stack', label: 'Load calibration', hint: 'Apply the declared stack profile', why: "The same work costs differently on different stacks. This loads the declared stack's scoring guidance, reference stories, and maturity cap.", lane: 'intake' },
 
-  { stage: 'primary_estimate', label: 'Primary estimator', hint: 'First independent model pass', lane: 'independent', branch: 'primary' },
-  { stage: 'specialist_analysis', label: 'Specialist lenses', hint: 'Project scores through owned dimensions', lane: 'independent', branch: 'primary' },
-  { stage: 'blind_review', label: 'Blind reviewer', hint: 'Second pass — never sees the first scores', lane: 'independent', branch: 'reviewer' },
+  { stage: 'primary_estimate', label: 'Primary estimator', hint: 'First independent model pass', why: 'The model scores 16 factors from 1 to 5 and explains each. It is never asked for the point value — that is arithmetic, not judgement.', lane: 'independent', branch: 'primary' },
+  { stage: 'specialist_analysis', label: 'Specialist lenses', hint: 'Project scores through owned dimensions', why: 'A deterministic projection of the scored evidence through each routed lens. It surfaces ownership and risk; it does not add another opinion.', lane: 'independent', branch: 'primary' },
+  { stage: 'blind_review', label: 'Blind reviewer', hint: 'Second pass — never sees the first scores', why: 'A second pass over the same evidence, blind to the first and run warmer. It only runs when a different opinion could change the answer, because it doubles the CPU cost.', lane: 'independent', branch: 'reviewer' },
 
-  { stage: 'disagreement', label: 'Compare', hint: 'Where do the two passes differ?', lane: 'reconcile' },
-  { stage: 'critic', label: 'Critic', hint: 'Challenge material differences', lane: 'reconcile' },
-  { stage: 'arbitration', label: 'Arbitrate', hint: 'Resolve by fixed policy, not persuasion', lane: 'reconcile' },
+  { stage: 'disagreement', label: 'Compare', hint: 'Where do the two passes differ?', why: 'Where two independent readings differ is exactly where the estimate is least certain. Differences are measured rather than averaged away silently.', lane: 'reconcile' },
+  { stage: 'critic', label: 'Critic', hint: 'Challenge material differences', why: 'A material difference should not be settled by whichever answer was phrased more confidently. The critic states what evidence would actually resolve it.', lane: 'reconcile' },
+  { stage: 'arbitration', label: 'Arbitrate', hint: 'Resolve by fixed policy, not persuasion', why: 'Conflicts resolve by published policy — conservative on protected risk, midpoint otherwise — so the outcome does not depend on persuasion.', lane: 'reconcile' },
 
-  { stage: 'score_factors', label: 'Final scorecard', hint: '16 factors, 1–5', lane: 'deterministic' },
-  { stage: 'calculate', label: 'Arithmetic', hint: 'Sum, adjust, map to Fibonacci', lane: 'deterministic' },
-  { stage: 'policy_gate', label: 'Gates', hint: 'Spike, split, and cap rules', lane: 'deterministic' },
-  { stage: 'consistency_audit', label: 'Audit', hint: 'Replay and check the result holds', lane: 'deterministic' },
+  { stage: 'score_factors', label: 'Final scorecard', hint: '16 factors, 1–5', why: 'The final 16-factor scorecard. Factors the model declined to score are filled from story text and labelled inferred, so judgement is distinguishable from a guess.', lane: 'deterministic' },
+  { stage: 'calculate', label: 'Arithmetic', hint: 'Sum, adjust, map to Fibonacci', why: "Fixed arithmetic: base sum, the framework's adjustments, then a Fibonacci band. Every rule is recorded whether or not it fired, so the number can be replayed by hand.", lane: 'deterministic' },
+  { stage: 'policy_gate', label: 'Gates', hint: 'Spike, split, and cap rules', why: 'Gates can override the number entirely. Maximum uncertainty or a bleeding-edge framework means the honest answer is a spike, not a smaller estimate.', lane: 'deterministic' },
+  { stage: 'consistency_audit', label: 'Audit', hint: 'Replay and check the result holds', why: 'The calculation is replayed from the final scorecard and checked against what was reported, so a mistake here shows up rather than shipping quietly.', lane: 'deterministic' },
 
-  { stage: 'human_review', label: 'Human decision', hint: 'The team owns the estimate', lane: 'human' },
+  { stage: 'human_review', label: 'Human decision', hint: 'The team owns the estimate', why: 'The recommendation is decision support. The team owns the estimate and may accept, override, spike, or decompose it — and that decision is recorded.', lane: 'human' },
 ]
 
 const LANES: { id: Node['lane']; title: string; blurb: string }[] = [
@@ -149,7 +152,7 @@ function FlowNode({ node, status, detail, expanded, onToggle }: {
   expanded: boolean
   onToggle: () => void
 }) {
-  return <button
+  return <Tooltip label={node.label} detail={node.why}><button
     className={`flow-node status-${status} ${expanded ? 'expanded' : ''}`}
     aria-current={status === 'running' ? 'step' : undefined}
     aria-expanded={expanded}
@@ -164,31 +167,44 @@ function FlowNode({ node, status, detail, expanded, onToggle }: {
     </span>
     {detail && <span className="flow-metric">{detail}</span>}
     {expanded && <span className="flow-hint">{node.hint}</span>}
-  </button>
+  </button></Tooltip>
 }
 
 /** The arithmetic, drawn as a flow rather than described. Each step shows the number it
  *  contributed, so the path from 16 scores to one Fibonacci value is followable by eye. */
 function CalculationFlow({ calculation }: { calculation: Calculation }) {
   const steps = [
-    { label: '16 factor scores', value: calculation.base_sum, note: 'base sum' },
-    { label: 'Base adjustments', value: calculation.base_adjustment_total, note: '§8.1', signed: true },
-    { label: 'Stack adjustments', value: calculation.stack_adjustment_total, note: '§8.2', signed: true },
+    { label: '16 factor scores', value: calculation.base_sum, note: 'base sum',
+      why: 'Every factor scored 1–5 and added up. This is the only number the model influences, and it does so one factor at a time.' },
+    { label: 'Base adjustments', value: calculation.base_adjustment_total, note: '§8.1', signed: true,
+      why: 'Fixed penalties for combinations the framework knows cost more than their parts — high uncertainty, cross-team dependency, irreversibility, or a full-stack change.' },
+    { label: 'Stack adjustments', value: calculation.stack_adjustment_total, note: '§8.2', signed: true,
+      why: "Penalties from the declared stack: framework maturity, the team's experience with it, and any new testing, observability, or build work it forces." },
   ]
   return <div className="calc-flow" aria-label="How the number was calculated">
-    {steps.map(step => <div className="calc-step" key={step.label}>
-      <b>{step.signed && step.value >= 0 ? `+${step.value}` : step.value}</b>
-      <span>{step.label}</span><small>{step.note}</small>
-    </div>)}
+    {steps.map(step => <Tooltip key={step.label} label={step.label} detail={step.why}>
+      <div className="calc-step">
+        <b>{step.signed && step.value >= 0 ? `+${step.value}` : step.value}</b>
+        <span>{step.label}</span><small>{step.note}</small>
+      </div>
+    </Tooltip>)}
     <div className="calc-arrow" aria-hidden>=</div>
-    <div className="calc-step total">
-      <b>{calculation.adjusted_score}</b><span>Adjusted score</span><small>band {calculation.band}</small>
-    </div>
+    <Tooltip label="Adjusted score"
+      detail={`The scored total plus every adjustment that fired. It falls in band ${calculation.band}, and the band — not the model — decides the points.`}>
+      <div className="calc-step total">
+        <b>{calculation.adjusted_score}</b><span>Adjusted score</span><small>band {calculation.band}</small>
+      </div>
+    </Tooltip>
     <div className="calc-arrow" aria-hidden>→</div>
-    <div className={`calc-step result ${calculation.cap_exceeded ? 'capped' : ''}`}>
-      <b>{calculation.points}</b><span>Story points</span>
-      <small>{calculation.cap_exceeded ? `over the ${calculation.maturity_cap}-point cap` : `cap ${calculation.maturity_cap}`}</small>
-    </div>
+    <Tooltip label="Story points"
+      detail={calculation.cap_exceeded
+        ? `This exceeds the ${calculation.maturity_cap}-point ceiling the declared framework maturity allows. The number is reported honestly rather than shrunk; the recommendation escalates instead.`
+        : `The Fibonacci value for band ${calculation.band}, within the ${calculation.maturity_cap}-point ceiling this framework maturity allows.`}>
+      <div className={`calc-step result ${calculation.cap_exceeded ? 'capped' : ''}`}>
+        <b>{calculation.points}</b><span>Story points</span>
+        <small>{calculation.cap_exceeded ? `over the ${calculation.maturity_cap}-point cap` : `cap ${calculation.maturity_cap}`}</small>
+      </div>
+    </Tooltip>
   </div>
 }
 

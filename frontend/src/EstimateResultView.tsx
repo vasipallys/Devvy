@@ -5,6 +5,7 @@ import {
   Layers, ShieldCheck, Sigma, Target, X,
 } from 'lucide-react'
 import { EvidencePanel } from './EvidencePanel'
+import { Tooltip } from './Tooltip'
 import { AgentFlowDiagram } from './AgentFlowDiagram'
 import { EstimationPipelineReport } from './EstimationPipelineReport'
 import type {
@@ -77,10 +78,21 @@ function ScoreRow({ item }: { item: FactorScore }) {
     <div className="factor-head">
       <span className="factor-number">{item.number}</span>
       <b>{item.label}</b>
-      <span className={`factor-provenance ${item.provenance}`}>
-        {item.provenance === 'model' ? 'scored' : 'inferred'}
-      </span>
-      <span className={`factor-score s${item.score}`}>{item.score}</span>
+      <Tooltip
+        label={item.provenance === 'model' ? 'Scored by the model' : 'Inferred from the story text'}
+        detail={item.provenance === 'model'
+          ? 'The model read the evidence and chose this score, with the reason shown below.'
+          : 'The model did not score this factor, so the application derived it from keywords in the story. Treat it as weaker evidence than a scored factor.'}>
+        <span className={`factor-provenance ${item.provenance}`}>
+          {item.provenance === 'model' ? 'scored' : 'inferred'}
+        </span>
+      </Tooltip>
+      <Tooltip label={`${item.label}: ${item.score} of 5`}
+        detail={item.score >= 4
+          ? 'Scored 4 or above, so this factor is flagged as a risk and may trigger a framework adjustment or gate.'
+          : 'Scored 3 or below. Factors at this level add to the base sum but trigger no penalty of their own.'}>
+        <span className={`factor-score s${item.score}`}>{item.score}</span>
+      </Tooltip>
     </div>
     <div className="factor-bar" aria-hidden>
       {[1, 2, 3, 4, 5].map(step => <i key={step} className={step <= item.score ? `on s${item.score}` : ''} />)}
@@ -93,7 +105,12 @@ function ScoreRow({ item }: { item: FactorScore }) {
 function GateList({ checks }: { checks: PolicyCheck[] }) {
   return <ul className="gate-list">
     {checks.map(check => <li key={check.rule} className={check.passed ? 'pass' : 'fail'}>
-      <span>{check.passed ? <Check size={13} /> : <AlertTriangle size={13} />}</span>
+      <Tooltip label={check.passed ? 'Gate passed' : 'Gate failed — this overrides the number'}
+        detail={check.passed
+          ? `Evaluated on every run. Because it passed, it places no constraint on the estimate. Rule ${check.reference}.`
+          : `A failed gate takes precedence over the calculated points: the framework's answer becomes an escalation, not a smaller number. Rule ${check.reference}.`}>
+        <span>{check.passed ? <Check size={13} /> : <AlertTriangle size={13} />}</span>
+      </Tooltip>
       <div><b>{check.label}</b><small>{check.detail}</small></div>
       <code>{check.reference}</code>
     </li>)}
@@ -123,7 +140,10 @@ function DetailedReasoningPanel({ result }: { result: EstimateResult }) {
     <h4>Strongest evidence contributors</h4>
     <ol className="contributor-list">{reasoning.top_contributors.map(item =>
       <li key={item.factor}>
-        <span className={`factor-score s${item.score}`}>{item.score}</span>
+        <Tooltip label={`${item.label} scored ${item.score} of 5`}
+          detail={`One of the largest single contributions to the base sum, ${item.provenance === 'model' ? 'scored by the model' : 'inferred from the story text'}. Lowering this factor is the most direct way to make the story smaller.`}>
+          <span className={`factor-score s${item.score}`}>{item.score}</span>
+        </Tooltip>
         <div><b>{item.label}</b><small>{item.reason}</small></div>
         <em>{item.provenance === 'model' ? 'model scored' : 'inferred'}</em>
       </li>)}</ol>
@@ -187,17 +207,26 @@ export function EstimateResultView({ result, config, events, onDownload, onWrite
   return <article className="estimate-result">
         <EvidencePanel events={events} compact title="Estimation evidence" />
 
-        <div className={`verdict verdict-${verdict.tone}`}>
-          {result.recommendation === 'proceed' ? <ShieldCheck /> : <AlertTriangle />}
-          <b>{verdict.label}</b>
-          <span>{result.recommendation_detail}</span>
-        </div>
+        <Tooltip label={verdict.label}
+          detail="The recommendation comes from the framework's decision rules, not from the model's opinion: the points, the failed gates, and the uncertainty score together decide whether this story can be started as written.">
+          <div className={`verdict verdict-${verdict.tone}`}>
+            {result.recommendation === 'proceed' ? <ShieldCheck /> : <AlertTriangle />}
+            <b>{verdict.label}</b>
+            <span>{result.recommendation_detail}</span>
+          </div>
+        </Tooltip>
 
         <div className="result-hero">
           <div className="points">
             <span>STORY POINTS</span>
-            <strong>{result.points}</strong>
-            <em className={`confidence-${result.confidence.toLowerCase()}`}>{result.confidence} confidence</em>
+            <Tooltip label={`${result.points} story points`}
+              detail={`Not chosen by the model. The 16 factor scores sum to ${result.calculation.base_sum}, adjustments move that to ${result.calculation.adjusted_score}, and band ${result.calculation.band} maps to ${result.points}. Every step is listed in the calculation ledger below.`}>
+              <strong>{result.points}</strong>
+            </Tooltip>
+            <Tooltip label={`${result.confidence} confidence`}
+              detail="Derived from how much of the estimate rests on real judgement: how many factors the model scored rather than inferred, how far the two independent passes disagreed, and how much uncertainty the story carries.">
+              <em className={`confidence-${result.confidence.toLowerCase()}`}>{result.confidence} confidence</em>
+            </Tooltip>
           </div>
           <div>
             <span className="eyebrow">{result.story.key ? `${result.story.key} · ` : ''}{result.story.title}</span>
@@ -259,8 +288,12 @@ export function EstimateResultView({ result, config, events, onDownload, onWrite
 
         {result.risk_flags.length > 0 && <Detail title="Risk flags" count={result.risk_flags.length}>
           <ul className="flag-list">{result.risk_flags.map(flag => <li key={`${flag.source}-${flag.label}`}>
-            {flag.score !== null && <span className={`factor-score s${flag.score}`}>{flag.score}</span>}
-            {flag.score === null && <span className="factor-score stack"><CircleSlash size={12} /></span>}
+            {flag.score !== null && <Tooltip label={`Scored ${flag.score} of 5`}
+              detail="Any factor at 4 or above is raised as a risk. It does not by itself change the points — it names what will most likely make this story run long.">
+              <span className={`factor-score s${flag.score}`}>{flag.score}</span></Tooltip>}
+            {flag.score === null && <Tooltip label="Raised by the declared stack"
+              detail="This risk comes from the technology calibration rather than a scored factor — a new framework, an inexperienced team, or added testing and observability work.">
+              <span className="factor-score stack"><CircleSlash size={12} /></span></Tooltip>}
             <b>{flag.label}</b><small>{flag.detail}</small>
           </li>)}</ul>
         </Detail>}

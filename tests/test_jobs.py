@@ -10,7 +10,7 @@ import asyncio
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from backend.jobs import Job, JobContext, JobRunner
+from backend.jobs import STOP_TIMEOUT_SECONDS, Job, JobContext, JobRunner
 
 
 @pytest.fixture
@@ -268,3 +268,107 @@ async def test_unknown_kind_fails_the_job_instead_of_the_worker(runner):
 def test_submitting_an_unregistered_kind_is_rejected_up_front(runner):
     with pytest.raises(ValueError, match="No handler"):
         runner.submit("nope", "demo", {})
+
+
+def test_a_cancel_during_the_claim_window_is_not_dropped(runner):
+    """Cancelling between claim and task registration must not be silently discarded.
+
+    The worker marks a job running in a database thread and registers its task only once
+    control returns to the event loop. A cancel arriving in that window finds no task: it
+    used to fall through to the "queued" branch, mark the row cancelled, report success —
+    and then let the job run to completion, telling the user it had stopped while it had not.
+
+    Driven directly rather than by timing, because the window is a few microseconds wide.
+    """
+    async def handler(_request, _context):
+        return {}
+
+    runner.register("demo", handler)
+    job = runner.submit("demo", "demo", {})
+
+    # Reproduce the window exactly: claimed and running, no task registered yet.
+    claimed = runner.claim_next()
+    assert claimed is not None and claimed[0] == job.id
+    assert runner._current is None
+
+    assert runner.cancel(job.id) is True
+    # The request is recorded for the worker rather than pretending the job already stopped.
+    assert job.id in runner._cancel_requested
+    assert runner.get(job.id)["status"] == "running", "not falsely reported as finished"
+
+
+async def test_a_runner_restarted_after_stopping_still_executes_work(runner):
+    """Stop then start must give a working runner, not a worker that exits immediately.
+
+    Every in-process restart does this — a test client's lifespan, or an app restarted
+    without a new process. When the stop flag survived into the next start, the new worker
+    evaluated an already-false loop condition and returned, so nothing ever ran again and
+    every submission sat queued forever with no error anywhere.
+    """
+    async def handler(request, _context):
+        return {"echo": request["n"]}
+
+    runner.register("demo", handler)
+
+    await runner.start()
+    first = runner.submit("demo", "first", {"n": 1})
+    assert (await drain(runner, first.id))["status"] == "succeeded"
+    await runner.stop()
+
+    await runner.start()
+    try:
+        second = runner.submit("demo", "second", {"n": 2})
+        detail = await drain(runner, second.id)
+    finally:
+        await runner.stop()
+
+    assert detail["status"] == "succeeded"
+    assert detail["result"] == {"echo": 2}
+
+
+async def test_shutdown_is_bounded_when_the_worker_cannot_be_reaped(runner):
+    """Stopping must not be able to hang the process.
+
+    Cancelling a task that is inside `asyncio.to_thread` does not interrupt the thread, so
+    an unbounded await here turns a slow or stuck database call into an application that
+    will not exit. This drives the pathological case directly: a worker that never finishes.
+    """
+    await runner.start()
+    never_finishes: asyncio.Future = asyncio.get_running_loop().create_future()
+    runner._worker.cancel()
+    runner._worker = asyncio.ensure_future(never_finishes)
+    try:
+        async with asyncio.timeout(STOP_TIMEOUT_SECONDS + 3):
+            await runner.stop()
+    finally:
+        never_finishes.cancel()
+
+
+async def test_a_finished_job_is_never_rewritten_by_a_later_cancel(runner):
+    """Terminal is terminal — a result the user earned cannot be relabelled.
+
+    The completion write and the cancellation write race for real. A handler returns, the
+    row is written `succeeded` from a database thread, and only then does the cancellation
+    from shutdown get delivered to the worker — which used to overwrite the row with
+    `cancelled`, discarding the result. The user watched a run finish and found it marked
+    cancelled with nothing in it on reopening the tab.
+    """
+    async def handler(_request, _context):
+        return {"answer": 42}
+
+    runner.register("demo", handler)
+    await runner.start()
+    try:
+        job = runner.submit("demo", "demo", {})
+        detail = await drain(runner, job.id)
+        assert detail["status"] == "succeeded"
+
+        # Whatever arrives afterwards, from any path, must not move it.
+        assert runner._finish(job.id, "cancelled", error="too late") is False
+        assert runner.cancel(job.id) is False
+    finally:
+        await runner.stop()
+
+    final = runner.get(job.id)
+    assert final["status"] == "succeeded"
+    assert final["result"] == {"answer": 42}

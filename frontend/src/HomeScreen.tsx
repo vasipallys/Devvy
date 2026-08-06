@@ -1,5 +1,6 @@
 import { ArrowRight, BrainCircuit, Check, Code2, Database, LoaderCircle, LockKeyhole, MessageSquare, Mic2, ShieldCheck, Sparkles, Timer } from 'lucide-react'
 import { SystemStatusChip } from './SystemStatusChip'
+import { Tooltip } from './Tooltip'
 
 type Props = {
   onChat: () => void
@@ -16,10 +17,14 @@ export function HomeScreen({ onChat, onTalk, onSmartCode, onEstimateCode, onActi
     <header className="home-header">
       <div className="brand-lockup"><div className="brand-mark"><Sparkles size={18}/></div><span><b>Devvy</b><small>Evidence-based development</small></span></div>
       <div className="home-header-actions">
+        <Tooltip label={activeJobs ? `${activeJobs} request(s) running` : 'Activity'}
+          detail={activeJobs
+            ? 'Work continues on the server even if you close this tab. Open Activity to watch progress or cancel.'
+            : 'Every request you make is recorded here with its status, evidence, and full response — including ones that finished while the browser was closed.'}>
         <button className={`activity-chip ${activeJobs ? 'busy' : ''}`} onClick={onActivity}>
           {activeJobs ? <LoaderCircle className="spin" size={14}/> : <Timer size={14}/>}
           <span>{activeJobs ? `${activeJobs} running` : 'Activity'}</span>
-        </button>
+        </button></Tooltip>
         <SystemStatusChip/>
       </div>
     </header>

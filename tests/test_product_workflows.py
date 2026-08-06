@@ -1,7 +1,9 @@
 import pytest
 
 from backend.config import Settings
-from backend.estimate_code import EstimateDraft, EstimateService, Story, build_result, parse_upload
+from backend.estimate_code import (
+    EstimateDraft, EstimateService, Story, build_result, build_scorecard, parse_upload,
+)
 from backend.estimation_framework import StackProfile
 from backend.smart_code import (
     ProposedEdit,
@@ -158,7 +160,7 @@ async def test_estimate_mixes_model_scores_with_heuristics_and_labels_the_differ
         def __init__(self):
             self.calls = 0
 
-        async def generate(self, _messages, max_new_tokens):
+        async def generate(self, _messages, max_new_tokens, **_options):
             assert max_new_tokens > 0
             self.calls += 1
             # Nine of sixteen factors — above the acceptance floor, so no repair is needed.
@@ -219,7 +221,7 @@ async def test_estimate_gives_bare_integer_scores_a_readable_reason(tmp_path):
     """Gemma 3 1B answers with plain integers; the reason column must not become "3"."""
 
     class BareIntegerRuntime:
-        async def generate(self, _messages, max_new_tokens):
+        async def generate(self, _messages, max_new_tokens, **_options):
             assert max_new_tokens > 0
             import json
 
@@ -257,7 +259,7 @@ async def test_estimate_falls_back_to_heuristics_when_the_model_cannot_hold_the_
         def __init__(self):
             self.calls = 0
 
-        async def generate(self, _messages, max_new_tokens):
+        async def generate(self, _messages, max_new_tokens, **_options):
             assert max_new_tokens > 0
             self.calls += 1
             return '{"rationale": "This story looks medium sized."}'
@@ -354,7 +356,7 @@ async def test_smart_code_repairs_empty_edit_response(tmp_path):
         def __init__(self):
             self.calls = 0
 
-        async def generate(self, messages, max_new_tokens):
+        async def generate(self, messages, max_new_tokens, **_options):
             assert max_new_tokens > 0
             self.calls += 1
             if self.calls == 1:
@@ -479,3 +481,111 @@ async def test_smart_code_rejects_workspace_escape(tmp_path):
                 target_paths=[str(tmp_path / "outside.py")],
             )
         )
+
+
+async def test_skipping_the_blind_review_does_not_change_the_estimate(tmp_path):
+    """A skipped second pass must not move a score.
+
+    The reviewer previously fell back to the keyword heuristic when it did not run. That is a
+    fallback for *missing* scores, not an independent opinion: on a story with no declared
+    frontend it scored `frontend_effort` 1 against the model's 3, which arbitration resolved
+    to a midpoint of 2. Not running a review would then quietly change the answer.
+    """
+    import json
+    from backend.estimation_framework import FACTOR_IDS
+
+    class FlatRuntime:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, _messages, max_new_tokens, **_options):
+            assert max_new_tokens > 0
+            self.calls += 1
+            return json.dumps({"scores": {factor: 3 for factor in FACTOR_IDS}})
+
+    runtime = FlatRuntime()
+    events: list[dict] = []
+    result = await EstimateService(
+        runtime, Settings(app_data_dir=tmp_path / "data", phoenix_enabled=False)
+    ).estimate(
+        Story(
+            title="Publish order events to Kafka",
+            user_story="Publish an event on order creation so downstream systems react.",
+            acceptance_criteria=["Failures land in a dead letter queue"],
+            stack=StackProfile(backend="spring_boot"),
+        ),
+        events.append,
+    )
+
+    review = [item for item in events if item["stage"] == "blind_review"]
+    assert any("not required" in item.get("label", "") for item in review)
+    assert runtime.calls == 1, "the second generation is skipped, not merely ignored"
+    # Every factor keeps the score the model gave it.
+    assert {item["score"] for item in result["scorecard"]} == {3}
+
+    audit = result["agentic_pipeline"]["consistency_audit"]
+    assert audit["blind_review_executed"] is False
+    assert audit["dimension_stability_index"] is None, "no agreement to report"
+    assert any("not run" in warning for warning in audit["warnings"])
+
+
+async def test_blind_review_runs_when_a_second_opinion_could_change_the_answer(tmp_path):
+    """Near a band edge, or on elevated risk, the second pass earns its cost."""
+    from backend.estimate_code import blind_review_warranted
+    from backend.estimation_pipeline import assessment
+
+    def primary_for(**overrides):
+        story = Story(title="x", stack=StackProfile(backend="spring_boot", **overrides.pop("stack", {})))
+        scorecard = build_scorecard(
+            EstimateDraft.model_validate({"scores": full_scorecard(**overrides)}), story
+        )
+        return assessment("PRIMARY_ESTIMATOR", scorecard, story), story
+
+    # Elevated risk warrants a second reading. Rules are checked in order and the band-edge
+    # test runs first, so this asserts the decision and that a reason is always given rather
+    # than pinning which rule happened to win.
+    for overrides in (
+        {"uncertainty": 4},
+        {"technical_complexity": 4, "integration_surface": 4, "test_effort": 4},
+        {"stack": {"maturity_level": 5}},
+    ):
+        primary, story = primary_for(**overrides)
+        needed, reason = blind_review_warranted(primary, story)
+        assert needed, f"{overrides} should warrant a review"
+        assert reason, "the decision is always explained"
+
+    # A low-risk story sitting in the middle of its band does not. Note the all-2 baseline
+    # lands 2 from a band edge and *does* warrant one, so this drops three factors to reach
+    # the middle — the margin is deliberately generous, because a reviewer differing on a
+    # handful of factors can move the adjusted score by several points.
+    primary, story = primary_for(
+        requirements_clarity=1, dod_overhead=1, documentation_knowledge_transfer=1
+    )
+    needed, reason = blind_review_warranted(primary, story)
+    assert not needed
+    assert "cannot change the result" in reason
+
+
+def test_repository_scan_respects_gitignore_and_caches(tmp_path):
+    """A preview should not read files the repository itself excludes."""
+    from backend.smart_code import _SCAN_CACHE, _scan, _walk
+
+    workspace = tmp_path / "repo"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "generated").mkdir()
+    (workspace / "src" / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (workspace / "generated" / "bundle.js").write_text("x=1\n", encoding="utf-8")
+    (workspace / "secrets.json").write_text("{}\n", encoding="utf-8")
+    (workspace / ".gitignore").write_text("generated/\nsecrets.json\n", encoding="utf-8")
+
+    _SCAN_CACHE.clear()
+    found = {path.name for path in _scan(workspace, "app value")}
+    assert "app.py" in found
+    assert "bundle.js" not in found, "ignored directory is excluded"
+    assert "secrets.json" not in found, "ignored file is excluded"
+
+    # The walk is cached per workspace, so a second preview does not re-read the tree.
+    assert workspace.resolve() in _SCAN_CACHE or workspace in _SCAN_CACHE
+    before = len(_walk(workspace))
+    (workspace / "src" / "late.py").write_text("y = 2\n", encoding="utf-8")
+    assert len(_walk(workspace)) == before, "within the TTL the cached listing is reused"

@@ -55,6 +55,16 @@ class EstimateRecord(SQLModel, table=True):
     heuristic_filled: int = 0
     tldr: str = ""
 
+    # What the team actually decided. The pipeline ends at "human decision required"; without
+    # somewhere to put the answer, the loop never closes and calibration can only ever report
+    # what was estimated, never whether the estimate was any good.
+    decision: str | None = Field(default=None, index=True)
+    decided_points: int | None = None
+    decision_note: str | None = None
+    decided_at: datetime | None = None
+    #: Filled in after delivery. This is what turns history into calibration.
+    actual_points: int | None = None
+
     #: The complete estimate payload, rendered by the same component as a live result.
     result: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
@@ -80,7 +90,51 @@ def record_summary(item: EstimateRecord) -> dict[str, Any]:
         "model_scored": item.model_scored,
         "heuristic_filled": item.heuristic_filled,
         "tldr": item.tldr,
+        "decision": item.decision,
+        "decided_points": item.decided_points,
+        "decision_note": item.decision_note,
+        "decided_at": utc_iso(item.decided_at),
+        "actual_points": item.actual_points,
     }
+
+
+#: What a team may do with a recommendation. `accept` takes the recommended number as-is;
+#: the rest are the framework's own escalation options plus an explicit override.
+DECISIONS = ("accept", "override", "spike", "decompose")
+
+
+def record_decision(
+    engine,
+    record_id: UUID,
+    decision: str,
+    *,
+    points: int | None = None,
+    note: str = "",
+    actual_points: int | None = None,
+) -> dict[str, Any] | None:
+    """Record the human decision on an estimate. Returns the updated record, or None.
+
+    The decision is deliberately not validated against the recommendation: a team is allowed
+    to accept a number the framework wanted decomposed, and recording that disagreement is
+    more useful than preventing it. What matters is that the choice is captured.
+    """
+    if decision not in DECISIONS:
+        raise ValueError(f"Decision must be one of {', '.join(DECISIONS)}.")
+    with Session(engine) as session:
+        item = session.get(EstimateRecord, record_id)
+        if item is None:
+            return None
+        item.decision = decision
+        # An override carries its own number; accepting keeps the recommended one.
+        item.decided_points = points if decision == "override" else item.points
+        item.decision_note = (note or "").strip()[:1000] or None
+        item.decided_at = now()
+        if actual_points is not None:
+            item.actual_points = actual_points
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+        return {**record_summary(item), "result": item.result}
 
 
 def save_estimate(engine, result: dict[str, Any], job_id: UUID | None = None) -> EstimateRecord:
@@ -191,46 +245,89 @@ def clear_estimates(engine) -> int:
         return int(removed)
 
 
+def _tally(session, column) -> dict[str, int]:
+    """Count rows per distinct value, in SQL."""
+    rows = session.exec(
+        select(column, func.count()).where(col(column).is_not(None)).group_by(column)
+    ).all()
+    return {str(value): int(count) for value, count in rows if value not in (None, "")}
+
+
 def estimate_stats(engine) -> dict[str, Any]:
     """Aggregates that turn a log into a calibration record.
 
     Seeing that a team's 8s outnumber everything else, or that a third of estimates end in
     "spike first", says more about their estimating than any single story does.
+
+    Aggregation happens in SQL. History is deliberately never purged, so loading every row
+    to count it in Python would degrade steadily with use — precisely for the teams who have
+    used the tool most and whose calibration data is worth the most.
     """
     with Session(engine) as session:
-        rows = session.exec(
-            select(
-                EstimateRecord.points,
-                EstimateRecord.recommendation,
-                EstimateRecord.confidence,
-                EstimateRecord.model_scored,
-                EstimateRecord.heuristic_filled,
-            )
-        ).all()
-    if not rows:
-        return {
-            "total": 0, "points": {}, "recommendations": {}, "confidence": {},
-            "median_points": None, "model_scored_share": None,
-        }
-    points: dict[str, int] = {}
-    recommendations: dict[str, int] = {}
-    confidence: dict[str, int] = {}
-    scored = filled = 0
-    for row in rows:
-        points[str(row[0])] = points.get(str(row[0]), 0) + 1
-        if row[1]:
-            recommendations[row[1]] = recommendations.get(row[1], 0) + 1
-        if row[2]:
-            confidence[row[2]] = confidence.get(row[2], 0) + 1
-        scored += int(row[3] or 0)
-        filled += int(row[4] or 0)
-    ordered = sorted(int(row[0]) for row in rows)
-    total_factors = scored + filled
+        total = int(session.exec(select(func.count()).select_from(EstimateRecord)).one())
+        if not total:
+            return {
+                "total": 0, "points": {}, "recommendations": {}, "confidence": {},
+                "decisions": {}, "median_points": None, "model_scored_share": None,
+                "decided": 0, "accepted_as_recommended": 0, "overridden": 0,
+                "override_bias": None, "with_actuals": 0, "actual_accuracy": None,
+            }
+
+        points = _tally(session, EstimateRecord.points)
+        recommendations = _tally(session, EstimateRecord.recommendation)
+        confidence = _tally(session, EstimateRecord.confidence)
+        decisions = _tally(session, EstimateRecord.decision)
+
+        scored, filled = session.exec(
+            select(func.sum(EstimateRecord.model_scored), func.sum(EstimateRecord.heuristic_filled))
+        ).one()
+        factors = int(scored or 0) + int(filled or 0)
+
+        # Median without loading the table: skip to the middle row.
+        median = session.exec(
+            select(EstimateRecord.points)
+            .order_by(col(EstimateRecord.points))
+            .offset(total // 2)
+            .limit(1)
+        ).first()
+
+        decided = int(
+            session.exec(
+                select(func.count()).select_from(EstimateRecord)
+                .where(col(EstimateRecord.decision).is_not(None))
+            ).one()
+        )
+        overridden = decisions.get("override", 0)
+        # How far the team moves the number when they disagree with it. A persistent
+        # positive bias means the framework is reading their work as smaller than it is.
+        bias = session.exec(
+            select(func.avg(EstimateRecord.decided_points - EstimateRecord.points))
+            .where(col(EstimateRecord.decision) == "override")
+        ).one() if overridden else None
+
+        with_actuals = int(
+            session.exec(
+                select(func.count()).select_from(EstimateRecord)
+                .where(col(EstimateRecord.actual_points).is_not(None))
+            ).one()
+        )
+        accuracy = session.exec(
+            select(func.avg(func.abs(EstimateRecord.actual_points - EstimateRecord.points)))
+            .where(col(EstimateRecord.actual_points).is_not(None))
+        ).one() if with_actuals else None
+
     return {
-        "total": len(rows),
+        "total": total,
         "points": points,
         "recommendations": recommendations,
         "confidence": confidence,
-        "median_points": ordered[len(ordered) // 2],
-        "model_scored_share": round(scored / total_factors, 3) if total_factors else None,
+        "decisions": decisions,
+        "median_points": int(median) if median is not None else None,
+        "model_scored_share": round(scored / factors, 3) if factors else None,
+        "decided": decided,
+        "accepted_as_recommended": decisions.get("accept", 0),
+        "overridden": overridden,
+        "override_bias": round(float(bias), 2) if bias is not None else None,
+        "with_actuals": with_actuals,
+        "actual_accuracy": round(float(accuracy), 2) if accuracy is not None else None,
     }

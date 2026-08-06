@@ -41,6 +41,7 @@ async def generate_structured(
     max_new_tokens: int,
     on_attempt: Callable[[dict[str, Any]], None] | None = None,
     validate_result: Callable[[T], str | None] | None = None,
+    temperature: float | None = None,
 ) -> T:
     """Generate and validate JSON and workflow semantics, with one repair attempt."""
     contract = json.dumps(schema.model_json_schema(), separators=(",", ":"))
@@ -77,7 +78,10 @@ async def generate_structured(
                     },
                 ]
             )
-        last_text = await runtime.generate(messages, max_new_tokens=max_new_tokens)
+        # Only forwarded when a caller asked for it, so a runtime that does not take a
+        # temperature — including every test double — keeps its existing signature.
+        options = {} if temperature is None else {"temperature": temperature}
+        last_text = await runtime.generate(messages, max_new_tokens=max_new_tokens, **options)
         try:
             validated = schema.model_validate(parse_json_object(last_text))
             semantic_error = validate_result(validated) if validate_result else None

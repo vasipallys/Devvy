@@ -57,6 +57,10 @@ Keep that split. The model must never determine the point value — the product'
 
 **`estimate_history.py`** records every completed estimate in its own table, keyed by story rather than by execution and not purged on a timer — jobs are, and an estimate is the artefact a team refers back to. The complete result payload is stored verbatim so a recalled entry renders through the same `EstimateResultView` as a fresh run; denormalised columns exist only for listing, search, and calibration stats. Writing history is a side effect: a failure there is logged and swallowed, never allowed to fail the estimate.
 
+Schema changes go in `migrations.py`, not just the model: `create_all` never alters an existing table, so a new column would be missing for anyone who already had data. Append a numbered migration and never renumber a released one.
+
+The blind review is conditional (near a band edge, elevated protected risk, heuristic-heavy, or a stack penalty) and runs warmer than the primary pass — at a shared temperature both passes converge and the second generation buys nothing. When it does not run the reviewer **mirrors the primary**; never fall back to the heuristic scorecard there, because arbitrating against it manufactures disagreement and silently moves scores.
+
 **`harness.py`** provides `assemble_context` (priority-ordered, character-budgeted context with a provenance manifest) and `RunLedger` (privacy-preserving JSONL trajectories). All four workflows route third-party text — web results, uploaded documents, repository files, story text from Jira — through `assemble_context` so it is marked `UNTRUSTED EVIDENCE`, and every system prompt carries a context policy saying such content is data, never instructions. Do not bypass this when adding a new evidence source.
 
 Configuration is `config.py` `Settings` (pydantic-settings, reads `.env`); `get_settings()` is `lru_cache`d.
@@ -69,7 +73,36 @@ In `App.tsx`, `streamingRef` guards the `[activeId]` message loader: a new conve
 
 **Every model-backed request is a durable background job** (`backend/jobs.py`). Submitting returns a job id immediately; the worker claims queued rows from SQLite and runs them one at a time, because `GemmaRuntime` already serializes generation. Closing the tab cannot cancel work or lose a result. `GET /api/jobs/{id}/stream` sends a snapshot then live deltas — token deltas carry a character `offset` and agent events carry a `seq` so a client attaching mid-run drops the overlap instead of duplicating it. On startup the runner marks jobs orphaned by a previous process as `interrupted`, since a generation cannot be resumed. `useJobs` mounts once in `DesktopApp` to drive the activity badge and the `beforeunload` guard; each screen reattaches on load to a job of its kind that is still active.
 
+Four rules in `jobs.py` are load-bearing and were each written after a failure. **Terminal is
+terminal**: the move into a finished state is a conditional UPDATE, because a handler's result is
+written from a database thread and a shutdown cancellation delivered just afterwards used to
+rewrite a `succeeded` job as `cancelled`, discarding a result the user had watched complete.
+**Shutdown is bounded**: cancelling a task inside `asyncio.to_thread` does not interrupt the
+thread, so an unbounded await in `stop()` hangs the process — and made the test suite hang on
+roughly every other run. **The wake event is created in `start()`**, not `__init__`, because an
+`asyncio.Event` binds to the first loop that awaits it and the runner is a module-level singleton
+that outlives any single loop; `start()` also resets the stop flag, or a restarted worker exits
+immediately and every later submission sits queued forever. And **counting happens in SQL** —
+loading a trajectory to `len()` it made an n-event run cost O(n²) row loads.
+
+Costs that grow without limit are treated as bugs, not tuning: subscriber queues are bounded so a
+stalled viewer cannot grow the worker for a whole generation; the streamer's drain thread is
+stoppable by a flag so a failed generation does not leak one thread per request; uploads and
+generated media have a retention sweep like jobs and the ledger do; and on the client, polling
+stops in a hidden tab while streamed tokens are coalesced to one render per animation frame.
+
 Every page is wrapped in `ErrorBoundary` (keyed per page). Without it a render error unmounts the tree and shows an empty black window that cannot be told apart from a slow load. Relatedly, `useEffect` callbacks must use a block body — a concise arrow returns its expression and React calls that as the cleanup function, which fails with `destroy is not a function`. TypeScript cannot catch this, so an ESLint `no-restricted-syntax` rule enforces it.
+
+`Tooltip.tsx` carries the explanation layer: every status chip, score, badge, gate, pipeline
+stage, and mode control says on hover **what** it is and **why** it is that way — the reasoning
+that was previously only reachable by opening a panel. Two constraints are easy to get wrong
+and were both hit while building it. It **clones its handlers onto the child** rather than
+wrapping it: an earlier `display: contents` wrapper is invisible to layout but not to CSS, and
+it silently broke every `.parent > div` rule (the Smart Code pipeline lost its whole
+appearance). And a wrapped element that nothing can focus — a badge, an icon — is given a tab
+stop, since otherwise its explanation is mouse-only. Scroll **repositions** the tooltip instead
+of closing it, because focusing an off-screen element scrolls it into view and that scroll would
+dismiss the tooltip the focus just opened.
 
 The browser cannot read filesystem paths from a file input, so Smart Code takes the workspace root and target files as text. Never reintroduce a native picker dependency.
 
