@@ -8,7 +8,7 @@ class RuntimeStub:
     def __init__(self):
         self.messages = []
 
-    async def generate(self, messages, token_queue=None):
+    async def generate(self, messages, token_queue=None, stats=None, **_options):
         self.messages = messages
         if token_queue is not None:
             await token_queue.put("Hello")

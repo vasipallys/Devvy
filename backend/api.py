@@ -911,6 +911,23 @@ async def run_chat_job(request: dict, context: JobContext) -> dict:
                 },
             )
         answer = str(result["messages"][-1].content)
+        completion = result.get("completion") or {}
+        if completion.get("truncated"):
+            # Silence here is the actual defect: a capped answer stops mid-word and is
+            # indistinguishable from a finished one, in a product whose premise is that you
+            # can tell what happened.
+            await context.event(
+                "generate", "failed", "Answer stopped at the output limit",
+                detail=(
+                    f"The reply reached the {completion.get('max_new_tokens')}-token ceiling "
+                    "and was cut off. Ask for a shorter answer, or raise MAX_NEW_TOKENS."
+                ),
+                evidence={
+                    "completion_tokens": completion.get("completion_tokens"),
+                    "max_new_tokens": completion.get("max_new_tokens"),
+                    "truncated": True,
+                },
+            )
         if not streamed:
             await context.token(answer)
         await asyncio.to_thread(
@@ -926,7 +943,13 @@ async def run_chat_job(request: dict, context: JobContext) -> dict:
                 conversation_id=conversation_id, role="assistant", content=answer,
                 author_id=context.owner_id,
                 message_metadata={
-                    "mode": result.get("mode"), "artifact_url": result.get("artifact_url")
+                    "mode": result.get("mode"),
+                    "artifact_url": result.get("artifact_url"),
+                    # Persisted, not only streamed: a reader opening this conversation
+                    # tomorrow must still see that the answer was cut short.
+                    "truncated": bool(completion.get("truncated")),
+                    "completion_tokens": completion.get("completion_tokens"),
+                    "max_new_tokens": completion.get("max_new_tokens"),
                 },
             )
             session.add(saved)
@@ -1187,11 +1210,17 @@ async def run_talk_job(request: dict, context: JobContext) -> dict:
                     "titles": [item["title"] for item in sources],
                 },
             )
+        talk_completion = result.get("completion") or {}
         await context.event(
-            "generate", "completed", "Response completed",
+            "generate",
+            "failed" if talk_completion.get("truncated") else "completed",
+            "Answer stopped at the output limit" if talk_completion.get("truncated")
+            else "Response completed",
             evidence={
                 "response_characters": len(response),
                 "context_sources": result.get("context_manifest", []),
+                "completion_tokens": talk_completion.get("completion_tokens"),
+                "truncated": bool(talk_completion.get("truncated")),
             },
         )
         job_result: dict[str, Any] = {

@@ -327,15 +327,68 @@ Stopping MUST cancel the job on the server, not merely detach the tab from it.
 
 Smart Code and Estimate Code MUST use `backend/structured_output.py`:
 
-1. Serialize the target Pydantic JSON schema into the user prompt.
+1. Show the model **a worked example instance**, not the JSON Schema, whenever the caller can
+   supply one. See below — this is the single most important rule in this section.
 2. Instruct the model to return exactly one JSON object with no Markdown.
 3. Extract the first balanced JSON object, tolerating code fences and prefix text.
-4. Validate against the model, then run an optional caller-supplied semantic validator.
-5. On failure, retry **once**, feeding back the prior output and a concise, specific error.
-6. If the second attempt fails, raise without applying any side effect.
+4. Reject a **schema echo** before validating (§4.6.1).
+5. Validate against the model, then run an optional caller-supplied semantic validator.
+6. On failure, retry **once**, feeding back the prior output and a concise, specific error.
+7. If the second attempt fails, either return a degraded result when the caller allows it, or
+   raise — never apply a side effect from an unvalidated answer.
 
 The repair message MUST name the specific defect (for example, which factor ids are unscored)
 rather than reporting a generic failure; a compact model otherwise reproduces the same omission.
+
+#### 4.6.1 Never show a small model a JSON Schema it can copy
+
+Handed a JSON Schema, Gemma 3 1B **returns the schema**. Observed verbatim from a real Smart
+Code run:
+
+```json
+{"$defs":{"ProposedEdit":{"properties":{"action":{"enum":["create","replace"],…
+```
+
+It is the most literal reading of "return one valid JSON object", and the schema is the nearest
+structured text to imitate. The copy is *valid JSON*, and it *validates against the target*
+whenever the required fields have defaults — so it arrives as an empty answer, fails the
+workflow rule rather than the contract, and reports the wrong problem. Both attempts fail
+identically, because the repair replays the same schema.
+
+Therefore:
+
+- Callers SHOULD pass `example=` — a filled-in instance of the expected output. A model shown
+  an instance fills in an instance. The schema remains the contract; it is simply not what the
+  model is shown.
+- **The example must itself be guarded.** Swapping the schema for an example moves the failure
+  rather than removing it: the model then copies the *example*, verbatim. That result is
+  well-formed, validates, and is plausible — a proposed change to a file the objective never
+  mentioned, which would be shown to the user as real. It is the more dangerous of the two
+  echoes. The example MUST therefore be framed as *shape only, describing an unrelated task*,
+  and a payload that reuses it MUST be rejected with a repair message naming that mistake.
+- **The copy check MUST work field by field, not on the whole object.** The observed failure
+  was partial: the model wrote a genuine, objective-specific `summary` while pasting the
+  example's file `content` unchanged. Whole-object equality never fires on that. Any
+  substantial string (≥30 characters) reused verbatim from the example counts as copying;
+  short scaffolding wording ("Create the router module") does not.
+- The loop MUST detect a schema echo (`$defs`, `properties`, `required`, …) and reject it with
+  a repair message naming *that* mistake, not a generic validation error.
+- When no example is available, the schema MAY still be sent, but the instruction MUST demand
+  data rather than definitions.
+
+#### 4.6.2 Degradation and diagnosability
+
+`allow_degraded=True` returns the last answer that satisfied the schema even when the workflow
+rule was never met. A response the application can read but not act on still contains the
+model's plan and analysis; returning it clearly labelled beats discarding minutes of CPU and
+showing only an error. A degraded result MUST NOT be treated as complete — Smart Code turns one
+into a preview that can write nothing, carrying a blocker finding that says so.
+
+Every failed attempt MUST report what the model actually produced — a truncation flag, the
+token counts, and a raw-output preview. "Invalid structured output" alone cannot distinguish a
+model that ignored the contract from one that ran out of room, and the two need opposite fixes.
+A run cut at the token ceiling MUST NOT have its truncated output replayed as a correction:
+that invites the same overflow. Ask for something smaller instead.
 
 ---
 
@@ -367,6 +420,7 @@ rather than reporting a generic failure; a compact model otherwise reproduces th
 | `SMART_CODE_MAX_CONTEXT_CHARS` | `48000` | Repository evidence budget |
 | `SMART_CODE_MAX_OUTPUT_TOKENS` | `4096` | Smart Code generation cap |
 | `ESTIMATE_MAX_OUTPUT_TOKENS` | `3072` | Estimate generation cap |
+| `MAX_NEW_TOKENS` | `2048` | Chat/Talk output ceiling. At `1024` ordinary answers were cut mid-word |
 | `AGENT_RUN_RETENTION_DAYS` | `30` | Ledger retention |
 | `UPLOAD_RETENTION_DAYS` | `7` | Uploads and generated media retention |
 | `WHISPER_MODEL` / `WHISPER_COMPUTE_TYPE` | `base.en` / `int8` | STT |
@@ -1218,6 +1272,28 @@ packaged installer and nothing supervises the Python process.
 
 ---
 
+### 13.2 Truncation must never be silent
+
+A generation that reaches its token ceiling stops wherever it happened to be — mid-word,
+mid-list — and the result is **indistinguishable from a finished answer**. In a product whose
+premise is that a reader can tell what happened, presenting one as the other is the worst
+available failure.
+
+The runtime MUST therefore report, per call, how many completion tokens were produced and
+whether that reached the ceiling. Callers MUST surface it:
+
+- as a **failed** run-evidence event naming the ceiling that was hit;
+- in the assistant message's stored metadata, so reopening the conversation tomorrow still
+  shows the answer was cut short, not only the session that watched it stream;
+- as a visible notice on the message itself, with the tokens used and the limit.
+
+The ceiling itself is a tuning decision; **reporting it is not**. `MAX_NEW_TOKENS` defaults to
+2048 because 1024 truncated ordinary chat answers — an explanatory article reached it every
+time — and a truncated answer is worse than a slower one. Raising it does not remove the
+requirement: any ceiling can be hit, so any ceiling must be reported when it is.
+
+---
+
 ## 14.1 Performance and resource rules
 
 These are correctness rules, not tuning preferences: each one names a cost that grows without
@@ -1332,6 +1408,16 @@ cd frontend; npm run preview                             # serve dist/
 53. Attaching a document to a Talk turn does not stall other connected clients.
 54. A failed animation render leaves no scene script or intermediate media behind.
 55. The sign-out dialog is dismissible with Escape, takes focus, and reports its own failure.
+56. An answer cut off at the token ceiling is reported as truncated in evidence, in stored
+    message metadata, and visibly on the message — and a complete answer is not.
+57. A model that echoes the JSON Schema is rejected as such, with a repair message naming
+    that mistake — and a genuine answer that mentions schemas is not.
+58. When an example is supplied, the prompt contains the example and no schema.
+58a. An answer identical to the supplied example is rejected and repaired, not returned.
+59. A Smart Code run that cannot produce a usable edit returns its plan as a preview that can
+    write nothing, with a blocker finding explaining why, rather than only an error.
+60. One malformed edit among several does not discard the usable ones, and the count that was
+    discarded is reported.
 
 ### 15.2 Regression suite
 

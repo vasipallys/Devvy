@@ -143,3 +143,11 @@ button:disabled{cursor:not-allowed}
 .tooltip-top{animation-name:tooltip-in-top}
 @keyframes tooltip-in-top{from{opacity:0;transform:translate(-50%,-100%) scale(.97)}}
 @media(prefers-reduced-motion:reduce){.tooltip{animation:none}}
+
+/* A capped answer stops mid-word and otherwise looks finished. Say so where it happened. */
+.truncation-notice{display:flex;gap:8px;align-items:flex-start;margin:10px 0 0;padding:9px 11px;
+  border:1px solid #6b4f22;border-radius:9px;background:#2a2113;color:#ffd38b}
+.truncation-notice svg{flex:none;margin-top:1px}
+.truncation-notice span{display:flex;flex-direction:column;gap:2px}
+.truncation-notice b{font-size:11px}
+.truncation-notice small{font-size:10px;line-height:1.5;color:#e0c68f}

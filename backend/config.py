@@ -31,7 +31,12 @@ class Settings(BaseSettings):
     model_device: str = "cpu"
     model_dtype: str = "float32"
     model_quantization: str = "none"
-    max_new_tokens: int = 1024
+    #: Output ceiling for Chat and Talk. 1024 cut ordinary answers mid-word — a request for
+    #: an explanatory article reached it every time — and a truncated answer is worse than a
+    #: slower one. Generation stays serialized and interruptible, so the cost of the higher
+    #: ceiling is only paid by answers that actually need the room. Truncation at any ceiling
+    #: is reported rather than hidden.
+    max_new_tokens: int = 2048
     model_context_messages: int = 12
     cpu_threads: int = 0
     document_max_chars: int = 24_000

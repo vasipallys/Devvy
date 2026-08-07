@@ -35,6 +35,8 @@ class TalkState(TypedDict):
     route_reason: str
     sources: list[dict]
     research_failed: bool
+    #: Token accounting for the spoken answer, including truncation at the output ceiling.
+    completion: dict
 
 
 class TalkAgentGraph:
@@ -147,11 +149,15 @@ class TalkAgentGraph:
             else:
                 turns.append({"role": role, "content": content})
         messages.extend(turns)
-        response = await self.runtime.generate(messages, state.get("token_queue"))
+        completion: dict = {}
+        response = await self.runtime.generate(
+            messages, state.get("token_queue"), stats=completion
+        )
         return {
             "response": response,
             "messages": [AIMessage(content=response)],
             "context_manifest": context_manifest,
+            "completion": completion,
         }
 
     async def invoke(
@@ -175,5 +181,6 @@ class TalkAgentGraph:
                 "route_reason": "",
                 "sources": [],
                 "research_failed": False,
+                "completion": {},
             }
         )

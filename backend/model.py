@@ -76,6 +76,7 @@ class GemmaRuntime:
         streamer=None,
         max_new_tokens: int | None = None,
         temperature: float | None = None,
+        stats: dict | None = None,
     ) -> str:
         from opentelemetry import trace
 
@@ -102,9 +103,22 @@ class GemmaRuntime:
                 generation_options.update({"temperature": None, "top_p": None, "top_k": None})
             result = pipe(messages, **generation_options)
         generated = result[0]["generated_text"]
-        if isinstance(generated, list):
-            return generated[-1]["content"]
-        return str(generated)
+        text = generated[-1]["content"] if isinstance(generated, list) else str(generated)
+        if stats is not None:
+            # Whether the answer *ended* or merely *stopped*. A generation that reaches the
+            # token ceiling is cut wherever it happened to be — mid-word, mid-list — and
+            # looks identical to a finished one. Reporting it is what lets the caller say so
+            # instead of presenting a truncated answer as complete.
+            limit = int(generation_options["max_new_tokens"])
+            produced = len(pipe.tokenizer(text, add_special_tokens=False)["input_ids"])
+            stats.update(
+                {
+                    "completion_tokens": produced,
+                    "max_new_tokens": limit,
+                    "truncated": produced >= limit,
+                }
+            )
+        return text
 
     async def generate(
         self,
@@ -112,10 +126,12 @@ class GemmaRuntime:
         token_queue: asyncio.Queue[str] | None = None,
         max_new_tokens: int | None = None,
         temperature: float | None = None,
+        stats: dict | None = None,
     ) -> str:
+        """Generate a full answer. Pass ``stats`` to learn whether it was cut at the cap."""
         chunks: list[str] = []
         async for token in self.stream(
-            messages, max_new_tokens=max_new_tokens, temperature=temperature
+            messages, max_new_tokens=max_new_tokens, temperature=temperature, stats=stats
         ):
             chunks.append(token)
             if token_queue is not None:
@@ -127,6 +143,7 @@ class GemmaRuntime:
         messages: list[dict[str, str]],
         max_new_tokens: int | None = None,
         temperature: float | None = None,
+        stats: dict | None = None,
     ) -> AsyncIterator[str]:
         from transformers import TextIteratorStreamer
 
@@ -166,7 +183,9 @@ class GemmaRuntime:
                         return
 
             generation = asyncio.create_task(
-                asyncio.to_thread(self._generate, messages, streamer, max_new_tokens, temperature)
+                asyncio.to_thread(
+                    self._generate, messages, streamer, max_new_tokens, temperature, stats
+                )
             )
             drainer = asyncio.create_task(asyncio.to_thread(drain))
             try:

@@ -40,6 +40,8 @@ class AgentState(TypedDict):
     #: Retrieved public sources, surfaced as citable evidence instead of an opaque blob.
     sources: list[dict]
     research_failed: bool
+    #: Token accounting for the answer, including whether it was cut at the output ceiling.
+    completion: dict
 
 
 class ChatAgent:
@@ -183,8 +185,15 @@ class ChatAgent:
             else:
                 turns.append({"role": role, "content": content})
         messages.extend(turns)
-        answer = await self.runtime.generate(messages, state.get("token_queue"))
-        return {"messages": [AIMessage(content=answer)], "context_manifest": context_manifest}
+        completion: dict = {}
+        answer = await self.runtime.generate(
+            messages, state.get("token_queue"), stats=completion
+        )
+        return {
+            "messages": [AIMessage(content=answer)],
+            "context_manifest": context_manifest,
+            "completion": completion,
+        }
 
     async def invoke(
         self,
@@ -206,5 +215,6 @@ class ChatAgent:
                 "route_reason": "",
                 "sources": [],
                 "research_failed": False,
+                "completion": {},
             }
         )

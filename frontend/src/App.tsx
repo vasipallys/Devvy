@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Bot, Code2, FileText, Globe2, Home, Image, Menu, MessageSquare, Paperclip, Plus, Search, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Bot, Code2, FileText, Globe2, Home, Image, Menu, MessageSquare, Paperclip, Plus, Search, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
 import { marked } from 'marked'
 import { api, API, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
@@ -212,6 +212,20 @@ export function App({ onHome, initialConversationId, onConversationChange }: {
             <div className="message-name">{message.role === 'user' ? 'You' : 'Devvy'}</div>
             {message.attachments?.map(a => <div className="file-chip" key={a.id}><FileText size={15}/>{a.name}</div>)}
             <div className="markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content || (sending ? 'Thinking…' : '')) }} />
+            {message.metadata?.truncated === true && <Tooltip
+              label="This answer was cut off"
+              detail={`The reply reached the ${String(message.metadata.max_new_tokens ?? 'output')}-token ceiling and stopped mid-answer rather than finishing. Ask Devvy to continue, ask for a shorter answer, or raise MAX_NEW_TOKENS in .env.`}>
+              <p className="truncation-notice">
+                <AlertTriangle size={14} />
+                <span>
+                  <b>Cut off at the output limit</b>
+                  <small>
+                    {String(message.metadata.completion_tokens ?? '')} of{' '}
+                    {String(message.metadata.max_new_tokens ?? '')} tokens used — this answer is incomplete.
+                  </small>
+                </span>
+              </p>
+            </Tooltip>}
           </div></article>)}<div ref={endRef}/></div>}
       </section>
       <footer>{error && <div className="error"><span>{error}</span><button onClick={() => setError('')}><X size={14}/></button></div>}

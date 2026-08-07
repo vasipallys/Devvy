@@ -65,6 +65,48 @@ class SmartCodeRequest(BaseModel):
         return [value.strip() for value in values if value.strip()]
 
 
+#: Field synonyms a compact local model reaches for, resolved to the one name the schema uses.
+#: Kept as data rather than a chain of `or`s so a newly observed spelling is a one-line change
+#: and every alias is visible in one place.
+_EDIT_ALIASES: dict[str, tuple[str, ...]] = {
+    "path": ("path", "file", "filename", "file_path", "filepath", "name", "target"),
+    "content": (
+        "content", "code", "new_content", "file_content", "source", "body", "text", "contents",
+    ),
+    "action": ("action", "operation", "type", "op", "change_type", "kind"),
+    "reason": ("reason", "summary", "rationale", "why", "description", "explanation"),
+}
+
+#: Verbs a model uses for "write this whole file". Everything that is not clearly a creation
+#: is treated as a replacement; the service re-derives the true action from the filesystem
+#: afterwards, so this only has to be close enough to keep the edit.
+_CREATE_WORDS = {"create", "new", "add", "insert", "generate"}
+
+
+def _alias(source: dict, field: str) -> object:
+    for key in _EDIT_ALIASES[field]:
+        value = source.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _looks_usable(candidate: object) -> bool:
+    """Whether a raw edit carries the two things an edit cannot be built without.
+
+    Accepts an already-constructed edit as well as raw model output: the envelope validator
+    runs before *every* construction, including the ones this application makes itself.
+    """
+    if isinstance(candidate, ProposedEdit):
+        return bool(candidate.path.strip() and candidate.content)
+    if not isinstance(candidate, dict):
+        # Anything else is left alone so field validation reports it, rather than being
+        # silently dropped by a filter that did not recognise its shape.
+        return True
+    path, content = _alias(candidate, "path"), _alias(candidate, "content")
+    return isinstance(path, str) and bool(path.strip()) and isinstance(content, str) and bool(content)
+
+
 class ProposedEdit(BaseModel):
     action: Literal["create", "replace"]
     path: str
@@ -78,20 +120,13 @@ class ProposedEdit(BaseModel):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
-        if "action" not in normalized:
-            normalized["action"] = (
-                normalized.get("operation") or normalized.get("type") or "replace"
-            )
-        if "path" not in normalized:
-            normalized["path"] = normalized.get("file") or normalized.get("filename")
-        if "content" not in normalized:
-            normalized["content"] = normalized.get("code") or normalized.get("new_content") or ""
-        if "reason" not in normalized:
-            normalized["reason"] = (
-                normalized.get("summary")
-                or normalized.get("rationale")
-                or "Generated to satisfy the requested objective."
-            )
+        action = str(_alias(normalized, "action") or "replace").strip().lower()
+        normalized["action"] = "create" if action in _CREATE_WORDS else "replace"
+        normalized["path"] = _alias(normalized, "path")
+        normalized["content"] = _alias(normalized, "content") or ""
+        normalized["reason"] = (
+            _alias(normalized, "reason") or "Generated to satisfy the requested objective."
+        )
         return normalized
 
 
@@ -107,6 +142,10 @@ class SmartCodeModelOutput(BaseModel):
     plan: list[str] = Field(min_length=1, max_length=12)
     edits: list[ProposedEdit] = Field(default_factory=list, max_length=20)
     findings: list[ReviewFinding] = Field(default_factory=list, max_length=30)
+    #: Raw edits dropped for having no usable path or content. Reported as evidence rather
+    #: than hidden: one unusable entry must not discard the good ones, but the reader still
+    #: has to know the model produced something the application could not use.
+    discarded_edits: int = 0
 
     @model_validator(mode="before")
     @classmethod
@@ -139,6 +178,14 @@ class SmartCodeModelOutput(BaseModel):
                         for path, content in raw_edits.items()
                     ]
             normalized["edits"] = raw_edits
+        # Keep the edits that can actually be built. Validating the list as a whole meant a
+        # single entry missing a path — one hallucinated key among several good files —
+        # rejected the entire response and burned both attempts for nothing.
+        candidates = normalized.get("edits")
+        if isinstance(candidates, list):
+            usable = [item for item in candidates if _looks_usable(item)]
+            normalized["discarded_edits"] = len(candidates) - len(usable)
+            normalized["edits"] = usable
         if "plan" not in normalized:
             normalized["plan"] = normalized.get("steps") or ["Implement the requested change"]
         if "summary" not in normalized:
@@ -422,6 +469,41 @@ REPOSITORY MAP:
 RETRIEVED EVIDENCE:
 {evidence}
 """
+        # A *template*, not a sample. Shown a filled-in sample, Gemma 3 1B pastes it: it
+        # produced a genuine objective-specific summary alongside the sample's file content
+        # unchanged — a well-formed proposal to create a file that does not do what was asked.
+        # Placeholders cannot be copied into a plausible answer, and every one is long enough
+        # that the copy check catches it if the model tries.
+        example = (
+            {
+                "summary": "<one sentence describing what you reviewed>",
+                "plan": ["<first thing you examined>", "<second thing you examined>"],
+                "edits": [],
+                "findings": [
+                    {
+                        "severity": "major",
+                        "message": "<the specific problem you found>",
+                        "path": "<path/to/the/file/you/reviewed>",
+                        "suggestion": "<what to change instead>",
+                    }
+                ],
+            }
+            if request.mode == "review"
+            else {
+                "summary": "<one sentence describing the change you made>",
+                "plan": ["<first implementation step>", "<second implementation step>"],
+                "edits": [
+                    {
+                        "action": "create",
+                        "path": "<path/to/the/file/you/are/writing>",
+                        "content": "<the complete contents of that file, verbatim>",
+                        "reason": "<why this file is needed for the objective>",
+                    }
+                ],
+                "findings": [],
+            }
+        )
+
         def validate_workflow_result(candidate: SmartCodeModelOutput) -> str | None:
             if request.mode == "review" and candidate.edits:
                 return "Review mode requires findings only and must not return file edits."
@@ -442,11 +524,33 @@ RETRIEVED EVIDENCE:
                 lambda event: progress({"stage": "generate", **event}) if progress else None
             ),
             validate_result=validate_workflow_result,
+            example=example,
+            # A local 1B model does not always manage a whole-file edit inside a JSON
+            # envelope. When it does not, the plan and analysis it *did* produce are still
+            # worth returning: the run becomes a review that can write nothing, which is
+            # honest and useful, rather than several minutes of CPU spent to show an error.
+            allow_degraded=True,
         )
         if request.mode == "review" and output.edits:
             raise ValueError("Review mode attempted to produce file edits.")
-        if request.mode != "review" and not output.edits:
-            raise ValueError("The model returned no code edits for this change request.")
+        degraded = request.mode != "review" and not output.edits
+        if degraded:
+            output = output.model_copy(
+                update={
+                    "findings": [
+                        ReviewFinding(
+                            severity="blocker",
+                            message=(
+                                "The local model did not return a complete file for this "
+                                "objective, so there is nothing to apply. Its plan is below. "
+                                "Narrow the objective to one file, name the target explicitly, "
+                                "or raise SMART_CODE_MAX_OUTPUT_TOKENS and run it again."
+                            ),
+                        ),
+                        *output.findings,
+                    ]
+                }
+            )
         if progress:
             progress(
                 {
@@ -557,6 +661,8 @@ RETRIEVED EVIDENCE:
                 "context_budget": self.settings.smart_code_max_context_chars,
                 "truncated_files": truncated,
                 "selection": "explicit targets" if targets else "objective-ranked source scan",
+                "degraded": degraded,
+                "discarded_edits": output.discarded_edits,
                 "trust_policy": "repository content is prompt-marked UNTRUSTED EVIDENCE",
                 "write_policy": "preview only; explicit single-use approval required",
             },

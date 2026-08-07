@@ -8,8 +8,11 @@ class RuntimeStub:
     def __init__(self):
         self.messages = []
 
-    async def generate(self, messages, token_queue=None):
+    async def generate(self, messages, token_queue=None, stats=None, **_options):
         self.messages = messages
+        # Mirror the real runtime: report what the generation actually produced.
+        if stats is not None:
+            stats.update({"completion_tokens": 2, "max_new_tokens": 2048, "truncated": False})
         return "stub response"
 
 
@@ -147,3 +150,45 @@ async def test_respond_normalizes_gemma_conversation_roles():
     assert [message["role"] for message in runtime.messages] == ["system", "user"]
     assert "DOCUMENT: example" in runtime.messages[0]["content"]
     assert "failed request\n\nretry" in runtime.messages[1]["content"]
+
+
+async def test_a_capped_answer_is_reported_as_truncated():
+    """An answer that stops at the ceiling must be distinguishable from one that finished.
+
+    A capped generation ends wherever it happened to be — mid-word, mid-list — and otherwise
+    looks exactly like a complete reply. Reporting it is what lets the UI say the answer is
+    incomplete instead of presenting it as the whole thing.
+    """
+    from backend.agent import ChatAgent
+
+    class CappedRuntime:
+        async def generate(self, _messages, token_queue=None, stats=None, **_kwargs):
+            if stats is not None:
+                stats.update(
+                    {"completion_tokens": 2048, "max_new_tokens": 2048, "truncated": True}
+                )
+            return "An answer that ran out of room and stopped mid-"
+
+    agent = ChatAgent(CappedRuntime(), Settings(phoenix_enabled=False))
+    result = await agent.invoke([], "write a long article", "chat")
+
+    assert result["completion"]["truncated"] is True
+    assert result["completion"]["completion_tokens"] == 2048
+
+
+async def test_a_complete_answer_is_not_flagged_as_truncated():
+    """The flag must mean something: a short answer is not reported as cut off."""
+    from backend.agent import ChatAgent
+
+    class ShortRuntime:
+        async def generate(self, _messages, token_queue=None, stats=None, **_kwargs):
+            if stats is not None:
+                stats.update(
+                    {"completion_tokens": 12, "max_new_tokens": 2048, "truncated": False}
+                )
+            return "Short and finished."
+
+    agent = ChatAgent(ShortRuntime(), Settings(phoenix_enabled=False))
+    result = await agent.invoke([], "hello", "chat")
+
+    assert result["completion"]["truncated"] is False
