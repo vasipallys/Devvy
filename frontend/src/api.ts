@@ -2,14 +2,28 @@ import type {
   AgentEvent, Attachment, Conversation, EstimateDecision, EstimateHistoryEntry, EstimateHistoryPage,
   EstimateHistoryStats, JobDetail, JobStatus, JobSummary, Message, Mode,
   SmartCodeRequest, SystemStatus,
+  AuthState, ResourceShare, ShareResource, WorkspaceUser,
 } from './types'
 
-export const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8765'
+// Match the page hostname so session cookies remain first-party in development. Using
+// localhost for the UI and 127.0.0.1 for the API creates a cross-site cookie boundary in
+// modern browsers even though both addresses point to this machine.
+export const API = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:8765`
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, init)
+  const headers = new Headers(init?.headers)
+  const method = (init?.method || 'GET').toUpperCase()
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    const csrf = document.cookie.split('; ').find(item => item.startsWith('devvy_csrf='))
+      ?.split('=').slice(1).join('=')
+    if (csrf) headers.set('X-CSRF-Token', decodeURIComponent(csrf))
+  }
+  const response = await fetch(`${API}${path}`, { ...init, headers, credentials: 'include' })
   if (!response.ok) {
     const text = await response.text()
+    if (response.status === 401 && !path.startsWith('/api/auth/')) {
+      window.dispatchEvent(new CustomEvent('devvy:authentication-required'))
+    }
     try { throw new Error(JSON.parse(text).detail || `Request failed (${response.status})`) }
     catch (error) { if (error instanceof SyntaxError) throw new Error(text || `Request failed (${response.status})`); throw error }
   }
@@ -30,6 +44,7 @@ export async function consumeSSE(
       : { Accept: 'text/event-stream' },
     body: method === 'POST' ? JSON.stringify(payload) : undefined,
     signal,
+    credentials: 'include',
   })
   if (!response.ok || !response.body) throw new Error(await response.text())
   const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''
@@ -125,6 +140,50 @@ export async function attachToJob(
 }
 
 export const api = {
+  authSession: () => json<AuthState>('/api/auth/session'),
+  login: (email: string, password: string, remember = true) => json<AuthState>('/api/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, remember }),
+  }),
+  register: (payload: {
+    display_name: string; email: string; password: string; invite_token?: string; remember?: boolean
+  }) => json<AuthState>('/api/auth/register', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  }),
+  logout: (activeJobAction: 'keep' | 'cancel') => json<{
+    signed_out: boolean; active_job_action: string; cancelled_jobs: number
+  }>('/api/auth/logout', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ active_job_action: activeJobAction }),
+  }),
+  updateMe: (payload: { display_name?: string; preferences?: Partial<WorkspaceUser['preferences']> }) =>
+    json<WorkspaceUser>('/api/auth/me', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }),
+  changePassword: (currentPassword: string, newPassword: string) => json<{
+    changed: boolean; other_sessions_revoked: number
+  }>('/api/auth/me/password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  }),
+  users: () => json<WorkspaceUser[]>('/api/auth/users'),
+  updateUser: (id: string, payload: { role?: 'admin' | 'member'; active?: boolean }) =>
+    json<WorkspaceUser>(`/api/auth/users/${id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }),
+  invite: (email: string, role: 'admin' | 'member') => json<{
+    id: string; email: string; role: string; expires_at: string; invite_token: string; invite_route: string
+  }>('/api/auth/invitations', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, role }),
+  }),
+  shares: (incoming = false) => json<ResourceShare[]>(`/api/access/shares?incoming=${incoming}`),
+  share: (resourceType: ShareResource, resourceId: string, recipientEmail: string,
+    permission: 'viewer' | 'editor') => json<ResourceShare>('/api/access/shares', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_type: resourceType, resource_id: resourceId,
+        recipient_email: recipientEmail, permission }),
+    }),
+  revokeShare: (id: string) => json<void>(`/api/access/shares/${id}`, { method: 'DELETE' }),
   systemStatus: () => json<SystemStatus>('/api/system/status'),
   jobs: (limit = 50) => json<{ jobs: JobSummary[]; active: number }>(`/api/jobs?limit=${limit}`),
   job: (id: string) => json<JobDetail>(`/api/jobs/${id}`),

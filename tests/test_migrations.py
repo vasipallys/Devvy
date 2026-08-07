@@ -111,3 +111,22 @@ def test_versions_are_unique_and_ordered():
     versions = [item.version for item in MIGRATIONS]
     assert versions == sorted(versions), "migrations must be declared in order"
     assert len(versions) == len(set(versions)), "a version number is never reused"
+
+
+def test_pre_authentication_tables_gain_nullable_ownership_columns(tmp_path):
+    engine = make_engine(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE conversation (id VARCHAR PRIMARY KEY, title VARCHAR)"))
+        connection.execute(text(
+            "CREATE TABLE message (id VARCHAR PRIMARY KEY, conversation_id VARCHAR, role VARCHAR)"
+        ))
+        connection.execute(text("CREATE TABLE job (id VARCHAR PRIMARY KEY, status VARCHAR)"))
+        connection.execute(text("CREATE TABLE estimaterecord (id VARCHAR PRIMARY KEY, title VARCHAR)"))
+    try:
+        run_migrations(engine)
+        assert "owner_id" in columns(engine, "conversation")
+        assert "author_id" in columns(engine, "message")
+        assert "owner_id" in columns(engine, "job")
+        assert "owner_id" in columns(engine, "estimaterecord")
+    finally:
+        engine.dispose()

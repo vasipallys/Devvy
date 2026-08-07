@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import Column, JSON
 from sqlmodel import Field, Session, SQLModel, col, delete, func, select
 
+from backend.auth import User  # noqa: F401 — registers the foreign-key target in metadata
 from backend.db import utc_iso
 
 
@@ -32,6 +33,7 @@ def now() -> datetime:
 
 class EstimateRecord(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
+    owner_id: UUID | None = Field(default=None, foreign_key="user.id", index=True)
     created_at: datetime = Field(default_factory=now, index=True)
     #: The run that produced this. Kept for traceability even after the job is purged.
     job_id: UUID | None = Field(default=None, index=True)
@@ -72,6 +74,7 @@ class EstimateRecord(SQLModel, table=True):
 def record_summary(item: EstimateRecord) -> dict[str, Any]:
     return {
         "id": str(item.id),
+        "owner_id": str(item.owner_id) if item.owner_id else None,
         "created_at": utc_iso(item.created_at),
         "job_id": str(item.job_id) if item.job_id else None,
         "title": item.title,
@@ -111,6 +114,7 @@ def record_decision(
     points: int | None = None,
     note: str = "",
     actual_points: int | None = None,
+    owner_id: UUID | None = None,
 ) -> dict[str, Any] | None:
     """Record the human decision on an estimate. Returns the updated record, or None.
 
@@ -122,7 +126,7 @@ def record_decision(
         raise ValueError(f"Decision must be one of {', '.join(DECISIONS)}.")
     with Session(engine) as session:
         item = session.get(EstimateRecord, record_id)
-        if item is None:
+        if item is None or (owner_id is not None and item.owner_id != owner_id):
             return None
         item.decision = decision
         # An override carries its own number; accepting keeps the recommended one.
@@ -137,7 +141,12 @@ def record_decision(
         return {**record_summary(item), "result": item.result}
 
 
-def save_estimate(engine, result: dict[str, Any], job_id: UUID | None = None) -> EstimateRecord:
+def save_estimate(
+    engine,
+    result: dict[str, Any],
+    job_id: UUID | None = None,
+    owner_id: UUID | None = None,
+) -> EstimateRecord:
     """Persist one completed estimate. Tolerates partial payloads rather than raising.
 
     History is a side effect of estimating; a schema surprise here must never fail the
@@ -148,6 +157,7 @@ def save_estimate(engine, result: dict[str, Any], job_id: UUID | None = None) ->
     calculation = result.get("calculation") or {}
     provenance = (result.get("evidence") or {}).get("scoring_provenance") or {}
     record = EstimateRecord(
+        owner_id=owner_id,
         job_id=job_id,
         title=str(story.get("title") or "Untitled story")[:500],
         issue_key=(str(story["key"])[:50] if story.get("key") else None),
@@ -183,12 +193,15 @@ def list_estimates(
     recommendation: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    owner_id: UUID | None = None,
 ) -> dict[str, Any]:
     """Search history, newest first, with the total so the UI can paginate honestly."""
     with Session(engine) as session:
         statement = select(EstimateRecord)
         counter = select(func.count()).select_from(EstimateRecord)
         clauses = []
+        if owner_id is not None:
+            clauses.append(col(EstimateRecord.owner_id) == owner_id)
         if query.strip():
             pattern = f"%{query.strip()}%"
             clauses.append(
@@ -219,41 +232,49 @@ def list_estimates(
         }
 
 
-def get_estimate(engine, record_id: UUID) -> dict[str, Any] | None:
+def get_estimate(
+    engine, record_id: UUID, owner_id: UUID | None = None
+) -> dict[str, Any] | None:
     with Session(engine) as session:
         item = session.get(EstimateRecord, record_id)
-        if item is None:
+        if item is None or (owner_id is not None and item.owner_id != owner_id):
             return None
         return {**record_summary(item), "result": item.result}
 
 
-def delete_estimate(engine, record_id: UUID) -> bool:
+def delete_estimate(engine, record_id: UUID, owner_id: UUID | None = None) -> bool:
     with Session(engine) as session:
         item = session.get(EstimateRecord, record_id)
-        if item is None:
+        if item is None or (owner_id is not None and item.owner_id != owner_id):
             return False
         session.delete(item)
         session.commit()
         return True
 
 
-def clear_estimates(engine) -> int:
+def clear_estimates(engine, owner_id: UUID | None = None) -> int:
     with Session(engine) as session:
-        removed = session.exec(select(func.count()).select_from(EstimateRecord)).one()
-        session.exec(delete(EstimateRecord))
+        counter = select(func.count()).select_from(EstimateRecord)
+        statement = delete(EstimateRecord)
+        if owner_id is not None:
+            counter = counter.where(EstimateRecord.owner_id == owner_id)
+            statement = statement.where(EstimateRecord.owner_id == owner_id)
+        removed = session.exec(counter).one()
+        session.exec(statement)
         session.commit()
         return int(removed)
 
 
-def _tally(session, column) -> dict[str, int]:
+def _tally(session, column, owner_id: UUID | None = None) -> dict[str, int]:
     """Count rows per distinct value, in SQL."""
-    rows = session.exec(
-        select(column, func.count()).where(col(column).is_not(None)).group_by(column)
-    ).all()
+    statement = select(column, func.count()).where(col(column).is_not(None))
+    if owner_id is not None:
+        statement = statement.where(EstimateRecord.owner_id == owner_id)
+    rows = session.exec(statement.group_by(column)).all()
     return {str(value): int(count) for value, count in rows if value not in (None, "")}
 
 
-def estimate_stats(engine) -> dict[str, Any]:
+def estimate_stats(engine, owner_id: UUID | None = None) -> dict[str, Any]:
     """Aggregates that turn a log into a calibration record.
 
     Seeing that a team's 8s outnumber everything else, or that a third of estimates end in
@@ -264,7 +285,10 @@ def estimate_stats(engine) -> dict[str, Any]:
     used the tool most and whose calibration data is worth the most.
     """
     with Session(engine) as session:
-        total = int(session.exec(select(func.count()).select_from(EstimateRecord)).one())
+        owned = [] if owner_id is None else [col(EstimateRecord.owner_id) == owner_id]
+        total = int(
+            session.exec(select(func.count()).select_from(EstimateRecord).where(*owned)).one()
+        )
         if not total:
             return {
                 "total": 0, "points": {}, "recommendations": {}, "confidence": {},
@@ -273,48 +297,58 @@ def estimate_stats(engine) -> dict[str, Any]:
                 "override_bias": None, "with_actuals": 0, "actual_accuracy": None,
             }
 
-        points = _tally(session, EstimateRecord.points)
-        recommendations = _tally(session, EstimateRecord.recommendation)
-        confidence = _tally(session, EstimateRecord.confidence)
-        decisions = _tally(session, EstimateRecord.decision)
+        points = _tally(session, EstimateRecord.points, owner_id)
+        recommendations = _tally(session, EstimateRecord.recommendation, owner_id)
+        confidence = _tally(session, EstimateRecord.confidence, owner_id)
+        decisions = _tally(session, EstimateRecord.decision, owner_id)
 
-        scored, filled = session.exec(
-            select(func.sum(EstimateRecord.model_scored), func.sum(EstimateRecord.heuristic_filled))
-        ).one()
+        scored_query = select(
+            func.sum(EstimateRecord.model_scored), func.sum(EstimateRecord.heuristic_filled)
+        )
+        if owner_id is not None:
+            scored_query = scored_query.where(EstimateRecord.owner_id == owner_id)
+        scored, filled = session.exec(scored_query).one()
         factors = int(scored or 0) + int(filled or 0)
 
         # Median without loading the table: skip to the middle row.
+        median_query = select(EstimateRecord.points)
+        if owner_id is not None:
+            median_query = median_query.where(EstimateRecord.owner_id == owner_id)
         median = session.exec(
-            select(EstimateRecord.points)
-            .order_by(col(EstimateRecord.points))
+            median_query.order_by(col(EstimateRecord.points))
             .offset(total // 2)
             .limit(1)
         ).first()
 
-        decided = int(
-            session.exec(
-                select(func.count()).select_from(EstimateRecord)
-                .where(col(EstimateRecord.decision).is_not(None))
-            ).one()
+        decided_query = (
+            select(func.count()).select_from(EstimateRecord)
+            .where(col(EstimateRecord.decision).is_not(None))
         )
+        if owner_id is not None:
+            decided_query = decided_query.where(EstimateRecord.owner_id == owner_id)
+        decided = int(session.exec(decided_query).one())
         overridden = decisions.get("override", 0)
         # How far the team moves the number when they disagree with it. A persistent
         # positive bias means the framework is reading their work as smaller than it is.
-        bias = session.exec(
-            select(func.avg(EstimateRecord.decided_points - EstimateRecord.points))
-            .where(col(EstimateRecord.decision) == "override")
-        ).one() if overridden else None
-
-        with_actuals = int(
-            session.exec(
-                select(func.count()).select_from(EstimateRecord)
-                .where(col(EstimateRecord.actual_points).is_not(None))
-            ).one()
+        bias_query = select(func.avg(EstimateRecord.decided_points - EstimateRecord.points)).where(
+            col(EstimateRecord.decision) == "override"
         )
-        accuracy = session.exec(
-            select(func.avg(func.abs(EstimateRecord.actual_points - EstimateRecord.points)))
+        if owner_id is not None:
+            bias_query = bias_query.where(EstimateRecord.owner_id == owner_id)
+        bias = session.exec(bias_query).one() if overridden else None
+
+        actual_count_query = (
+            select(func.count()).select_from(EstimateRecord)
             .where(col(EstimateRecord.actual_points).is_not(None))
-        ).one() if with_actuals else None
+        )
+        accuracy_query = select(
+            func.avg(func.abs(EstimateRecord.actual_points - EstimateRecord.points))
+        ).where(col(EstimateRecord.actual_points).is_not(None))
+        if owner_id is not None:
+            actual_count_query = actual_count_query.where(EstimateRecord.owner_id == owner_id)
+            accuracy_query = accuracy_query.where(EstimateRecord.owner_id == owner_id)
+        with_actuals = int(session.exec(actual_count_query).one())
+        accuracy = session.exec(accuracy_query).one() if with_actuals else None
 
     return {
         "total": total,

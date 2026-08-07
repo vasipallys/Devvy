@@ -83,6 +83,27 @@ def _add_estimate_decision_columns(connection: Connection) -> None:
         add_column("estimaterecord", column, definition)(connection)
 
 
+def _add_multi_user_ownership(connection: Connection) -> None:
+    """v3 — nullable ownership lets the first registered owner claim legacy data.
+
+    SQLite cannot add a foreign-key constraint with ``ALTER TABLE ADD COLUMN``. The
+    application enforces the relationship for upgraded databases; fresh databases receive
+    the actual foreign keys from SQLModel metadata. Nullable columns are intentional until
+    first-owner setup performs the one-time claim.
+    """
+    for table, column in (
+        ("conversation", "owner_id"),
+        ("message", "author_id"),
+        ("job", "owner_id"),
+        ("estimaterecord", "owner_id"),
+    ):
+        add_column(table, column, "VARCHAR")(connection)
+        if table in _tables(connection) and column in _columns(connection, table):
+            connection.execute(
+                text(f"CREATE INDEX IF NOT EXISTS ix_{table}_{column} ON {table} ({column})")
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -93,6 +114,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=2,
         description="Estimate history records the human decision and the actual outcome",
         apply=_add_estimate_decision_columns,
+    ),
+    Migration(
+        version=3,
+        description="Users, sessions, invitations, sharing, and per-resource ownership",
+        apply=_add_multi_user_ownership,
     ),
 )
 

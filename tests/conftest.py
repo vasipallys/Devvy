@@ -20,3 +20,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 os.environ["PHOENIX_ENABLED"] = "false"
 os.environ["APP_DATA_DIR"] = str(DATA_DIR)
+# Existing workflow tests exercise the legacy compatibility surface. Authentication has its
+# own isolated tests; disabling it here keeps those tests focused on the behavior they own.
+os.environ["AUTH_ENABLED"] = "false"

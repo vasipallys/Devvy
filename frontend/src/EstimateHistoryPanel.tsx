@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { api } from './api'
 import { EstimateResultView, RECOMMENDATIONS } from './EstimateResultView'
+import { ShareButton } from './ShareDialog'
 import type {
   EstimateConfig, EstimateDecision, EstimateHistoryEntry, EstimateHistoryStats,
   EstimateResult, Points,
@@ -256,13 +257,17 @@ export function EstimateHistoryPanel({
         </button>
         <span>{entry ? `Estimated ${relativeTime(entry.created_at)}` : ''}</span>
         <div className="history-detail-actions">
+          {selectedEntry?.access?.owner !== false && <ShareButton resourceType="estimate" resourceId={selectedId}/>}
           {entry && <button className="text-action" onClick={() => download(entry, selected)}>Download JSON</button>}
           {onReEstimate && <button className="text-action" onClick={() => onReEstimate(selected)}>
             <RotateCw size={13} /> Re-estimate this story
           </button>}
         </div>
       </div>
-      {selectedEntry && <DecisionPanel entry={selectedEntry} onDecided={updated => {
+      {selectedEntry?.access?.permission === 'viewer' && <div className="shared-readonly-note">
+        Shared as viewer · You can inspect the evidence but cannot record a team decision.
+      </div>}
+      {selectedEntry && selectedEntry.access?.permission !== 'viewer' && <DecisionPanel entry={selectedEntry} onDecided={updated => {
         setSelectedEntry(updated)
         load()
       }} />}

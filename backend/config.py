@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     # NoDecode lets the validator accept friendly comma-separated .env values.
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:5173"]
 
+    # Authentication is on by default. Tests and deliberately isolated legacy deployments
+    # may disable it explicitly; hosted/non-loopback deployments must keep it enabled.
+    auth_enabled: bool = True
+    auth_secure_cookies: bool = False
+    auth_session_hours: int = 12
+    auth_remember_days: int = 30
+    auth_login_attempts: int = 5
+    auth_login_window_minutes: int = 10
+    max_active_jobs_per_user: int = 8
+
     hf_token: str | None = None
     model_id: str = "google/gemma-3-1b-it"
     model_device: str = "cpu"

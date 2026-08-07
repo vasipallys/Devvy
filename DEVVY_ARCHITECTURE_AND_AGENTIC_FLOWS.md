@@ -129,6 +129,45 @@ flowchart TB
 
 ## 4. Technology stack
 
+### Authentication and access-control flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant UI as React AuthProvider
+    participant API as FastAPI auth boundary
+    participant DB as SQLite identity store
+    participant JR as Durable JobRunner
+
+    U->>UI: Sign in
+    UI->>API: Email and password
+    API->>DB: Rate-limit check and scrypt verification
+    API->>DB: Store hashed opaque session and CSRF digest
+    API-->>UI: HttpOnly session cookie plus CSRF cookie
+    UI->>API: Owned resource request
+    API->>DB: Resolve active session and owner/share permission
+    API-->>UI: Only owned or explicitly shared data
+    U->>UI: Sign out while work is active
+    UI->>U: Keep running, stop requests, or stay signed in
+    alt Keep running
+        UI->>API: Revoke session; retain owned jobs
+        JR->>JR: Continue durable execution
+    else Stop requests
+        UI->>API: Cancel all active jobs owned by user; revoke session
+        API->>JR: Thread-safe cancellation
+    end
+```
+
+The first registered principal becomes the workspace owner and claims nullable records migrated
+from pre-authentication builds. Later users require a hashed, single-use, expiring invitation.
+Roles govern workspace administration; they do not implicitly grant access to another user's
+content. Resource access is separately represented by revocable `viewer` or `editor` grants.
+
+Generated artifacts are authorized through their owner and parent job/conversation, rather than
+being exposed as globally readable static files. Smart Code preview tokens are also bound to the
+user who generated the preview.
+
 | Concern | Technology | Purpose |
 |---|---|---|
 | Frontend | React, TypeScript, Vite | Desktop-style browser experience |
@@ -604,6 +643,12 @@ Operationally, preview-token state is process-local: restarting the backend inva
 ### Implemented controls
 
 - Loopback-only default binding.
+- Opaque server-side sessions in HttpOnly, SameSite cookies; only token digests are stored.
+- Salted scrypt password hashing, login throttling, password rotation, and session revocation.
+- Session-bound CSRF double-submit validation and explicit origin checks.
+- Per-user ownership for conversations, messages, jobs, uploads, estimates, and artifacts.
+- Invitation-based onboarding, owner/admin/member roles, and account deactivation.
+- Revocable viewer/editor resource grants with owner-only destructive deletion.
 - Extension allowlist and 25 MB upload limit.
 - Document extraction character cap.
 - Prompt-injection boundary around all third-party and user-provided evidence.
@@ -617,7 +662,8 @@ Operationally, preview-token state is process-local: restarting the backend inva
 
 ### Production limitations to address for broader deployment
 
-- There is no user authentication or authorization because the present trust model is a single local user.
+- Authentication and authorization are production-oriented for one local process, but session,
+  rate-limit, preview-token, and live-event state need shared infrastructure for horizontal scale.
 - In-process live broadcasts and preview tokens require a shared broker/store before horizontal scaling.
 - Running model inference cannot resume across a backend restart.
 - Smart Code checks structure and write safety; language-specific compilation and tests still need project-aware execution policies.
@@ -625,7 +671,8 @@ Operationally, preview-token state is process-local: restarting the backend inva
 - Primary and reviewer estimation passes share the same model and therefore are not fully independent; they are blind to each other's scores, which is weaker than true model diversity.
 - Estimate history has no retention limit by design; a long-lived installation should gain an archival or export policy.
 - Artifact, upload, and backup retention should be governed by explicit cleanup limits.
-- Any non-loopback deployment requires TLS, authentication, authorization, CSRF/origin policy, secrets management, rate limiting, and tenant-aware storage isolation.
+- Any non-loopback deployment requires TLS, tenant-isolated storage and inference, centralized
+  limits, secrets management, malware scanning, backup/recovery, and external security testing.
 
 ---
 
@@ -652,6 +699,7 @@ For a production multi-user deployment, add metrics for queue wait, model load t
 | File | Responsibility |
 |---|---|
 | `backend/api.py` | Composition root, routes, streaming, uploads, workflow progress mapping |
+| `backend/auth.py` | Users, password hashing, sessions, CSRF, invitations, preferences, sharing, artifacts |
 | `backend/jobs.py` | Durable job persistence, claiming, execution, snapshot/live delivery |
 | `backend/model.py` | Lazy model loading and serialized token generation |
 | `backend/harness.py` | Context budgeting/provenance and run ledger |

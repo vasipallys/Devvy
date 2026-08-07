@@ -19,7 +19,7 @@ import { useCallback, useEffect, useState } from 'react'
  *   #/activity                  request activity
  */
 
-export type Page = 'home' | 'chat' | 'talk' | 'smart-code' | 'estimate-code' | 'activity'
+export type Page = 'home' | 'chat' | 'talk' | 'smart-code' | 'estimate-code' | 'activity' | 'account'
 
 export interface Route {
   page: Page
@@ -36,12 +36,14 @@ const PAGES: Record<string, Page> = {
   'smart-code': 'smart-code',
   estimate: 'estimate-code',
   activity: 'activity',
+  account: 'account',
 }
 
 export function parseRoute(hash: string): Route {
   const segments = hash.replace(/^#\/?/, '').split('/').filter(Boolean)
   const page = PAGES[segments[0] ?? ''] ?? 'home'
   if (page === 'chat') return { page, id: segments[1] }
+  if (page === 'activity') return { page, id: segments[1] }
   if (page === 'estimate-code' && segments[1] === 'history') {
     return { page, view: 'history', id: segments[2] }
   }
@@ -51,6 +53,7 @@ export function parseRoute(hash: string): Route {
 export function buildRoute(route: Route): string {
   if (route.page === 'home') return '#/'
   if (route.page === 'chat') return route.id ? `#/chat/${route.id}` : '#/chat'
+  if (route.page === 'activity') return route.id ? `#/activity/${route.id}` : '#/activity'
   if (route.page === 'estimate-code') {
     if (route.view !== 'history') return '#/estimate'
     return route.id ? `#/estimate/history/${route.id}` : '#/estimate/history'

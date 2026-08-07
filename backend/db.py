@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import Column, JSON, event
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
+from backend.auth import User  # noqa: F401 — registers the foreign-key target in metadata
 from backend.config import get_settings
 
 
@@ -26,6 +27,7 @@ def utc_iso(value: datetime | None) -> str | None:
 
 class Conversation(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
+    owner_id: UUID | None = Field(default=None, foreign_key="user.id", index=True)
     title: str = "New conversation"
     created_at: datetime = Field(default_factory=now)
     updated_at: datetime = Field(default_factory=now)
@@ -34,6 +36,7 @@ class Conversation(SQLModel, table=True):
 class Message(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     conversation_id: UUID = Field(foreign_key="conversation.id", index=True)
+    author_id: UUID | None = Field(default=None, foreign_key="user.id", index=True)
     role: str
     content: str
     created_at: datetime = Field(default_factory=now)
@@ -70,15 +73,17 @@ def init_db() -> None:
     ``create_all`` would leave them untouched — including any column added since.
     """
     # Imported here so every table is registered on SQLModel.metadata before create_all.
-    from backend import estimate_history, jobs  # noqa: F401
+    from backend import auth, estimate_history, jobs  # noqa: F401
     from backend.migrations import run_migrations
 
     SQLModel.metadata.create_all(engine)
     run_migrations(engine)
 
 
-def create_conversation(session: Session, title: str = "New conversation") -> Conversation:
-    item = Conversation(title=title)
+def create_conversation(
+    session: Session, title: str = "New conversation", owner_id: UUID | None = None
+) -> Conversation:
+    item = Conversation(title=title, owner_id=owner_id)
     session.add(item)
     session.commit()
     session.refresh(item)

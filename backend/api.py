@@ -3,16 +3,22 @@ import json
 import logging
 import mimetypes
 import shutil
+import threading
+import time
 from importlib.util import find_spec
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Body, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 from sqlmodel import Session, select
@@ -20,6 +26,35 @@ from sqlmodel import Session, select
 from backend.agent import ChatAgent
 from backend.agent_graph import TalkAgentGraph
 from backend.animation_engine import AnimationEngine
+from backend.auth import (
+    CSRF_COOKIE,
+    SESSION_COOKIE,
+    ArtifactRecord,
+    ResourceShare,
+    UploadRecord,
+    User,
+    aware,
+    authenticate,
+    create_invitation,
+    create_session,
+    create_share,
+    create_user,
+    csrf_valid,
+    list_shares,
+    hash_password,
+    normalize_email,
+    permission_for,
+    public_user,
+    record_artifact,
+    resolve_session,
+    revoke_all_user_sessions,
+    revoke_session,
+    share_dict,
+    sweep_auth_records,
+    user_count,
+    validate_password,
+    verify_password,
+)
 from backend.config import get_settings
 from backend.db import (
     Conversation, Message, create_conversation, engine, init_db, list_messages, now, utc_iso,
@@ -36,7 +71,7 @@ from backend.estimate_code import (
     write_jira_points,
 )
 from backend.estimate_history import (
-    clear_estimates,
+    EstimateRecord, clear_estimates,
     record_decision,
     delete_estimate,
     estimate_stats,
@@ -53,7 +88,7 @@ from backend.estimation_framework import (
     StackProfile,
 )
 from backend.harness import RunLedger, sweep_directory
-from backend.jobs import FINISHED as FINISHED_JOB_STATES, JobContext, JobRunner
+from backend.jobs import FINISHED as FINISHED_JOB_STATES, Job, JobContext, JobRunner
 from backend.model import GemmaRuntime
 from backend.observability import configure_observability
 from backend.schemas import ChatRequest, RenameRequest
@@ -78,6 +113,12 @@ job_runner = JobRunner(engine, retention_days=settings.job_retention_days)
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     init_db()
+    if settings.app_host not in {"127.0.0.1", "localhost", "::1"}:
+        if not settings.auth_enabled:
+            raise RuntimeError("Authentication must be enabled for a non-loopback deployment.")
+        if not settings.auth_secure_cookies:
+            raise RuntimeError("Secure authentication cookies are required off loopback.")
+    await asyncio.to_thread(sweep_auth_records, engine)
     configure_observability(settings, application)
     # Artefact retention runs alongside the job reconciliation below, off the event loop.
     # Doing it at startup rather than on a timer keeps the running application free of a
@@ -114,20 +155,459 @@ app.add_middleware(
 app.mount("/generated", StaticFiles(directory=settings.generated_dir), name="generated")
 
 
+PUBLIC_HTTP_PATHS = {
+    "/api/health",
+    "/api/auth/session",
+    "/api/auth/login",
+    "/api/auth/register",
+}
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+class LoginLimiter:
+    """Small in-process sliding-window limiter for the local authentication boundary."""
+
+    def __init__(self) -> None:
+        self._attempts: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        cutoff = time.monotonic() - settings.auth_login_window_minutes * 60
+        with self._lock:
+            recent = [value for value in self._attempts.get(key, []) if value >= cutoff]
+            if len(recent) >= settings.auth_login_attempts:
+                self._attempts[key] = recent
+                return False
+            recent.append(time.monotonic())
+            self._attempts[key] = recent
+            return True
+
+    def reset(self, key: str) -> None:
+        with self._lock:
+            self._attempts.pop(key, None)
+
+
+login_limiter = LoginLimiter()
+
+
+def _auth_error(status: int, detail: str, code: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"detail": detail, "code": code})
+
+
+def _security_headers(response: Response, path: str) -> Response:
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), geolocation=()")
+    if path.startswith("/api/auth/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return True  # Local CLI and TestClient requests do not necessarily send Origin.
+    parsed = urlparse(origin)
+    return origin in settings.cors_origins or (
+        parsed.scheme in {"http", "https"} and parsed.hostname in {"localhost", "127.0.0.1"}
+    )
+
+
+@app.middleware("http")
+async def authentication_boundary(request: Request, call_next):
+    """Authenticate once, protect state changes with CSRF, and attach the actor to state."""
+    request.state.user = None
+    request.state.auth_session = None
+    if not settings.auth_enabled or request.method == "OPTIONS":
+        return _security_headers(await call_next(request), request.url.path)
+    path = request.url.path
+    if request.method in UNSAFE_METHODS and not _origin_allowed(request.headers.get("origin")):
+        return _auth_error(403, "This origin is not allowed.", "origin_denied")
+    protected = path.startswith("/api/") or path.startswith("/generated/")
+    if not protected or path in PUBLIC_HTTP_PATHS:
+        return _security_headers(await call_next(request), path)
+    resolved = await asyncio.to_thread(
+        resolve_session, engine, request.cookies.get(SESSION_COOKIE)
+    )
+    if resolved is None:
+        return _auth_error(401, "Sign in to continue.", "authentication_required")
+    user, auth_session = resolved
+    request.state.user = user
+    request.state.auth_session = auth_session
+    if path.startswith("/generated/"):
+        filename = path.removeprefix("/generated/")
+        with Session(engine) as session:
+            artifact = session.exec(
+                select(ArtifactRecord).where(ArtifactRecord.filename == filename)
+            ).first()
+        allowed = bool(artifact and artifact.owner_id == user.id)
+        if artifact and not allowed and artifact.job_id:
+            allowed = permission_for(engine, user.id, "job", str(artifact.job_id)) in {
+                "viewer", "editor"
+            }
+        if artifact and not allowed and artifact.conversation_id:
+            allowed = permission_for(
+                engine, user.id, "conversation", str(artifact.conversation_id)
+            ) in {"viewer", "editor"}
+        # Pre-authentication artefacts have no ownership row. Only the workspace owner may
+        # recover those; every newly generated artefact is registered before its URL returns.
+        if not allowed and not (artifact is None and user.role == "owner"):
+            return _auth_error(404, "Generated artefact not found.", "artifact_not_found")
+    if request.method in UNSAFE_METHODS and not csrf_valid(
+        auth_session,
+        request.cookies.get(CSRF_COOKIE),
+        request.headers.get("x-csrf-token"),
+    ):
+        return _auth_error(403, "Refresh the page and try again.", "csrf_failed")
+    return _security_headers(await call_next(request), path)
+
+
+def actor(request: Request) -> User | None:
+    return getattr(request.state, "user", None)
+
+
+def actor_id(request: Request) -> UUID | None:
+    user = actor(request)
+    return user.id if user else None
+
+
+def ensure_job_capacity(owner_id: UUID | None) -> None:
+    if owner_id is not None and job_runner.active_count(owner_id) >= settings.max_active_jobs_per_user:
+        raise HTTPException(
+            429,
+            f"You already have {settings.max_active_jobs_per_user} active requests. "
+            "Wait for one to finish or cancel it in Activity.",
+        )
+
+
+def require_role(request: Request, *roles: str) -> User:
+    user = actor(request)
+    if user is None or user.role not in roles:
+        raise HTTPException(403, "You do not have permission to manage workspace access.")
+    return user
+
+
+def _set_auth_cookies(response: Response, token: str, csrf: str, remember: bool) -> None:
+    max_age = (
+        settings.auth_remember_days * 86400 if remember else settings.auth_session_hours * 3600
+    )
+    common = {
+        "secure": settings.auth_secure_cookies,
+        "samesite": "lax",
+        "path": "/",
+        "max_age": max_age,
+    }
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, **common)
+    response.set_cookie(CSRF_COOKIE, csrf, httponly=False, **common)
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/", samesite="lax")
+    response.delete_cookie(CSRF_COOKIE, path="/", samesite="lax")
+
+
+def _client_hint(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+def _session_payload(user: User | None, *, authenticated: bool) -> dict[str, Any]:
+    return {
+        "authenticated": authenticated,
+        "needs_setup": settings.auth_enabled and user_count(engine) == 0,
+        "auth_enabled": settings.auth_enabled,
+        "user": public_user(user) if user else None,
+        "security": {
+            "session_cookie": "HttpOnly",
+            "csrf": "double-submit",
+            "secure_cookie": settings.auth_secure_cookies,
+        },
+    }
+
+
+@app.get("/api/auth/session")
+def auth_session(request: Request):
+    if not settings.auth_enabled:
+        return _session_payload(None, authenticated=True)
+    resolved = resolve_session(engine, request.cookies.get(SESSION_COOKIE))
+    return _session_payload(resolved[0] if resolved else None, authenticated=bool(resolved))
+
+
+@app.post("/api/auth/register", status_code=201)
+def register_account(request: Request, response: Response, payload: dict = Body(...)):
+    try:
+        user = create_user(
+            engine,
+            email=str(payload.get("email", "")),
+            display_name=str(payload.get("display_name", "")),
+            password=str(payload.get("password", "")),
+            invite_token=str(payload.get("invite_token") or "") or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    token, csrf, _ = create_session(
+        engine,
+        user.id,
+        remember=bool(payload.get("remember", True)),
+        user_agent=request.headers.get("user-agent", ""),
+        ip_hint=_client_hint(request),
+        remember_days=settings.auth_remember_days,
+        session_hours=settings.auth_session_hours,
+    )
+    _set_auth_cookies(response, token, csrf, bool(payload.get("remember", True)))
+    return _session_payload(user, authenticated=True)
+
+
+@app.post("/api/auth/login")
+def login(request: Request, response: Response, payload: dict = Body(...)):
+    email = str(payload.get("email", ""))
+    try:
+        key = f"{_client_hint(request)}:{normalize_email(email)}"
+    except ValueError:
+        key = f"{_client_hint(request)}:invalid"
+    if not login_limiter.allow(key):
+        raise HTTPException(429, "Too many sign-in attempts. Wait a few minutes and try again.")
+    user = authenticate(engine, email, str(payload.get("password", "")))
+    if user is None:
+        raise HTTPException(401, "Email or password is incorrect.")
+    login_limiter.reset(key)
+    remember = bool(payload.get("remember", True))
+    token, csrf, _ = create_session(
+        engine,
+        user.id,
+        remember=remember,
+        user_agent=request.headers.get("user-agent", ""),
+        ip_hint=_client_hint(request),
+        remember_days=settings.auth_remember_days,
+        session_hours=settings.auth_session_hours,
+    )
+    _set_auth_cookies(response, token, csrf, remember)
+    return _session_payload(user, authenticated=True)
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response, payload: dict = Body(default={})):
+    user = actor(request)
+    action = str(payload.get("active_job_action", "keep"))
+    if action not in {"keep", "cancel"}:
+        raise HTTPException(400, "active_job_action must be keep or cancel.")
+    cancelled = job_runner.cancel_all(user.id) if user and action == "cancel" else 0
+    revoke_session(engine, request.cookies.get(SESSION_COOKIE))
+    _clear_auth_cookies(response)
+    return {"signed_out": True, "active_job_action": action, "cancelled_jobs": cancelled}
+
+
+@app.get("/api/auth/users")
+def access_users(request: Request):
+    require_role(request, "owner", "admin")
+    with Session(engine) as session:
+        users = session.exec(select(User).order_by(User.created_at)).all()
+    return [public_user(item) for item in users]
+
+
+@app.patch("/api/auth/users/{user_id}")
+def update_access_user(user_id: UUID, request: Request, payload: dict = Body(...)):
+    manager = require_role(request, "owner", "admin")
+    with Session(engine) as session:
+        target = session.get(User, user_id)
+        if target is None:
+            raise HTTPException(404, "Workspace member not found.")
+        if manager.role != "owner" and target.role in {"owner", "admin"}:
+            raise HTTPException(403, "Only the workspace owner may manage administrators.")
+        if target.id == manager.id and payload.get("active") is False:
+            raise HTTPException(400, "You cannot deactivate your own account.")
+        role = payload.get("role")
+        if role is not None:
+            if role not in {"admin", "member"} or target.role == "owner":
+                raise HTTPException(400, "The workspace owner role cannot be reassigned.")
+            if manager.role != "owner" and role != "member":
+                raise HTTPException(403, "Only the workspace owner may appoint administrators.")
+            target.role = role
+        if "active" in payload:
+            target.active = bool(payload["active"])
+        target.updated_at = now()
+        session.add(target)
+        session.commit()
+        session.refresh(target)
+    if not target.active:
+        revoke_all_user_sessions(engine, target.id)
+    return public_user(target)
+
+
+@app.patch("/api/auth/me")
+def update_me(request: Request, payload: dict = Body(...)):
+    user = actor(request)
+    if user is None:
+        raise HTTPException(401, "Sign in to continue.")
+    allowed_preferences = {
+        "default_workspace", "density", "evidence_expanded", "confirm_external_research"
+    }
+    with Session(engine) as session:
+        item = session.get(User, user.id)
+        if item is None:
+            raise HTTPException(404, "Account not found.")
+        if "display_name" in payload:
+            name = str(payload["display_name"]).strip()
+            if len(name) < 2 or len(name) > 100:
+                raise HTTPException(400, "Display name must be between 2 and 100 characters.")
+            item.display_name = name
+        preferences = dict(item.preferences or {})
+        for key, value in dict(payload.get("preferences") or {}).items():
+            if key in allowed_preferences:
+                preferences[key] = value
+        if preferences.get("density") not in {"comfortable", "compact"}:
+            raise HTTPException(400, "Density must be comfortable or compact.")
+        item.preferences = preferences
+        item.updated_at = now()
+        session.add(item)
+        session.commit()
+        session.refresh(item)
+        return public_user(item)
+
+
+@app.post("/api/auth/me/password")
+def change_password(request: Request, payload: dict = Body(...)):
+    user = actor(request)
+    auth_session_item = getattr(request.state, "auth_session", None)
+    if user is None or auth_session_item is None:
+        raise HTTPException(401, "Sign in to continue.")
+    current_password = str(payload.get("current_password", ""))
+    new_password = str(payload.get("new_password", ""))
+    with Session(engine) as session:
+        item = session.get(User, user.id)
+        if item is None or not verify_password(current_password, item.password_hash):
+            raise HTTPException(400, "Current password is incorrect.")
+        try:
+            validate_password(new_password, item.email)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if verify_password(new_password, item.password_hash):
+            raise HTTPException(400, "Choose a password you have not already used here.")
+        item.password_hash = hash_password(new_password)
+        item.updated_at = now()
+        session.add(item)
+        session.commit()
+    revoked = revoke_all_user_sessions(engine, user.id, except_session_id=auth_session_item.id)
+    return {"changed": True, "other_sessions_revoked": revoked}
+
+
+@app.post("/api/auth/invitations", status_code=201)
+def invite_user(request: Request, payload: dict = Body(...)):
+    manager = require_role(request, "owner", "admin")
+    if manager.role != "owner" and str(payload.get("role", "member")) == "admin":
+        raise HTTPException(403, "Only the workspace owner may invite an administrator.")
+    try:
+        invitation, token = create_invitation(
+            engine,
+            email=str(payload.get("email", "")),
+            role=str(payload.get("role", "member")),
+            invited_by=manager.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "id": str(invitation.id),
+        "email": invitation.email,
+        "role": invitation.role,
+        "expires_at": aware(invitation.expires_at).isoformat(),
+        "invite_token": token,
+        "invite_route": f"#/register?invite={token}",
+    }
+
+
+def _resource_owner(resource_type: str, resource_id: str) -> UUID | None:
+    try:
+        identifier = UUID(resource_id)
+    except ValueError:
+        return None
+    model = {"conversation": Conversation, "job": Job, "estimate": EstimateRecord}.get(resource_type)
+    if model is None:
+        return None
+    with Session(engine) as session:
+        item = session.get(model, identifier)
+        return item.owner_id if item else None
+
+
+def _resource_access(
+    request: Request, resource_type: str, resource_id: UUID, *, edit: bool = False
+) -> bool:
+    if not settings.auth_enabled:
+        return True
+    user = actor(request)
+    if user is None:
+        return False
+    owner_id = _resource_owner(resource_type, str(resource_id))
+    if owner_id == user.id:
+        return True
+    permission = permission_for(engine, user.id, resource_type, str(resource_id))
+    return permission == "editor" if edit else permission in {"viewer", "editor"}
+
+
+@app.post("/api/access/shares", status_code=201)
+def grant_share(request: Request, payload: dict = Body(...)):
+    user = actor(request)
+    if user is None:
+        raise HTTPException(401, "Sign in to continue.")
+    resource_type = str(payload.get("resource_type", ""))
+    resource_id = str(payload.get("resource_id", ""))
+    if _resource_owner(resource_type, resource_id) != user.id:
+        raise HTTPException(403, "Only the owner can share this item.")
+    try:
+        item = create_share(
+            engine,
+            owner_id=user.id,
+            recipient_email=str(payload.get("recipient_email", "")),
+            resource_type=resource_type,
+            resource_id=resource_id,
+            permission=str(payload.get("permission", "viewer")),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return share_dict(engine, item)
+
+
+@app.get("/api/access/shares")
+def my_shares(request: Request, incoming: bool = Query(default=False)):
+    user = actor(request)
+    if user is None:
+        raise HTTPException(401, "Sign in to continue.")
+    return list_shares(engine, user.id, incoming=incoming)
+
+
+@app.delete("/api/access/shares/{share_id}", status_code=204)
+def revoke_share(share_id: UUID, request: Request):
+    user = actor(request)
+    with Session(engine) as session:
+        item = session.get(ResourceShare, share_id)
+        if item is None:
+            raise HTTPException(404, "Share not found.")
+        if user is None or item.owner_id != user.id:
+            raise HTTPException(403, "Only the owner can revoke this share.")
+        session.delete(item)
+        session.commit()
+
+
 def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
 def message_dict(item: Message) -> dict:
+    author_name = None
+    if item.author_id:
+        with Session(engine) as session:
+            author = session.get(User, item.author_id)
+            author_name = author.display_name if author else None
     return {
         "id": str(item.id), "role": item.role, "content": item.content,
         "created_at": utc_iso(item.created_at), "attachments": item.attachments,
         "metadata": item.message_metadata,
+        "author_id": str(item.author_id) if item.author_id else None,
+        "author_name": author_name,
     }
 
 
 @app.get("/api/health")
 def health():
+    if settings.auth_enabled:
+        return {"status": "ok"}
     return {
         "status": "ok",
         "model": settings.model_id,
@@ -167,6 +647,8 @@ def system_status():
             "network": ["Explicit web research", "Optional Jira", "Optional Phoenix traces"],
             "run_ledger": str(run_ledger.directory.resolve()),
             "run_retention_days": settings.agent_run_retention_days,
+            "authentication": "Required" if settings.auth_enabled else "Disabled",
+            "access_model": "Per-user ownership with explicit viewer/editor grants",
         },
         "limits": {
             "upload_mb": 25,
@@ -178,31 +660,36 @@ def system_status():
 
 
 @app.get("/api/conversations")
-def conversations():
+def conversations(request: Request):
     with Session(engine) as session:
-        items = session.exec(select(Conversation).order_by(Conversation.updated_at.desc())).all()
+        statement = select(Conversation).order_by(Conversation.updated_at.desc())
+        if actor_id(request) is not None:
+            statement = statement.where(Conversation.owner_id == actor_id(request))
+        items = session.exec(statement).all()
         return items
 
 
 @app.post("/api/conversations")
-def new_conversation():
+def new_conversation(request: Request):
     with Session(engine) as session:
-        return create_conversation(session)
+        return create_conversation(session, owner_id=actor_id(request))
 
 
 @app.get("/api/conversations/{conversation_id}/messages")
-def messages(conversation_id: UUID):
+def messages(conversation_id: UUID, request: Request):
     with Session(engine) as session:
-        if not session.get(Conversation, conversation_id):
+        if not session.get(Conversation, conversation_id) or not _resource_access(
+            request, "conversation", conversation_id
+        ):
             raise HTTPException(404, "Conversation not found")
         return [message_dict(item) for item in list_messages(session, conversation_id)]
 
 
 @app.patch("/api/conversations/{conversation_id}")
-def rename(conversation_id: UUID, payload: RenameRequest):
+def rename(conversation_id: UUID, payload: RenameRequest, request: Request):
     with Session(engine) as session:
         item = session.get(Conversation, conversation_id)
-        if not item:
+        if not item or not _resource_access(request, "conversation", conversation_id, edit=True):
             raise HTTPException(404, "Conversation not found")
         item.title = payload.title.strip()
         item.updated_at = now()
@@ -213,18 +700,21 @@ def rename(conversation_id: UUID, payload: RenameRequest):
 
 
 @app.delete("/api/conversations/{conversation_id}", status_code=204)
-def delete_conversation(conversation_id: UUID):
+def delete_conversation(conversation_id: UUID, request: Request):
     with Session(engine) as session:
+        conversation = session.get(Conversation, conversation_id)
+        if conversation is None or (
+            actor_id(request) is not None and conversation.owner_id != actor_id(request)
+        ):
+            raise HTTPException(404, "Conversation not found")
         for item in list_messages(session, conversation_id):
             session.delete(item)
-        conversation = session.get(Conversation, conversation_id)
-        if conversation:
-            session.delete(conversation)
+        session.delete(conversation)
         session.commit()
 
 
 @app.post("/api/uploads")
-async def upload(file: UploadFile = File(...)):
+async def upload(request: Request, file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(400, "Filename is required")
     extension = Path(file.filename).suffix.lower()
@@ -243,16 +733,39 @@ async def upload(file: UploadFile = File(...)):
     except Exception:
         destination.unlink(missing_ok=True)
         raise
-    return {"id": upload_id, "name": file.filename, "content_type": file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream", "size": destination.stat().st_size}
+    content_type = (
+        file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
+    )
+    with Session(engine) as session:
+        session.add(
+            UploadRecord(
+                id=UUID(upload_id),
+                owner_id=actor_id(request),
+                filename=file.filename,
+                stored_name=destination.name,
+                content_type=content_type,
+                size=destination.stat().st_size,
+            )
+        )
+        session.commit()
+    return {
+        "id": upload_id, "name": file.filename, "content_type": content_type,
+        "size": destination.stat().st_size,
+    }
 
 
-def attachment_data(ids: list[str]) -> tuple[list[dict], str]:
+def attachment_data(ids: list[str], owner_id: UUID | None = None) -> tuple[list[dict], str]:
     attachments, contexts = [], []
     for upload_id in ids:
         try:
             safe_id = str(UUID(str(upload_id)))
         except (TypeError, ValueError, AttributeError):
             continue
+        if owner_id is not None:
+            with Session(engine) as session:
+                record = session.get(UploadRecord, UUID(safe_id))
+                if record is None or record.owner_id != owner_id:
+                    continue
         matches = list(settings.uploads_dir.glob(f"{safe_id}.*"))
         if not matches:
             continue
@@ -354,9 +867,18 @@ async def run_chat_job(request: dict, context: JobContext) -> dict:
         answer = str(result["messages"][-1].content)
         if not streamed:
             await context.token(answer)
+        await asyncio.to_thread(
+            record_artifact,
+            engine,
+            result.get("artifact_url"),
+            owner_id=context.owner_id,
+            job_id=context.job_id,
+            conversation_id=conversation_id,
+        )
         with Session(engine) as session:
             saved = Message(
                 conversation_id=conversation_id, role="assistant", content=answer,
+                author_id=context.owner_id,
                 message_metadata={
                     "mode": result.get("mode"), "artifact_url": result.get("artifact_url")
                 },
@@ -403,23 +925,34 @@ job_runner.register("chat", run_chat_job)
 
 
 @app.post("/api/chat/jobs", status_code=202)
-def submit_chat(payload: ChatRequest):
+def submit_chat(payload: ChatRequest, request: Request):
     """Accept a chat turn and return immediately with a job to follow.
 
     The user message and conversation are persisted before the response is sent, so the UI
     can render the turn instantly and the work is recoverable even if the client never
     reconnects.
     """
+    owner = actor_id(request)
+    ensure_job_capacity(owner)
     conversation_id = payload.conversation_id
     with Session(engine) as session:
         conversation = session.get(Conversation, conversation_id) if conversation_id else None
+        if conversation and not _resource_access(
+            request, "conversation", conversation.id, edit=True
+        ):
+            raise HTTPException(404, "Conversation not found")
         if not conversation:
-            conversation = create_conversation(session, payload.message[:60])
+            conversation = create_conversation(
+                session, payload.message[:60], owner_id=owner
+            )
         conversation_id = conversation.id
-        attachments, attachment_context = attachment_data(payload.attachment_ids)
+        attachments, attachment_context = attachment_data(
+            payload.attachment_ids, owner
+        )
         user_message = Message(
             conversation_id=conversation_id, role="user",
             content=payload.message, attachments=attachments,
+            author_id=owner,
         )
         session.add(user_message)
         conversation.updated_at = now()
@@ -438,6 +971,7 @@ def submit_chat(payload: ChatRequest):
             "attachment_context": attachment_context,
             "attachment_count": len(attachments),
         },
+        owner_id=owner,
         conversation_id=conversation_id,
     )
     return {
@@ -456,41 +990,62 @@ def submit_chat(payload: ChatRequest):
 
 @app.get("/api/jobs")
 def list_jobs(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     kind: str | None = Query(default=None, max_length=20),
 ):
     """Everything the activity view needs on reopening the browser."""
-    return {"jobs": job_runner.list(limit=limit, kind=kind), "active": job_runner.active_count()}
+    owner = actor_id(request)
+    return {
+        "jobs": job_runner.list(limit=limit, kind=kind, owner_id=owner),
+        "active": job_runner.active_count(owner),
+    }
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: UUID):
+def get_job(job_id: UUID, request: Request):
+    if not _resource_access(request, "job", job_id):
+        raise HTTPException(404, "Job not found")
     detail = job_runner.snapshot(job_id)
     if detail is None:
         raise HTTPException(404, "Job not found")
+    detail["access"] = {
+        "owner": not settings.auth_enabled or job_runner.owner(job_id) == actor_id(request),
+        "permission": permission_for(engine, actor_id(request), "job", str(job_id))
+        if actor_id(request) else None,
+    }
     return detail
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-def cancel_job(job_id: UUID):
+def cancel_job(job_id: UUID, request: Request):
+    if settings.auth_enabled and job_runner.owner(job_id) != actor_id(request):
+        raise HTTPException(404, "Job not found")
     if not job_runner.cancel(job_id):
         raise HTTPException(409, "That request has already finished.")
     return {"status": "cancelling", "job_id": str(job_id)}
 
 
 @app.get("/api/jobs/{job_id}/stream")
-async def stream_job(job_id: UUID):
+async def stream_job(job_id: UUID, request: Request):
     """Attach to a job: a full snapshot, then live deltas until it finishes.
 
     Subscribing happens *before* the snapshot is taken, so no event can fall between the
     two. Deltas already contained in the snapshot are filtered by the client using each
     token's offset, which makes attaching at any point safe and repeatable.
     """
+    if not _resource_access(request, "job", job_id):
+        raise HTTPException(404, "Job not found")
     queue = job_runner.subscribe(job_id)
     snapshot = job_runner.snapshot(job_id)
     if snapshot is None:
         job_runner.unsubscribe(job_id, queue)
         raise HTTPException(404, "Job not found")
+    snapshot["access"] = {
+        "owner": not settings.auth_enabled or job_runner.owner(job_id) == actor_id(request),
+        "permission": permission_for(engine, actor_id(request), "job", str(job_id))
+        if actor_id(request) else None,
+    }
 
     async def events():
         try:
@@ -630,6 +1185,16 @@ async def run_talk_job(request: dict, context: JobContext) -> dict:
             },
         )
         await run.finish_async("completed", summary={"mode": mode})
+        for url in (
+            job_result.get("artifact_url"), job_result.get("audio_url"), job_result.get("video_url")
+        ):
+            await asyncio.to_thread(
+                record_artifact,
+                engine,
+                url,
+                owner_id=context.owner_id,
+                job_id=context.job_id,
+            )
         return job_result
     except asyncio.CancelledError:
         run.finish("cancelled")  # see run_chat_job: no awaiting on the cancellation path
@@ -645,6 +1210,18 @@ job_runner.register("talk", run_talk_job)
 
 @app.websocket("/api/talk/ws")
 async def talk_socket(websocket: WebSocket):
+    if not _origin_allowed(websocket.headers.get("origin")):
+        await websocket.close(code=4403, reason="Origin is not allowed")
+        return
+    owner: UUID | None = None
+    if settings.auth_enabled:
+        resolved = await asyncio.to_thread(
+            resolve_session, engine, websocket.cookies.get(SESSION_COOKIE)
+        )
+        if resolved is None:
+            await websocket.close(code=4401, reason="Authentication required")
+            return
+        owner = resolved[0].id
     await websocket.accept()
     audio_buffer = bytearray()
     history: list[dict[str, str]] = []
@@ -670,12 +1247,19 @@ async def talk_socket(websocket: WebSocket):
             raise ValueError("Talk messages support up to 10 attachments")
         attachment_context = ""
         if mode != "talk" and requested_ids:
-            attachments, attachment_context = attachment_data(requested_ids)
+            attachments, attachment_context = attachment_data(requested_ids, owner)
             if len(attachments) != len(requested_ids):
                 raise ValueError("One or more selected attachments are no longer available")
 
         await send("transcript", content=transcript)
         await send("state", value="thinking")
+        if owner is not None and job_runner.active_count(owner) >= settings.max_active_jobs_per_user:
+            await send(
+                "error",
+                message="Too many active requests. Wait for one to finish or cancel it in Activity.",
+            )
+            await send("state", value="idle")
+            return
         job = job_runner.submit(
             "talk",
             transcript[:120],
@@ -686,6 +1270,7 @@ async def talk_socket(websocket: WebSocket):
                 "attachment_context": attachment_context,
                 "attachment_count": len(requested_ids),
             },
+            owner_id=owner,
         )
         await send("job_started", job_id=str(job.id))
         queue = job_runner.subscribe(job.id)
@@ -808,7 +1393,11 @@ async def run_smart_code_job(request: dict, context: JobContext) -> dict:
     def progress(event: dict):
         progress_queue.put_nowait(event)
 
-    task = asyncio.create_task(smart_code_service.preview(payload, progress))
+    task = asyncio.create_task(
+        smart_code_service.preview(
+            payload, progress, str(context.owner_id) if context.owner_id else None
+        )
+    )
     elapsed = 0
     emitted: set[str] = {"classify"}
     stages: dict[str, str] = {"classify": "completed"}
@@ -876,17 +1465,20 @@ job_runner.register("smart-code", run_smart_code_job)
 
 
 @app.post("/api/smart-code/jobs", status_code=202)
-def submit_smart_code(payload: SmartCodeRequest):
+def submit_smart_code(payload: SmartCodeRequest, request: Request):
+    owner = actor_id(request)
+    ensure_job_capacity(owner)
     job = job_runner.submit(
-        "smart-code", payload.objective[:120], payload.model_dump(mode="json")
+        "smart-code", payload.objective[:120], payload.model_dump(mode="json"), owner_id=owner
     )
     return {"job_id": str(job.id)}
 
 
 @app.post("/api/smart-code/apply")
-def smart_code_apply(payload: SmartCodeApplyRequest):
+def smart_code_apply(payload: SmartCodeApplyRequest, request: Request):
     try:
-        return smart_code_service.apply(payload)
+        owner = actor_id(request)
+        return smart_code_service.apply(payload, str(owner) if owner else None)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -1026,7 +1618,7 @@ async def estimate_one(story, context: JobContext, index: int, total: int) -> di
         )
         try:
             record = await asyncio.to_thread(
-                save_estimate, engine, result, context.job_id
+                save_estimate, engine, result, context.job_id, context.owner_id
             )
             result["history_id"] = str(record.id)
         except Exception:
@@ -1082,26 +1674,32 @@ async def run_estimate_job(request: dict, context: JobContext) -> dict:
 job_runner.register("estimate", run_estimate_job)
 
 
-def submit_estimate_job(stories: list) -> dict:
+def submit_estimate_job(stories: list, owner_id: UUID | None = None) -> dict:
     title = stories[0].title if len(stories) == 1 else f"{len(stories)} stories"
     job = job_runner.submit(
-        "estimate", title, {"stories": [item.model_dump(mode="json") for item in stories]}
+        "estimate", title, {"stories": [item.model_dump(mode="json") for item in stories]},
+        owner_id=owner_id,
     )
     return {"job_id": str(job.id), "count": len(stories)}
 
 
 @app.post("/api/estimate-code/jobs", status_code=202)
-def submit_estimate(payload: EstimateRequest):
-    return submit_estimate_job([payload.story])
+def submit_estimate(payload: EstimateRequest, request: Request):
+    owner = actor_id(request)
+    ensure_job_capacity(owner)
+    return submit_estimate_job([payload.story], owner)
 
 
 @app.post("/api/estimate-code/batch-jobs", status_code=202)
-def submit_estimate_batch(payload: BatchEstimateRequest):
-    return submit_estimate_job(list(payload.stories))
+def submit_estimate_batch(payload: BatchEstimateRequest, request: Request):
+    owner = actor_id(request)
+    ensure_job_capacity(owner)
+    return submit_estimate_job(list(payload.stories), owner)
 
 
 @app.get("/api/estimate-code/history")
 def estimate_history(
+    request: Request,
     query: str = Query(default="", max_length=200),
     source: str | None = Query(default=None, max_length=20),
     points: int | None = Query(default=None, ge=1, le=34),
@@ -1113,25 +1711,33 @@ def estimate_history(
     return list_estimates(
         engine, query=query, source=source, points=points,
         recommendation=recommendation, limit=limit, offset=offset,
+        owner_id=actor_id(request),
     )
 
 
 @app.get("/api/estimate-code/history/stats")
-def estimate_history_stats():
+def estimate_history_stats(request: Request):
     """Aggregates that let a team see how they estimate, not just what they estimated."""
-    return estimate_stats(engine)
+    return estimate_stats(engine, actor_id(request))
 
 
 @app.get("/api/estimate-code/history/{record_id}")
-def estimate_history_detail(record_id: UUID):
+def estimate_history_detail(record_id: UUID, request: Request):
+    if not _resource_access(request, "estimate", record_id):
+        raise HTTPException(404, "That estimate is no longer in history.")
     record = get_estimate(engine, record_id)
     if record is None:
         raise HTTPException(404, "That estimate is no longer in history.")
+    record["access"] = {
+        "owner": not settings.auth_enabled or _resource_owner("estimate", str(record_id)) == actor_id(request),
+        "permission": permission_for(engine, actor_id(request), "estimate", str(record_id))
+        if actor_id(request) else None,
+    }
     return record
 
 
 @app.post("/api/estimate-code/history/{record_id}/decision")
-def estimate_history_decision(record_id: UUID, payload: dict = Body(...)):
+def estimate_history_decision(record_id: UUID, request: Request, payload: dict = Body(...)):
     """Record what the team decided. This is the step that closes the pipeline.
 
     Every estimate ends at "human decision required". Without somewhere to put the answer the
@@ -1139,6 +1745,8 @@ def estimate_history_decision(record_id: UUID, payload: dict = Body(...)):
     rather than whether the estimate held.
     """
     decision = str(payload.get("decision", "")).strip()
+    if not _resource_access(request, "estimate", record_id, edit=True):
+        raise HTTPException(404, "That estimate is no longer in history.")
     points = payload.get("points")
     actual = payload.get("actual_points")
     if decision == "override" and points is None:
@@ -1158,16 +1766,16 @@ def estimate_history_decision(record_id: UUID, payload: dict = Body(...)):
 
 
 @app.delete("/api/estimate-code/history/{record_id}", status_code=204)
-def estimate_history_delete(record_id: UUID):
-    if not delete_estimate(engine, record_id):
+def estimate_history_delete(record_id: UUID, request: Request):
+    if not delete_estimate(engine, record_id, actor_id(request)):
         raise HTTPException(404, "That estimate is no longer in history.")
 
 
 @app.post("/api/estimate-code/history/clear")
-def estimate_history_clear(payload: dict = Body(default={})):
+def estimate_history_clear(request: Request, payload: dict = Body(default={})):
     if not payload.get("confirm"):
         raise HTTPException(400, "Explicit confirmation is required to clear history.")
-    return {"deleted": clear_estimates(engine)}
+    return {"deleted": clear_estimates(engine, actor_id(request))}
 
 
 @app.post("/api/estimate-code/upload/parse")
@@ -1184,13 +1792,15 @@ async def estimate_upload(file: UploadFile = File(...)):
 
 
 @app.post("/api/estimate-code/upload/estimate", status_code=202)
-def estimate_upload_rows(payload: dict = Body(...)):
+def estimate_upload_rows(request: Request, payload: dict = Body(...)):
     try:
         stack = StackProfile.model_validate(payload.get("stack") or {})
         stories = rows_to_stories(payload.get("rows") or [], payload.get("mapping") or {}, stack)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return submit_estimate_job(stories)
+    owner = actor_id(request)
+    ensure_job_capacity(owner)
+    return submit_estimate_job(stories, owner)
 
 
 @app.get("/api/estimate-code/jira/issues")

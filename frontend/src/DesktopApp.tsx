@@ -1,4 +1,6 @@
 import { ActivityScreen } from './ActivityScreen'
+import { AccountDock } from './AccountDock'
+import { AccountScreen } from './AccountScreen'
 import { App as ChatApp } from './App'
 import { ErrorBoundary } from './ErrorBoundary'
 import { EstimateCodeScreen } from './EstimateCodeScreen'
@@ -19,7 +21,8 @@ export function DesktopApp() {
 
   // Keyed per page so navigating away from a crashed screen clears the boundary, and a
   // crash in one workspace can never blank out the others.
-  return <ErrorBoundary key={route.page} onHome={route.page === 'home' ? undefined : home}>
+  return <>
+  <ErrorBoundary key={route.page} onHome={route.page === 'home' ? undefined : home}>
     {route.page === 'chat'
       ? <ChatApp
           onHome={home}
@@ -38,7 +41,9 @@ export function DesktopApp() {
           />
       : route.page === 'activity'
         ? <ActivityScreen onHome={home}
+            initialJobId={route.id}
             onOpenConversation={id => navigate({ page: 'chat', id })} />
+      : route.page === 'account' ? <AccountScreen onHome={home}/>
       : <HomeScreen
           activeJobs={active}
           onChat={() => navigate({ page: 'chat' })}
@@ -48,4 +53,6 @@ export function DesktopApp() {
           onActivity={() => navigate({ page: 'activity' })}
         />}
   </ErrorBoundary>
+  <AccountDock onAccount={() => navigate({ page: 'account' })}/>
+  </>
 }

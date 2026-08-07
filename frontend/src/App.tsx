@@ -5,6 +5,7 @@ import { api, API, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { Tooltip } from './Tooltip'
 import { SystemStatusChip } from './SystemStatusChip'
+import { ShareButton } from './ShareDialog'
 import { isJobActive, type AgentEvent, type Attachment, type Conversation, type Message, type Mode } from './types'
 
 const modes: { id: Mode; label: string; icon: typeof Bot }[] = [
@@ -200,7 +201,7 @@ export function App({ onHome, initialConversationId, onConversationChange }: {
       <div className="local-badge"><span className="pulse"/><div><b>Local workspace</b><small>Private on your machine</small></div></div>
     </aside>
     <main>
-      <header><button className="icon" aria-label="Toggle navigation" onClick={() => setSidebar(!sidebar)}><Menu size={19}/></button>{onHome && <button className="icon" title="Home" onClick={onHome}><Home size={18}/></button>}<div className="workspace-title"><b>Chat</b><span>Grounded local assistant</span></div><div className="header-spacer"/><SystemStatusChip/></header>
+      <header><button className="icon" aria-label="Toggle navigation" onClick={() => setSidebar(!sidebar)}><Menu size={19}/></button>{onHome && <button className="icon" title="Home" onClick={onHome}><Home size={18}/></button>}<div className="workspace-title"><b>Chat</b><span>Grounded local assistant</span></div><div className="header-spacer"/>{activeId && conversations.some(item => item.id === activeId) && <ShareButton resourceType="conversation" resourceId={activeId}/>}<SystemStatusChip/></header>
       <section className="conversation">
         {!messages.length ? <div className="welcome"><div className="orb"><Sparkles size={31}/></div><h1>What can I help you build?</h1><p>Chat privately with Devvy, write production code, research the web, analyze documents, or generate images.</p><div className="suggestions">{[
           ['Build an API', 'Create a FastAPI service with authentication', Code2], ['Analyze a document', 'Summarize and extract key findings', FileText],

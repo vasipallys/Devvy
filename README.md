@@ -70,6 +70,10 @@ not appear frozen.
 
    This starts Vite and opens Devvy in your default browser.
 
+6. On first launch, create the workspace owner account. It securely claims conversations,
+   jobs, and estimates from older single-user builds. Add other users with expiring invitations
+   from **Account & access**.
+
 The API listens on `http://127.0.0.1:8765`, Swagger UI is available at
 `http://127.0.0.1:8765/docs`, and Vite uses `http://localhost:5173`. The first model-backed
 request downloads and loads Gemma, so it is slower than later requests.
@@ -84,8 +88,8 @@ npm run preview
 
 `build` emits a static bundle to `frontend/dist/`, and `preview` serves it. Because the whole
 frontend is static files, you can also serve `dist/` with any web server. The backend must be
-running either way; the API base URL comes from `VITE_API_URL` and defaults to
-`http://127.0.0.1:8765`.
+running either way; the API base URL comes from `VITE_API_URL` and otherwise uses port `8765`
+on the frontend's hostname so authentication cookies remain first-party.
 
 Smart Code takes filesystem paths as text, since a browser cannot read a real path from a file
 picker. Enter an absolute path for the workspace folder; target files may be absolute or relative
@@ -108,6 +112,7 @@ instead of losing the text response.
 ```text
 backend/
   api.py                 FastAPI composition root and transport protocols
+  auth.py                Users, sessions, invitations, preferences, and resource grants
   model.py               Shared lazy Gemma runtime and serialized generation
   agent.py               Chat/code/document/research/image LangGraph agent
   agent_graph.py         Talk companion LangGraph agent
@@ -129,7 +134,8 @@ tests/                    Backend API, routing, safety, and workflow tests
 
 ```mermaid
 flowchart LR
-  UI["React in the browser"] -->|"HTTP / SSE"| API["FastAPI"]
+  USER["Authenticated user"] --> UI["React in the browser"]
+  UI -->|"HttpOnly session + CSRF / HTTP / SSE"| API["FastAPI"]
   UI -->|"WebSocket"| API
   API --> CHAT["Chat agent"]
   API --> TALK["Talk agent"]
@@ -139,7 +145,9 @@ flowchart LR
   TALK --> MODEL
   SMART --> MODEL
   EST --> MODEL
-  CHAT --> DB["SQLite history"]
+  API --> AUTH["Ownership and explicit access grants"]
+  AUTH --> DB["SQLite identity, jobs, and history"]
+  CHAT --> DB
   CHAT --> DOC["Local document extraction"]
   CHAT --> WEB["Explicit web research"]
   CHAT --> IMG["Optional local Diffusers"]
@@ -176,6 +184,27 @@ otherwise would be worse than saying so.
 Work runs one job at a time. The shared Gemma runtime already serializes generation behind a
 single lock, so a wider pool would only queue inside the model while making progress reporting
 dishonest.
+
+Signing out is explicit when work is active: the user chooses either **Keep running & sign out**
+or **Stop requests & sign out**. Kept work remains owned by that account and appears again after
+the next login; stopping cancels every queued or running job owned by the user before the session
+is revoked.
+
+## Authentication and access management
+
+- The first account is the workspace owner. Later accounts require a hashed, single-use,
+  expiring invitation token.
+- Passwords are salted scrypt hashes. Opaque session tokens are stored only as SHA-256 digests
+  and delivered in `HttpOnly`, `SameSite=Lax` cookies.
+- Every authenticated write requires a CSRF cookie/header pair bound to the server-side session.
+- Conversations, uploads, jobs, estimates, and generated artifacts carry an owner. Owned lists
+  and estimation statistics are filtered in SQL.
+- Owners can grant an existing member `viewer` or `editor` access to a conversation, job, or
+  estimate. Sharing never transfers ownership; destructive deletion remains owner-only.
+- Account & access provides preferences, password rotation, roles, account deactivation,
+  invitations, a sharing inbox/outbox, and revocation.
+- Login attempts are rate limited. Expired sessions and invitations are swept at startup.
+- Devvy refuses to bind beyond loopback unless authentication and secure cookies are enabled.
 
 ## Agent engineering and evidence
 
@@ -367,9 +396,16 @@ Copy `.env.example` to `.env`. The most commonly tuned values are:
 | `SMART_CODE_MAX_OUTPUT_TOKENS` | `4096` | Smart Code structured-output ceiling |
 | `ESTIMATE_MAX_OUTPUT_TOKENS` | `3072` | Estimation structured-output ceiling |
 | `AGENT_RUN_RETENTION_DAYS` | `30` | Privacy-safe trajectory ledger retention |
+| `AUTH_ENABLED` | `true` | Require authenticated principals and ownership checks |
+| `AUTH_SECURE_COOKIES` | `false` | Enable behind HTTPS; required beyond loopback |
+| `AUTH_SESSION_HOURS` | `12` | Non-persistent session lifetime |
+| `AUTH_REMEMBER_DAYS` | `30` | Persistent session lifetime |
+| `AUTH_LOGIN_ATTEMPTS` | `5` | Sign-in attempts per identity/window |
+| `AUTH_LOGIN_WINDOW_MINUTES` | `10` | Login throttling window |
+| `MAX_ACTIVE_JOBS_PER_USER` | `8` | Per-user durable-queue backpressure |
 | `APP_HOST` / `APP_PORT` | `127.0.0.1` / `8765` | API bind address |
 | `APP_DATA_DIR` | `./data` | Database, uploads, media, backups, evidence |
-| `VITE_API_URL` | `http://127.0.0.1:8765` | Renderer API URL, set at frontend build time |
+| `VITE_API_URL` | same host, port `8765` | Renderer API URL, set at frontend build time |
 | `PHOENIX_ENABLED` | `true` | Attempt local tracing without making it required |
 
 See [`.env.example`](.env.example) and the configuration catalog in
@@ -392,11 +428,13 @@ data/
   smart-code/runs/
 ```
 
-The current application is a trusted single-user local design. The API has no authentication,
-authorization, tenancy, rate limiting, or malware scanner and should remain bound to loopback.
-Before exposing it to a LAN or the internet, add authenticated principals, per-user authorization
-and storage isolation, request/rate limits, hardened egress policy, upload scanning, secret
-management, TLS, audit retention, and a production database.
+The application has authenticated principals, per-user ownership, explicit viewer/editor grants,
+CSRF/origin controls, login throttling, and generated-artifact authorization. It remains a local
+modular monolith. Before exposing it to a LAN or the internet, add TLS termination, a shared
+session/queue/event store, tenant-level database and inference isolation, centralized rate limits,
+secrets management, upload quarantine/malware scanning, audit export, backup/recovery, and
+external penetration testing. Hosted Smart Code additionally requires OS/container isolation and
+a workspace capability policy.
 
 There is no packaged installer. `npm run build` produces a static frontend bundle, but nothing
 bundles, installs, or supervises Python, the backend dependencies, the optional media tools, or the

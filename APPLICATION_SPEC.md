@@ -59,6 +59,14 @@ single-page application, built by Vite and opened in an ordinary browser, provid
 
 ### 2.3 Actors
 
+Authentication refines the human actor into four authorization views:
+
+- **Workspace owner** — first registered principal; owns legacy data and manages administrators.
+- **Administrator** — invites and manages members without inheriting their private resources.
+- **Member** — owns personal conversations, jobs, uploads, estimates, and generated artifacts.
+- **Shared viewer/editor** — receives an explicit grant to one resource. Sharing never transfers
+  ownership, and destructive deletion remains owner-only.
+
 - **Local user** — owns the machine, supplies paths, approves writes, verifies output.
 - **Local API** — validates input, orchestrates workflows, owns persistence, protects side effects.
 - **Local model** — proposes natural-language or structured output. It has no filesystem, network,
@@ -69,7 +77,7 @@ single-page application, built by Vite and opened in an ordinary browser, provid
 
 ### 2.4 Non-goals in 0.1.0
 
-- Multi-user accounts, authentication, authorization, or tenancy.
+- Internet-scale tenancy or horizontally scaled authentication/session infrastructure.
 - Internet-facing deployment.
 - Autonomous code writes without preview and human approval.
 - Executing arbitrary generated code, or running project tests/builds as verification.
@@ -342,6 +350,11 @@ rather than reporting a generic failure; a compact model otherwise reproduces th
 | `APP_HOST` / `APP_PORT` | `127.0.0.1` / `8765` | Bind address |
 | `APP_DATA_DIR` | `./data` | Root for DB, uploads, generated media, ledger |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowlist |
+| `AUTH_ENABLED` | `true` | Authentication and per-resource authorization |
+| `AUTH_SECURE_COOKIES` | `false` | HTTPS-only cookies; mandatory beyond loopback |
+| `AUTH_SESSION_HOURS` / `AUTH_REMEMBER_DAYS` | `12` / `30` | Session lifetimes |
+| `AUTH_LOGIN_ATTEMPTS` / `AUTH_LOGIN_WINDOW_MINUTES` | `5` / `10` | Login throttling |
+| `MAX_ACTIVE_JOBS_PER_USER` | `8` | Per-user queue backpressure |
 | `HF_TOKEN` | none | Hugging Face read token |
 | `MODEL_ID` | `google/gemma-3-1b-it` | Chat model |
 | `MODEL_DEVICE` / `MODEL_DTYPE` | `cpu` / `float32` | Placement and precision |
@@ -367,7 +380,8 @@ rather than reporting a generic failure; a compact model otherwise reproduces th
 | `PHOENIX_ENABLED` | `true` | Tracing switch |
 | `PHOENIX_COLLECTOR_ENDPOINT` | `http://127.0.0.1:6006/v1/traces` | OTLP endpoint |
 
-Frontend configuration is `VITE_API_URL`, defaulting to `http://127.0.0.1:8765`.
+Frontend configuration is `VITE_API_URL`; without it, the client uses port `8765` on the page's
+hostname so cookies stay first-party.
 
 ### 5.1 CORS
 
@@ -410,8 +424,15 @@ emits one event per pipeline stage per story.
 
 | Table | Columns |
 | --- | --- |
-| `conversation` | `id` UUID pk, `title`, `created_at`, `updated_at` |
-| `message` | `id` UUID pk, `conversation_id` FK indexed, `role`, `content`, `created_at`, `attachments` JSON, `metadata` JSON (attribute `message_metadata`) |
+| `user` | identity, scrypt password hash, owner/admin/member role, active flag, preferences |
+| `authsession` | hashed opaque token, CSRF digest, expiry, revocation, last-seen metadata |
+| `invitation` | intended email/role, hashed single-use token, expiry and acceptance |
+| `resourceshare` | resource type/id, owner, recipient, viewer/editor permission |
+| `conversation` | `id` UUID pk, `owner_id`, `title`, `created_at`, `updated_at` |
+| `message` | `id`, conversation FK, author FK, role, content, timestamps, attachments and metadata |
+| `job` | durable request/result/event state plus `owner_id` |
+| `estimaterecord` | complete estimate plus owner and calibration fields |
+| `uploadrecord` / `artifactrecord` | file ownership and parent provenance |
 
 Messages are always listed ordered by `created_at`. Only Chat persists; Talk history is
 connection-scoped and MUST NOT be written to disk.
@@ -427,6 +448,7 @@ are the largest of them.
 | Jobs and their events | `JOB_RETENTION_DAYS` (7) | Startup reconciliation, set-based |
 | Run ledger JSONL | `AGENT_RUN_RETENTION_DAYS` (30) | `RunLedger` construction |
 | Uploads and generated media | `UPLOAD_RETENTION_DAYS` (7) | Startup, off the event loop |
+| Sessions and invitations | fixed credential expiry | Startup authentication sweep |
 | Estimate history | none, by design | Never — an estimate is the artefact a team refers back to, and it is small |
 | Smart Code previews | `PREVIEW_TTL` (30 min) | On preview, **and enforced again at apply** |
 
@@ -445,6 +467,14 @@ All endpoints are under `http://127.0.0.1:8765`.
 | --- | --- | --- |
 | GET | `/api/health` | Liveness, model id, load state, load error |
 | GET | `/api/system/status` | Secret-free capability and trust metadata |
+| GET | `/api/auth/session` | Setup/authentication state and current public user |
+| POST | `/api/auth/register` / `/api/auth/login` | First-owner/invited registration and login |
+| POST | `/api/auth/logout` | Revoke session after keep/cancel active-job policy |
+| PATCH | `/api/auth/me` | Profile and personalization |
+| POST | `/api/auth/me/password` | Rotate password and revoke other sessions |
+| GET/PATCH | `/api/auth/users[/{id}]` | Owner/admin member directory and roles |
+| POST | `/api/auth/invitations` | Create a single-use expiring invitation |
+| GET/POST/DELETE | `/api/access/shares` | List, grant, and revoke resource access |
 | GET | `/api/jobs` | Job list plus active count (drives the close guard) |
 | GET | `/api/jobs/{id}` | Job detail: status, output, result, evidence |
 | GET | `/api/jobs/{id}/stream` | Snapshot then live deltas |
@@ -1129,6 +1159,11 @@ lines and supports `AbortSignal`.
 | Control | Rule |
 | --- | --- |
 | Binding | Loopback only by default |
+| Authentication | Opaque HttpOnly session cookie; server stores only its SHA-256 digest |
+| Passwords | Per-password salted scrypt hash; 12-character minimum; login throttling |
+| CSRF and origin | SameSite cookie plus session-bound double-submit token; origin allowlist |
+| Ownership | SQL-level filtering for conversations, jobs, estimate history, uploads, artifacts |
+| Sharing | Explicit resource viewer/editor grants; revocable; deletion remains owner-only |
 | CORS | Settings allowlist plus loopback regex; `null` origin forbidden |
 | Uploads | Extension allowlist, 25 MB cap, UUID-named storage, id validation |
 | Research egress | http(s) only, private/loopback/link-local/reserved IPs blocked, 6-hop redirect cap with re-validation, 2 MB cap, content-type restriction |
@@ -1143,11 +1178,13 @@ lines and supports `AbortSignal`.
 
 ### 13.1 Production hardening
 
-The current design is a trusted, single-user, loopback application. The API has no authentication,
-authorization, tenancy, rate limiting, or malware scanning. Before exposing it beyond loopback, add
-authenticated principals, per-user authorization and storage isolation, request and rate limits, a
-hardened egress policy, upload scanning, secret management, TLS, audit retention, and a production
-database. There is no packaged installer and nothing supervises the Python process.
+The current design is an authenticated local modular monolith. It enforces per-user ownership,
+explicit resource grants, login throttling, CSRF/origin checks, and generated-artifact access.
+Before exposing it beyond loopback, add TLS, shared session/queue/event infrastructure,
+tenant-level database and inference isolation, centralized limits, hardened egress, malware
+scanning, secrets management, audit export, backup/recovery, and penetration testing. The server
+refuses a non-loopback bind unless authentication and secure cookies are enabled. There is no
+packaged installer and nothing supervises the Python process.
 
 ---
 

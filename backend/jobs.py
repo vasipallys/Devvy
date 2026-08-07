@@ -32,6 +32,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import Column, JSON, delete, func, update
 from sqlmodel import Field, Session, SQLModel, col, select
 
+from backend.auth import User  # noqa: F401 — registers the foreign-key target in metadata
 from backend.db import utc_iso
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ def now() -> datetime:
 
 class Job(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
+    owner_id: UUID | None = Field(default=None, foreign_key="user.id", index=True)
     kind: str = Field(index=True)
     status: str = Field(default="queued", index=True)
     title: str = ""
@@ -145,9 +147,12 @@ def job_detail(job: Job, events: list[JobEvent]) -> dict[str, Any]:
 class JobContext:
     """Handed to a handler so it can report progress without knowing about transports."""
 
-    def __init__(self, runner: "JobRunner", job_id: UUID, started: float):
+    def __init__(
+        self, runner: "JobRunner", job_id: UUID, started: float, owner_id: UUID | None = None
+    ):
         self.runner = runner
         self.job_id = job_id
+        self.owner_id = owner_id
         self._started = started
         self._seq = 0
         self._buffer: list[str] = []
@@ -368,12 +373,22 @@ class JobRunner:
 
     # -- public API --------------------------------------------------------------------
 
-    def submit(self, kind: str, title: str, request: dict, **columns: Any) -> Job:
+    def submit(
+        self,
+        kind: str,
+        title: str,
+        request: dict,
+        *,
+        owner_id: UUID | None = None,
+        **columns: Any,
+    ) -> Job:
         """Persist a queued job and hand it to the worker. Returns immediately."""
         if kind not in self.handlers:
             raise ValueError(f"No handler is registered for job kind {kind!r}")
         with Session(self.engine) as session:
-            job = Job(kind=kind, title=title[:200], request=request, **columns)
+            job = Job(
+                kind=kind, title=title[:200], request=request, owner_id=owner_id, **columns
+            )
             session.add(job)
             session.commit()
             session.refresh(job)
@@ -393,21 +408,42 @@ class JobRunner:
             ).all()
             return job_detail(job, list(events))
 
-    def list(self, limit: int = 50, kind: str | None = None) -> list[dict[str, Any]]:
+    def list(
+        self, limit: int = 50, kind: str | None = None, owner_id: UUID | None = None
+    ) -> list[dict[str, Any]]:
         with Session(self.engine) as session:
             statement = select(Job).order_by(Job.created_at.desc()).limit(limit)
             if kind:
                 statement = statement.where(Job.kind == kind)
+            if owner_id is not None:
+                statement = statement.where(Job.owner_id == owner_id)
             return [job_summary(item) for item in session.exec(statement).all()]
 
-    def active_count(self) -> int:
+    def active_count(self, owner_id: UUID | None = None) -> int:
         with Session(self.engine) as session:
-            return int(
-                session.exec(
-                    select(func.count()).select_from(Job)
-                    .where(col(Job.status).in_(("queued", "running")))
-                ).one()
+            statement = (
+                select(func.count()).select_from(Job)
+                .where(col(Job.status).in_(("queued", "running")))
             )
+            if owner_id is not None:
+                statement = statement.where(Job.owner_id == owner_id)
+            return int(
+                session.exec(statement).one()
+            )
+
+    def owner(self, job_id: UUID) -> UUID | None:
+        with Session(self.engine) as session:
+            job = session.get(Job, job_id)
+            return job.owner_id if job else None
+
+    def cancel_all(self, owner_id: UUID) -> int:
+        with Session(self.engine) as session:
+            ids = session.exec(
+                select(Job.id).where(
+                    Job.owner_id == owner_id, col(Job.status).in_(("queued", "running"))
+                )
+            ).all()
+        return sum(1 for job_id in ids if self.cancel(job_id))
 
     def cancel(self, job_id: UUID) -> bool:
         """Cancel a queued or running job. Returns False when it is already finished."""
@@ -417,7 +453,11 @@ class JobRunner:
                 return False
             status = job.status
         if self._current and self._current[0] == job_id:
-            self._current[1].cancel()
+            task = self._current[1]
+            if self._loop and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
             return True
         if status == "running":
             # Claimed, but its task is not registered yet: the worker marks a job running in a
@@ -540,7 +580,7 @@ class JobRunner:
             with contextlib.suppress(asyncio.CancelledError, TimeoutError):
                 await asyncio.wait_for(asyncio.shield(self._worker), STOP_TIMEOUT_SECONDS)
 
-    def claim_next(self) -> tuple[UUID, str, dict] | None:
+    def claim_next(self) -> tuple[UUID, str, dict, UUID | None] | None:
         """Take the oldest queued job and mark it running, exactly once.
 
         The transition is a conditional UPDATE rather than a read-then-write, so two
@@ -562,7 +602,7 @@ class JobRunner:
             if claimed.rowcount != 1:
                 return None  # Another worker took it; the next poll picks up the rest.
             session.refresh(candidate)
-            return candidate.id, candidate.kind, dict(candidate.request)
+            return candidate.id, candidate.kind, dict(candidate.request), candidate.owner_id
 
     async def _run_forever(self) -> None:
         # Bound once here: the attribute is replaced on the next start(), and this loop must
@@ -577,9 +617,9 @@ class JobRunner:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(wakeup.wait(), timeout=IDLE_POLL_SECONDS)
                 continue
-            job_id, kind, request = claimed
+            job_id, kind, request, owner_id = claimed
             try:
-                await self._execute(job_id, kind, request)
+                await self._execute(job_id, kind, request, owner_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -591,7 +631,9 @@ class JobRunner:
         if await asyncio.to_thread(self._finish, job_id, "succeeded", result=result):
             self.publish(job_id, {"type": "done", "status": "succeeded", "result": result})
 
-    async def _execute(self, job_id: UUID, kind: str, request: dict) -> None:
+    async def _execute(
+        self, job_id: UUID, kind: str, request: dict, owner_id: UUID | None = None
+    ) -> None:
         if kind not in self.handlers:
             await asyncio.to_thread(
                 self._finish, job_id, "failed", error=f"No handler for job kind {kind!r}"
@@ -600,7 +642,7 @@ class JobRunner:
 
         self.publish(job_id, {"type": "status", "message": "Started"})
         self._live_text[job_id] = ""
-        context = JobContext(self, job_id, asyncio.get_running_loop().time())
+        context = JobContext(self, job_id, asyncio.get_running_loop().time(), owner_id)
         task = asyncio.create_task(self.handlers[kind](request, context))
         self._current = (job_id, task)
         if job_id in self._cancel_requested:

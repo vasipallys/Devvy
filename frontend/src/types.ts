@@ -65,6 +65,7 @@ export interface JobDetail extends JobSummary {
   result: Record<string, any> | null
   output_text: string
   events: AgentEvent[]
+  access?: { owner: boolean; permission: 'viewer' | 'editor' | null }
 }
 
 /** Messages delivered by `GET /api/jobs/{id}/stream`. */
@@ -94,6 +95,41 @@ export interface SystemStatus {
   capabilities: Record<string, boolean>
   trust: { privacy: string; data_dir: string; network: string[]; run_ledger: string }
   limits: Record<string, number>
+}
+
+export type UserRole = 'owner' | 'admin' | 'member'
+export interface UserPreferences {
+  default_workspace: string
+  density: 'comfortable' | 'compact'
+  evidence_expanded: boolean
+  confirm_external_research: boolean
+}
+export interface WorkspaceUser {
+  id: string
+  email: string
+  display_name: string
+  role: UserRole
+  active: boolean
+  preferences: UserPreferences
+  created_at: string
+  last_login_at: string | null
+}
+export interface AuthState {
+  authenticated: boolean
+  needs_setup: boolean
+  auth_enabled: boolean
+  user: WorkspaceUser | null
+  security: { session_cookie: string; csrf: string; secure_cookie: boolean }
+}
+export type ShareResource = 'conversation' | 'job' | 'estimate'
+export interface ResourceShare {
+  id: string
+  resource_type: ShareResource
+  resource_id: string
+  permission: 'viewer' | 'editor'
+  owner: WorkspaceUser | null
+  recipient: WorkspaceUser | null
+  created_at: string
 }
 
 /* Estimate Code — Agile Story Point Estimation Framework v2.0 (16 factors + stack layer).
@@ -385,6 +421,8 @@ export interface EstimateConfig {
 /** A previously completed estimate. Durable, searchable, and independent of job retention. */
 export interface EstimateHistoryEntry {
   id: string
+  owner_id?: string | null
+  access?: { owner: boolean; permission: 'viewer' | 'editor' | null }
   created_at: string
   job_id: string | null
   title: string

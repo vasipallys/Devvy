@@ -159,6 +159,7 @@ class StoredPreview:
     files: dict[Path, str]
     hashes: dict[Path, str | None]
     verification: list[dict]
+    owner_id: str | None = None
 
 
 def _hash(path: Path) -> str | None:
@@ -345,6 +346,7 @@ class SmartCodeService:
         self,
         request: SmartCodeRequest,
         progress: Callable[[dict[str, Any]], None] | None = None,
+        owner_id: str | None = None,
     ) -> dict:
         self._purge()
         root = Path(request.workspace_root).expanduser().resolve()
@@ -536,6 +538,7 @@ RETRIEVED EVIDENCE:
             self._previews[token] = StoredPreview(
                 created_at=datetime.now(timezone.utc), root=root, output=output,
                 files=materialized, hashes=hashes, verification=verification,
+                owner_id=owner_id,
             )
         return {
             "preview_token": token,
@@ -559,13 +562,15 @@ RETRIEVED EVIDENCE:
             },
         }
 
-    def apply(self, request: SmartCodeApplyRequest) -> dict:
+    def apply(self, request: SmartCodeApplyRequest, owner_id: str | None = None) -> dict:
         if not request.approved:
             raise ValueError("Explicit approval is required before files can be written.")
         with self._lock:
             preview = self._previews.pop(request.preview_token, None)
         if preview is None:
             raise ValueError("This preview is missing, expired, or was already applied.")
+        if preview.owner_id != owner_id:
+            raise ValueError("This preview belongs to another user. Generate your own preview.")
         # Expiry is enforced here, not only by the sweep. The sweep runs when a *new*
         # preview starts, so a token could outlive its lifetime indefinitely simply because
         # nobody previewed again — and then write files from a proposal made hours ago

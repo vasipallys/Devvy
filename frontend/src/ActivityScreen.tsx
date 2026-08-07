@@ -7,6 +7,7 @@ import { api } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { SystemStatusChip } from './SystemStatusChip'
 import { Tooltip } from './Tooltip'
+import { ShareButton } from './ShareDialog'
 import { useJobs } from './useJobs'
 import { isJobActive, type JobDetail, type JobKind, type JobStatus, type JobSummary } from './types'
 
@@ -95,12 +96,13 @@ function JobRow({ job, onOpen, onCancel, selected }: {
   </div>
 }
 
-export function ActivityScreen({ onHome, onOpenConversation }: {
+export function ActivityScreen({ onHome, onOpenConversation, initialJobId }: {
   onHome: () => void
   onOpenConversation?: (conversationId: string) => void
+  initialJobId?: string
 }) {
   const { jobs, active, error, refresh, cancel } = useJobs()
-  const [selected, setSelected] = useState<string>()
+  const [selected, setSelected] = useState<string | undefined>(initialJobId)
   const [detail, setDetail] = useState<JobDetail>()
   const [detailError, setDetailError] = useState('')
 
@@ -172,10 +174,13 @@ export function ActivityScreen({ onHome, onOpenConversation }: {
                 <StatusIcon status={detail.status} /> {STATUS_META[detail.status].label} · {elapsed(detail)}
               </p>
             </div>
-            {detail.kind === 'chat' && detail.conversation_id && onOpenConversation &&
-              <button className="primary-action" onClick={() => onOpenConversation(detail.conversation_id!)}>
-                Open conversation
-              </button>}
+            <div className="activity-summary-actions">
+              {detail.access?.owner !== false && <ShareButton resourceType="job" resourceId={detail.id}/>}
+              {detail.kind === 'chat' && detail.conversation_id && onOpenConversation &&
+                <button className="primary-action" onClick={() => onOpenConversation(detail.conversation_id!)}>
+                  Open conversation
+                </button>}
+            </div>
           </section>
 
           {detail.status === 'interrupted' && <div className="product-error">
