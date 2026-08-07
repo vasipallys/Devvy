@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from backend.agent import ChatAgent
 from backend.agent_graph import TalkAgentGraph
@@ -167,13 +167,40 @@ UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 class LoginLimiter:
     """Small in-process sliding-window limiter for the local authentication boundary."""
 
+    #: Hard ceiling on tracked keys. A failed attempt creates a key per client-and-email
+    #: pair and only a *successful* sign-in removes one, so without a bound, spraying
+    #: distinct addresses grows this map for the life of the process — the limiter
+    #: protecting the sign-in endpoint becoming its own denial-of-service vector.
+    MAX_KEYS = 2048
+
     def __init__(self) -> None:
         self._attempts: dict[str, list[float]] = {}
         self._lock = threading.Lock()
 
+    def _prune(self, cutoff: float) -> None:
+        """Enforce the ceiling. Caller holds the lock.
+
+        Expired keys go first. If a burst inside a single window still exceeds the ceiling,
+        the *least recently active* keys are evicted — which is the safe order: an attack in
+        progress is by definition recently active, so its lockout survives, while the keys
+        being dropped are ones nobody has touched.
+        """
+        for key in [
+            key for key, values in self._attempts.items() if not any(v >= cutoff for v in values)
+        ]:
+            del self._attempts[key]
+        excess = len(self._attempts) - self.MAX_KEYS
+        if excess <= 0:
+            return
+        stale_first = sorted(self._attempts, key=lambda key: max(self._attempts[key], default=0.0))
+        for key in stale_first[:excess]:
+            del self._attempts[key]
+
     def allow(self, key: str) -> bool:
         cutoff = time.monotonic() - settings.auth_login_window_minutes * 60
         with self._lock:
+            if len(self._attempts) > self.MAX_KEYS:
+                self._prune(cutoff)
             recent = [value for value in self._attempts.get(key, []) if value >= cutoff]
             if len(recent) >= settings.auth_login_attempts:
                 self._attempts[key] = recent
@@ -589,12 +616,29 @@ def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
-def message_dict(item: Message) -> dict:
+def author_names(session: Session, messages: list[Message]) -> dict[UUID, str]:
+    """Resolve every author in one query.
+
+    Looking the author up inside the per-message projection opened a fresh session and
+    issued a query for each row, so opening a hundred-message conversation cost a hundred
+    round trips — and nested a second session inside the one already iterating the rows.
+    """
+    ids = {item.author_id for item in messages if item.author_id}
+    if not ids:
+        return {}
+    rows = session.exec(select(User.id, User.display_name).where(col(User.id).in_(ids))).all()
+    return {row[0]: row[1] for row in rows}
+
+
+def message_dict(item: Message, authors: dict[UUID, str] | None = None) -> dict:
     author_name = None
     if item.author_id:
-        with Session(engine) as session:
-            author = session.get(User, item.author_id)
-            author_name = author.display_name if author else None
+        if authors is not None:
+            author_name = authors.get(item.author_id)
+        else:
+            with Session(engine) as session:
+                author = session.get(User, item.author_id)
+                author_name = author.display_name if author else None
     return {
         "id": str(item.id), "role": item.role, "content": item.content,
         "created_at": utc_iso(item.created_at), "attachments": item.attachments,
@@ -682,7 +726,9 @@ def messages(conversation_id: UUID, request: Request):
             request, "conversation", conversation_id
         ):
             raise HTTPException(404, "Conversation not found")
-        return [message_dict(item) for item in list_messages(session, conversation_id)]
+        items = list_messages(session, conversation_id)
+        authors = author_names(session, items)
+        return [message_dict(item, authors) for item in items]
 
 
 @app.patch("/api/conversations/{conversation_id}")
@@ -1247,7 +1293,12 @@ async def talk_socket(websocket: WebSocket):
             raise ValueError("Talk messages support up to 10 attachments")
         attachment_context = ""
         if mode != "talk" and requested_ids:
-            attachments, attachment_context = attachment_data(requested_ids, owner)
+            # Off the loop: this reads files from disk and parses PDF/DOCX up to the context
+            # budget. Inline, it stalls the single thread serving every other socket, SSE
+            # stream, and request for as long as extraction takes.
+            attachments, attachment_context = await asyncio.to_thread(
+                attachment_data, requested_ids, owner
+            )
             if len(attachments) != len(requested_ids):
                 raise ValueError("One or more selected attachments are no longer available")
 

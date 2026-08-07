@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 from uuid import uuid4
 
 from backend.config import Settings
@@ -51,7 +52,30 @@ class AgentExplanation(Scene):
     async def render(self, title: str, explanation: str) -> str:
         scene_id = uuid4().hex
         script = self.work_dir / f"scene-{scene_id}.py"
-        script.write_text(self._script(title, explanation), encoding="utf-8")
+        await asyncio.to_thread(
+            script.write_text, self._script(title, explanation), encoding="utf-8"
+        )
+        try:
+            return await self._render(script, scene_id)
+        finally:
+            # Every exit path, not just success. A failed render used to leave its scene
+            # script behind, so the directory filled with the scripts of runs that never
+            # produced anything — the ones nobody goes looking for.
+            script.unlink(missing_ok=True)
+            await asyncio.to_thread(self._purge_media)
+
+    def _purge_media(self) -> None:
+        """Drop Manim's intermediate media tree once a render has been collected.
+
+        `--media_dir` accumulates a partial-movie directory per scene. The finished video is
+        moved out to `generated/`, where retention applies; without this the working
+        directory keeps every intermediate frame of every explanation ever rendered.
+        """
+        for child in self.work_dir.glob("videos/*"):
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+
+    async def _render(self, script, scene_id: str) -> str:
         output_name = f"explanation-{scene_id}.mp4"
         command = [
             self.settings.manim_executable,
@@ -85,5 +109,4 @@ class AgentExplanation(Scene):
             raise RuntimeError("Manim completed without producing a video")
         destination = self.settings.generated_dir / output_name
         matches[0].replace(destination)
-        script.unlink(missing_ok=True)
         return f"/generated/{output_name}"

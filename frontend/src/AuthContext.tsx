@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, LoaderCircle, LogOut, ShieldCheck, Square, X } from 'lucide-react'
 import { api } from './api'
 import { AuthScreen } from './AuthScreen'
@@ -32,6 +32,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [logoutOpen, setLogoutOpen] = useState(false)
   const [activeJobs, setActiveJobs] = useState(0)
   const [logoutBusy, setLogoutBusy] = useState(false)
+  const [logoutError, setLogoutError] = useState('')
+  const dialogRef = useRef<HTMLElement>(null)
 
   const refresh = useCallback(async () => {
     try { setSession(await api.authSession()); setLoadError('') }
@@ -55,6 +57,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const jobs = await api.jobs()
       setActiveJobs(jobs.active)
     } catch { setActiveJobs(0) }
+    setLogoutError('')
     setLogoutOpen(true)
   }, [])
 
@@ -65,8 +68,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSession(current => current ? { ...current, authenticated: false, user: null } : current)
       setLogoutOpen(false)
       window.location.hash = '#/'
+    } catch (cause) {
+      // Signing out can fail — the backend may be down. Saying so beats a dead button that
+      // leaves the user unsure whether they are still signed in.
+      setLogoutError((cause as Error).message)
     } finally { setLogoutBusy(false) }
   }
+
+  // A dialog that claims aria-modal must be dismissible from the keyboard, and focus has to
+  // start inside it — otherwise a keyboard user tabs around the page behind a modal that
+  // says it has trapped them.
+  useEffect(() => {
+    if (!logoutOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !logoutBusy) setLogoutOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    dialogRef.current?.focus()
+    return () => { window.removeEventListener('keydown', onKey) }
+  }, [logoutOpen, logoutBusy])
 
   const value = useMemo<AuthContextValue>(() => ({
     user: session?.user ?? null,
@@ -88,7 +108,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return <AuthContext.Provider value={value}>
     {children}
     {logoutOpen && <div className="modal-scrim" role="presentation">
-      <section className="logout-dialog" role="dialog" aria-modal="true" aria-labelledby="logout-title">
+      <section ref={dialogRef} tabIndex={-1} className="logout-dialog" role="dialog" aria-modal="true" aria-labelledby="logout-title">
         <button className="modal-close" onClick={() => setLogoutOpen(false)} aria-label="Close"><X/></button>
         <div className="dialog-icon"><LogOut/></div>
         <span className="eyebrow">SIGN OUT SAFELY</span>
@@ -99,6 +119,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         {activeJobs > 0 && <div className="logout-choice-evidence">
           <ShieldCheck/><span><b>Keep running is safe</b><small>Work continues in the durable queue. Sign in later to see the result.</small></span>
         </div>}
+        {logoutError && <p className="product-error" role="alert">{logoutError}</p>}
         <div className="logout-actions">
           {activeJobs > 0 && <button disabled={logoutBusy} className="auth-primary" onClick={() => finishLogout('keep')}>
             <ShieldCheck/> Keep running & sign out

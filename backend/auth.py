@@ -520,10 +520,16 @@ def create_share(
         return item
 
 
-def share_dict(engine, item: ResourceShare) -> dict[str, Any]:
-    with Session(engine) as session:
-        owner = session.get(User, item.owner_id)
-        recipient = session.get(User, item.recipient_id)
+def share_dict(
+    engine, item: ResourceShare, people: dict[UUID, User] | None = None
+) -> dict[str, Any]:
+    """Project one share. Pass ``people`` when rendering a list — see ``list_shares``."""
+    if people is not None:
+        owner, recipient = people.get(item.owner_id), people.get(item.recipient_id)
+    else:
+        with Session(engine) as session:
+            owner = session.get(User, item.owner_id)
+            recipient = session.get(User, item.recipient_id)
     return {
         "id": str(item.id),
         "resource_type": item.resource_type,
@@ -536,9 +542,23 @@ def share_dict(engine, item: ResourceShare) -> dict[str, Any]:
 
 
 def list_shares(engine, user_id: UUID, *, incoming: bool) -> list[dict[str, Any]]:
+    """Every share for a user, with both parties resolved in a single extra query.
+
+    Projecting each row independently opened two sessions and issued two queries per share,
+    so a list of twenty cost forty round trips to render names that mostly repeat.
+    """
     with Session(engine) as session:
         column = ResourceShare.recipient_id if incoming else ResourceShare.owner_id
-        rows = session.exec(
-            select(ResourceShare).where(column == user_id).order_by(ResourceShare.created_at.desc())
-        ).all()
-    return [share_dict(engine, item) for item in rows]
+        rows = list(
+            session.exec(
+                select(ResourceShare)
+                .where(column == user_id)
+                .order_by(col(ResourceShare.created_at).desc())
+            ).all()
+        )
+        identifiers = {item.owner_id for item in rows} | {item.recipient_id for item in rows}
+        people = {
+            person.id: person
+            for person in session.exec(select(User).where(col(User.id).in_(identifiers))).all()
+        } if identifiers else {}
+    return [share_dict(engine, item, people) for item in rows]

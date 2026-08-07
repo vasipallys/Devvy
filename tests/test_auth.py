@@ -178,3 +178,37 @@ def test_logout_can_cancel_every_active_job_owned_by_the_user(authenticated_app)
                 break
             time.sleep(0.02)
         assert api.job_runner.get(job.id)["status"] == "cancelled"
+
+
+def test_the_login_limiter_does_not_grow_without_bound():
+    """A failed attempt creates a key; only a successful sign-in removes one.
+
+    Spraying distinct addresses would otherwise grow the attempt map for the life of the
+    process — the limiter protecting the sign-in endpoint becoming its own resource leak.
+    The ceiling must hold even for a burst that stays inside one window.
+    """
+    from backend.api import LoginLimiter
+
+    limiter = LoginLimiter()
+    for index in range(LoginLimiter.MAX_KEYS * 2):
+        limiter.allow(f"10.0.0.1:user{index}@example.com")
+
+    assert len(limiter._attempts) <= LoginLimiter.MAX_KEYS + 1
+
+
+def test_the_login_limiter_still_blocks_after_a_sweep():
+    """Sweeping must not become a way to reset an in-progress attack."""
+    from backend.api import LoginLimiter, settings
+
+    limiter = LoginLimiter()
+    key = "10.0.0.1:victim@example.com"
+    for _ in range(settings.auth_login_attempts):
+        assert limiter.allow(key) is True
+    assert limiter.allow(key) is False
+
+    # Flood the map past its ceiling. Eviction is least-recently-active first, so an
+    # attack in progress must not be able to clear its own lockout by making noise.
+    for index in range(LoginLimiter.MAX_KEYS * 2):
+        limiter.allow(f"10.0.0.2:other{index}@example.com")
+        limiter.allow(key)
+    assert limiter.allow(key) is False, "an active lockout survives eviction"

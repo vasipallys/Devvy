@@ -1176,6 +1176,17 @@ lines and supports `AbortSignal`.
 | Privacy | The ledger stores operational metadata only, for a bounded retention period |
 | Markdown | Sanitized allowlist before assignment to `innerHTML` |
 
+#### 13.0.1 Known boundary: research URL validation
+
+`fetch_page` resolves a hostname and rejects private, loopback, link-local, and reserved
+addresses, and re-validates on every redirect hop. It does **not** pin the resolved address
+for the connection, so a hostname that resolves to a public address during validation and a
+private one for the request itself is not blocked (DNS rebinding). This is recorded rather
+than partially mitigated: the fix is to connect to the validated IP directly, which conflicts
+with TLS SNI and certificate validation and needs a custom transport. As-built, the exposure
+is bounded by research URLs coming from a search provider rather than from user input, and by
+the deployment being loopback-only.
+
 ### 13.1 Production hardening
 
 The current design is an authenticated local modular monolith. It enforces per-user ownership,
@@ -1215,6 +1226,10 @@ limit, or a stall on the single thread every user is waiting on.
 | Rule | Why it is not optional |
 | --- | --- |
 | Count in SQL, never `len()` over loaded rows | An n-event run becomes O(n²) row loads |
+| Resolve related rows in one query, never per item | Opening a conversation cost one session and one query *per message* to render author names |
+| Bound every in-memory keyed map | The login limiter grew a key per client-and-email pair that only a successful sign-in removed |
+| Never parse a document on the event loop | PDF/DOCX extraction inside the Talk socket stalls every other client for its duration |
+| Sweep tool working directories, not just outputs | Manim's `--media_dir` keeps every intermediate frame of every render |
 | Purge and reconcile with set-based statements | Otherwise the first request after a gap is the slowest, and worsens with use |
 | Bound every fan-out queue | A stalled viewer must not grow the worker for a whole generation |
 | Bound shutdown | An unbounded await on a thread-blocked task means the process never exits |
@@ -1230,7 +1245,9 @@ limit, or a stall on the single thread every user is waiting on.
 
 | Path | Budget |
 | --- | --- |
-| Test suite | < 10s, no intermittent hangs |
+| Test suite | < 25s, no intermittent hangs |
+| Opening a conversation | 2 queries regardless of message count |
+| Listing shares | 2 queries regardless of share count |
 | Idle backend | no repeating database queries |
 | Smart Code review, one file | ~3 min, live progress throughout |
 | Frontend bundle | < 400 KB raw / < 120 KB gzip |
@@ -1310,6 +1327,11 @@ cd frontend; npm run preview                             # serve dist/
 48. An idle backend issues no repeating database queries.
 49. A hidden tab stops polling and refreshes on return.
 50. The test suite passes repeatedly with no intermittent hang.
+51. Opening a conversation issues a fixed number of queries regardless of its length.
+52. The login limiter's memory is bounded, and an active lockout survives eviction.
+53. Attaching a document to a Talk turn does not stall other connected clients.
+54. A failed animation render leaves no scene script or intermediate media behind.
+55. The sign-out dialog is dismissible with Escape, takes focus, and reports its own failure.
 
 ### 15.2 Regression suite
 
