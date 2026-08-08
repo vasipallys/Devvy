@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from backend.config import Settings
@@ -1319,3 +1321,46 @@ def test_the_repair_prompt_quotes_the_offending_lines():
     assert "   8 | line 8" in excerpt and "  12 | line 12" in excerpt
     assert "line 5" not in excerpt, "only the neighbourhood, not the whole file"
     assert _lines_around(content, None) == "", "no line number means no excerpt"
+
+
+def test_the_folder_decides_the_kind_of_change(tmp_path):
+    """Asking the user to choose "generate" or "modify" asks them to describe what the folder
+    already shows — and a wrong answer decides whether existing code is read as context.
+    """
+    from backend.smart_code import inspect_workspace
+
+    empty = tmp_path / "brand-new"
+    empty.mkdir()
+    assert inspect_workspace(str(empty)) == {
+        "exists": True, "path": str(empty), "name": "brand-new", "source_files": 0,
+        "languages": [], "suggested_mode": "generate", "empty": True,
+    }
+
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    (existing / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (existing / "models.py").write_text("value = 2\n", encoding="utf-8")
+    (existing / "README.md").write_text("hi\n", encoding="utf-8")
+    found = inspect_workspace(str(existing))
+    assert found["suggested_mode"] == "modify" and found["empty"] is False
+    assert found["source_files"] == 3
+    assert found["languages"][0] == "py", "the dominant language leads"
+
+    missing = inspect_workspace(str(tmp_path / "nope"))
+    assert missing["exists"] is False and "does not exist" in missing["reason"]
+
+    a_file = tmp_path / "a.txt"
+    a_file.write_text("x", encoding="utf-8")
+    assert inspect_workspace(str(a_file))["exists"] is False
+
+
+def test_folder_inspection_never_returns_file_names(tmp_path):
+    """Mode inference needs to know whether there is code, not what it is called."""
+    from backend.smart_code import inspect_workspace
+
+    workspace = tmp_path / "secret-project"
+    workspace.mkdir()
+    (workspace / "confidential_pricing.py").write_text("value = 1\n", encoding="utf-8")
+
+    payload = inspect_workspace(str(workspace))
+    assert "confidential_pricing" not in json.dumps(payload)

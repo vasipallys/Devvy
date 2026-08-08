@@ -50,14 +50,21 @@ function EvidenceValue({ value }: { value: unknown }) {
   return <b>{String(value)}</b>
 }
 
-export function EvidencePanel({ events, title = 'Run evidence', compact = false }: { events: AgentEvent[]; title?: string; compact?: boolean }) {
+/**
+ * `docked` drops the panel's own frame and heading. Inside a DockPane the surrounding chrome —
+ * the title, the width, the move and collapse controls — already belongs to the dock, and two
+ * stacked headings saying the same thing is how a panel ends up with less room for evidence
+ * than for its own furniture.
+ */
+export function EvidencePanel({ events, title = 'Run evidence', compact = false, docked = false }: { events: AgentEvent[]; title?: string; compact?: boolean; docked?: boolean }) {
   const runId = events[0]?.run_id
   const failed = events.filter(event => event.status === 'failed').length
-  return <aside className={`evidence-panel ${compact ? 'compact' : ''}`} aria-label="Agent run evidence">
-    <div className="evidence-heading">
+  const Frame = docked ? 'div' : 'aside'
+  return <Frame className={`evidence-panel ${compact ? 'compact' : ''} ${docked ? 'docked' : ''}`} aria-label={docked ? undefined : 'Agent run evidence'}>
+    {!docked && <div className="evidence-heading">
       <div><ShieldCheck/><span><b>{title}</b><small>{runId ? `Run ${runId.slice(0, 8)}${failed ? ` · ${failed} issue(s)` : ''}` : 'Starts with your next request'}</small></span></div>
       <span className="evidence-local"><Database/> Local</span>
-    </div>
+    </div>}
     {!events.length ? <div className="evidence-empty"><ShieldCheck/><p>Actions, context sources, validation loops, and approval gates will appear here. Hidden chain-of-thought is never shown or stored.</p></div>
       : <div className="evidence-timeline">{events.map((event, index) => <details key={`${event.stage}-${index}`} open={event.status === 'running' || event.status === 'failed' || index === events.length - 1}>
         <summary><Tooltip label={STATUS_MEANING[event.status]?.label ?? event.status}
@@ -75,5 +82,5 @@ export function EvidencePanel({ events, title = 'Run evidence', compact = false 
           </details>}
         </div>}
       </details>)}</div>}
-  </aside>
+  </Frame>
 }

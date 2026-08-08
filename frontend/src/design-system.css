@@ -57,8 +57,8 @@ button:disabled{cursor:not-allowed}
 .activity-chip:hover{border-color:#6f8a68}
 .activity-chip.busy{border-color:#5f8f52;color:#c6f0ae;background:#18251a}
 .activity-screen{background:#0b0e0d;color:var(--md-on-surface);overflow:hidden}
-.activity-layout{display:grid;grid-template-columns:360px minmax(0,1fr);height:calc(100vh - 64px);overflow:hidden}
-.activity-list{border-right:1px solid #262e29;overflow:auto;padding:14px}
+.activity-layout{height:calc(100vh - 64px);overflow:hidden}
+.dock-pane.activity-list .dock-body{padding:14px}
 .activity-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .activity-group{margin:14px 0 7px;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#77827b}
 .activity-empty{color:#7d8880;font-size:11px;line-height:1.7}
@@ -87,7 +87,7 @@ button:disabled{cursor:not-allowed}
 .pipeline-note{margin-top:8px;color:#7d8b82;font-size:9px;line-height:1.6}
 .cancel-run{background:transparent;border:1px solid #48413a;border-radius:8px;color:#c2b09c;font-size:10px;padding:0 12px;min-height:34px;margin-top:8px}
 .cancel-run:hover{border-color:#8a6a52;color:#ffd0ad}
-@media(max-width:900px){.activity-layout{grid-template-columns:1fr;height:auto;overflow:visible}.activity-list{border-right:0;border-bottom:1px solid #262e29}}
+
 
 /* Crash screen: a render error must never present as an empty black window. */
 .crash-screen{position:fixed;inset:0;z-index:99;display:grid;place-items:center;padding:24px;background:radial-gradient(700px 420px at 50% 30%,#241b1a 0,#0b0e0d 62%);overflow:auto}
@@ -104,7 +104,7 @@ button:disabled{cursor:not-allowed}
 .crash-card>small{font-size:10px;color:#78837c}
 
 /* Core workspace improvements */
-.shell>.sidebar{width:248px}.shell>main>header{height:64px;background:rgba(11,14,13,.86);backdrop-filter:blur(16px)}
+.shell>main>header{height:64px;background:rgba(11,14,13,.86);backdrop-filter:blur(16px)}
 .new-chat{min-height:42px}.history-item{min-height:40px;padding:0;gap:0}.history-open{height:40px;min-height:40px;min-width:0;flex:1;display:flex;align-items:center;gap:9px;padding:0 9px;background:transparent;color:inherit;text-align:left}.history-open span{min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.history-delete{width:34px;min-width:34px;min-height:34px;padding:0;display:grid;place-items:center;background:transparent;color:#8e9992;opacity:0}.history-item:hover .history-delete,.history-delete:focus-visible{opacity:1}.history-delete:hover{color:#ffb4ab}.icon{min-height:36px;min-width:36px}.conversation{background:radial-gradient(700px 420px at 50% 0,rgba(31,47,34,.36),transparent 70%)}
 .welcome{max-width:720px}.welcome h1{font-size:36px}.suggestions button{min-height:72px;border-radius:14px;transition:background .2s var(--easing),border-color .2s var(--easing),transform .2s var(--easing)}.suggestions button:hover{transform:translateY(-2px)}
 .composer{border-radius:20px;border-color:#3a443e;box-shadow:0 18px 60px rgba(0,0,0,.42)}.composer:focus-within{border-color:#78916f;box-shadow:0 18px 60px rgba(0,0,0,.42),0 0 0 3px rgba(183,243,151,.07)}
@@ -112,13 +112,13 @@ button:disabled{cursor:not-allowed}
 .markdown{font-size:14px;line-height:1.72}.markdown h1,.markdown h2,.markdown h3{letter-spacing:-.02em}.markdown blockquote{border-left:3px solid #6e8a64;margin-left:0;padding-left:14px;color:#aeb8b1}
 
 /* Product screens */
-.product-header,.estimate-header{height:64px;padding:0 20px}.product-header>.system-chip,.estimate-header>.system-chip{margin-left:auto}.smart-workspace>.evidence-panel.compact{margin-top:12px}
+.product-header,.estimate-header{height:64px;padding:0 20px}.product-header>.system-chip,.estimate-header>.system-chip,.product-header>.code-header-tools{margin-left:auto}.smart-workspace>.evidence-panel.compact{margin-top:12px}
 .smart-controls input,.smart-controls textarea,.smart-controls select,.story-card input,.story-card textarea,.story-card select{min-height:42px}.smart-controls label{font-size:11px;letter-spacing:.01em}.smart-pipeline b{font-size:11px}.smart-pipeline small{font-size:9px;color:#818d84}
 .primary-action,.apply-action,.estimate-action{min-height:44px}.pipeline-panel{box-shadow:0 12px 34px rgba(0,0,0,.14)}
 .estimate-result>.evidence-panel{margin:0;border:0;border-bottom:1px solid #dce4d8;border-radius:0;background:#f7faf5;color:#193126}.estimate-result>.evidence-panel .evidence-heading{background:#edf3e9;border-color:#d8e1d4}.estimate-result>.evidence-panel .evidence-timeline details{background:#fff;border-color:#dbe4d7}.estimate-result>.evidence-panel .evidence-detail{background:#f7faf5;border-color:#dbe4d7}.estimate-result>.evidence-panel .evidence-heading small,.estimate-result>.evidence-panel .evidence-timeline summary small,.estimate-result>.evidence-panel .evidence-detail>div span{color:#66776d}.estimate-result>.evidence-panel .evidence-timeline summary b,.estimate-result>.evidence-panel .evidence-detail>div b{color:#244638}
 .estimate-header .system-chip{background:#164f3f;border-color:#4b796a}.estimate-header .system-chip small{color:#bdd8cc}
 
-@media(max-width:1180px){.evidence-panel{width:250px}.shell>.sidebar{width:225px}.mode-picker button span{display:none}.mode-picker button{padding:0 7px}}
+@media(max-width:1180px){.evidence-panel{width:250px}.mode-picker button span{display:none}.mode-picker button{padding:0 7px}}
 @media(max-width:900px){.shell>.evidence-panel{position:absolute;right:0;top:64px;bottom:0;z-index:8;width:245px;box-shadow:-20px 0 40px rgba(0,0,0,.35);opacity:.96}.home-content{padding-inline:20px}.trust-strip{grid-template-columns:1fr}.trust-strip small{display:none}}
 @media(max-width:700px){.choice-grid{grid-template-columns:1fr}.home-content h1{font-size:36px}.home-header{padding:0 16px}.home-header .system-chip{min-width:40px;width:40px;padding:0;justify-content:center}.home-header .system-chip>div{display:none}.choice-card{min-height:166px}.trust-strip{display:none}.shell>.evidence-panel{display:none}.product-brand{position:static;transform:none}.product-header .system-chip,.estimate-header .system-chip{min-width:40px;width:40px;padding:0;justify-content:center}.product-header .system-chip>div,.estimate-header .system-chip>div{display:none}.evidence-panel.compact .evidence-timeline{display:block}.evidence-panel.compact .evidence-timeline details{min-width:0;max-width:none;margin-bottom:6px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
@@ -189,3 +189,313 @@ button:disabled{cursor:not-allowed}
 .restored-banner span{display:flex;flex-direction:column;gap:3px;min-width:0}
 .restored-banner b{font-size:11px}
 .restored-banner small{font-size:10px;line-height:1.55;color:#9fb4cf}
+
+/* ------------------------------------------------------------------------------------------
+   Smart Code: conversation in the middle, the run beside it.
+
+   Everything about a run used to live inline in the transcript, which meant a pasted brief of
+   any length pushed the pipeline, the sources and the proposed files below the fold — and a
+   CPU-bound generation takes minutes, all of which the screen then spent showing the user
+   their own message. So the layout is three columns and only the middle one scrolls: the rail
+   is the session, the transcript is the conversation, and the panel is the run. The panel is
+   held in place because "what is it doing right now" is the entire question while you wait.
+   ------------------------------------------------------------------------------------------ */
+.code-screen{display:flex;flex-direction:column;height:100%;overflow:hidden;
+  background:radial-gradient(circle at 50% 0,#172018,#0b0d0e 34%)}
+.code-header-tools{display:flex;align-items:center;gap:10px}
+.icon-button{width:36px;height:36px;display:grid;place-items:center;border:1px solid #303833;
+  border-radius:10px;background:#141a17;color:#9aa59e;cursor:pointer}
+.icon-button:hover{border-color:#4a5850;color:#e3eae4}
+.code-progress{display:inline-flex;align-items:center;gap:7px;max-width:280px;min-height:36px;
+  padding:0 12px;border:1px solid #303833;border-radius:20px;background:#141a17;color:#a8c7fa;
+  font-size:11px;cursor:pointer}
+.code-progress:hover{border-color:#4a5850}
+.code-progress small{color:#9aa59e;font-size:10px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+@media(max-width:760px){.code-progress small{display:none}}
+
+/* -- Left: the session -------------------------------------------------------------------- */
+/* Widths, sides and collapse now belong to the reader and live in Dock.tsx; what is left here
+   is only what the two panes hold. */
+.rail-empty{margin:0;padding:0 14px;font-size:10px;line-height:1.6;color:#7d8a82}
+.rail-list{list-style:none;margin:0;padding:4px 8px 14px;display:flex;flex-direction:column;gap:3px}
+.rail-item{display:flex;align-items:flex-start;gap:9px;width:100%;padding:9px 10px;min-height:0;
+  border:1px solid transparent;border-radius:9px;background:transparent;text-align:left;cursor:pointer}
+.rail-item:hover{background:#141a17}
+.rail-item.active{background:#161f18;border-color:#2f4234}
+.rail-item>span:last-child{display:flex;flex-direction:column;gap:3px;min-width:0}
+.rail-item b{font-size:11px;color:#dfe5e0}
+.rail-item small{font-size:9px;line-height:1.45;color:#8b968f;overflow:hidden;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.rail-dot{flex:none;width:8px;height:8px;margin-top:4px;border-radius:50%;background:#5c6a62}
+.rail-dot.ok{background:#8ee06a}
+.rail-dot.failed{background:#ff9c92}
+.rail-dot.running{background:#8fbcff;box-shadow:0 0 0 3px rgba(143,188,255,.16)}
+
+/* -- Middle: the conversation -------------------------------------------------------------- */
+.chat-transcript{flex:1;min-height:0;overflow-y:auto;padding:22px 0 8px;
+  padding-inline:clamp(16px,3.5vw,44px)}
+.chat-welcome{max-width:620px;margin:9vh auto 0;text-align:center;color:#8b968f}
+.chat-welcome svg{color:#a9e68a}
+.chat-welcome h1{font-size:24px;color:#e3eae4;margin:14px 0 10px}
+.chat-welcome p{font-size:12px;line-height:1.75}
+
+.chat-turn{max-width:900px;margin:0 auto 26px}
+.chat-message.user{display:flex;flex-direction:column;gap:5px;align-items:flex-end;margin-bottom:12px}
+.chat-message.user p{max-width:80%;margin:0;padding:10px 13px;border-radius:12px 12px 3px 12px;
+  background:#1d2a20;color:#dfeadf;font-size:12px;line-height:1.65;white-space:pre-wrap;
+  overflow-wrap:anywhere}
+/* A sent prompt is reference material, not the thing being read. */
+.chat-message.user p.clamped{position:relative;max-height:11.5em;overflow:hidden}
+.chat-message.user p.clamped:after{content:'';position:absolute;inset:auto 0 0 0;height:3em;
+  background:linear-gradient(rgba(29,42,32,0),#1d2a20)}
+.chat-prompt-toggle{align-self:flex-end;min-height:0;padding:3px 8px;border:1px solid #2f4234;
+  border-radius:14px;background:transparent;color:#9ec6a8;font-size:9px;cursor:pointer}
+.chat-prompt-toggle:hover{background:#1d2a20;color:#cfe8d5}
+.chat-correction{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:12px;
+  background:#241d12;border:1px solid #4d3d20;color:#ffd38b;font-size:9px}
+
+.chat-agent-head{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+.chat-avatar{width:26px;height:26px;border-radius:9px;display:grid;place-items:center;
+  background:#1c2b1c;color:#aee692}
+.chat-agent-head b{font-size:12px;color:#e3eae4}
+.chat-status{font-size:9px;color:#8b968f;display:flex;align-items:center;gap:5px}
+.chat-status.running{color:#a8c7fa}
+.chat-status.failed{color:#ffb4ab}
+
+.chat-narration{display:flex;flex-direction:column;gap:7px;margin-bottom:12px;
+  border-left:2px solid #263029;padding-left:12px}
+.chat-narration p{margin:0;font-size:11px;line-height:1.7;color:#b6c0b8}
+.chat-narration p.failed{color:#e7b8b1}
+.chat-narration p.retrying{color:#bcd0ea}
+.chat-narration-stage{display:inline-block;min-width:88px;margin-right:9px;font-size:8px;
+  letter-spacing:.1em;text-transform:uppercase;color:#7d8a82}
+
+.chat-result{display:flex;flex-direction:column;gap:11px}
+.chat-summary{margin:0;font-size:13px;line-height:1.6;color:#e3eae4}
+.chat-plan{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:5px;
+  font-size:11px;line-height:1.6;color:#aab5ad}
+.chat-deploy{border:1px solid #2b332d;border-radius:9px;padding:8px 11px}
+.chat-deploy summary{cursor:pointer;font-size:10px;color:#9aa59e;list-style:none}
+.chat-deploy summary::-webkit-details-marker{display:none}
+.chat-deploy summary:before{content:'▸ ';color:#7d8a82}
+.chat-deploy[open] summary:before{content:'▾ '}
+.chat-deploy ol{margin:9px 0 2px;padding-left:20px;display:flex;flex-direction:column;gap:5px;
+  font-size:11px;line-height:1.6;color:#aab5ad}
+
+.chat-findings{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.chat-findings li{padding:8px 11px;border-radius:8px;background:#161b18;border:1px solid #2b332d;
+  font-size:11px;line-height:1.55;color:#b6c0b8}
+.chat-findings li b{text-transform:uppercase;font-size:9px;letter-spacing:.06em;color:#e9a66a}
+.chat-findings li.blocker b,.chat-findings li.major b{color:#ff8989}
+
+.chat-diff{border:1px solid #303732;border-radius:10px;overflow:hidden;background:#0c0f0d}
+.chat-diff nav{display:flex;overflow-x:auto;background:#171c19;border-bottom:1px solid #303732}
+.chat-diff nav button{padding:8px 12px;background:transparent;border:0;border-right:1px solid #303732;
+  color:#8b968f;font-size:10px;white-space:nowrap;cursor:pointer;min-height:0}
+.chat-diff nav button.active{background:#222b24;color:#c8f5b0}
+.chat-diff pre{margin:0;padding:13px;max-height:400px;overflow:auto;white-space:pre;
+  font:11px/1.55 'Cascadia Code',Consolas,monospace;color:#cbd4cd}
+
+.chat-gate{display:flex;flex-direction:column;gap:9px;align-items:flex-start}
+.chat-apply{display:inline-flex;align-items:center;gap:8px;padding:0 15px;height:40px;
+  border:0;border-radius:10px;background:linear-gradient(110deg,#9bea75,#d6ffbe);
+  color:#142011;font-weight:700;font-size:12px;cursor:pointer}
+.chat-apply:disabled{opacity:.38;cursor:not-allowed}
+.chat-blocked{display:flex;gap:8px;align-items:flex-start;margin:0;padding:9px 11px;
+  border:1px solid #6b3a35;border-radius:9px;background:#2a1917;color:#ffb4ab;max-width:620px}
+.chat-blocked svg{flex:none;margin-top:1px}
+.chat-blocked span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.chat-blocked b{font-size:11px}
+.chat-blocked small{font-size:10px;line-height:1.5;color:#e8b3ac;overflow-wrap:anywhere}
+.chat-blocked .chat-blocked-next{color:#d7aaa4;margin-top:2px}
+.chat-applied{display:flex;align-items:center;gap:7px;margin:0;padding:9px 11px;border-radius:9px;
+  border:1px solid #3c6534;background:#172517;color:#b7ee9e;font-size:11px}
+.chat-error{display:flex;align-items:flex-start;gap:7px;margin:0;padding:9px 11px;border-radius:9px;
+  border:1px solid #643535;background:#351f1f;color:#ffc5c5;font-size:11px;line-height:1.55}
+
+.chat-composer{flex:none;padding:10px 0 16px;padding-inline:clamp(16px,3.5vw,44px);
+  border-top:1px solid #262d28;background:#0c100e}
+.chat-continue{display:flex;align-items:center;gap:6px;max-width:900px;margin:0 auto 8px;
+  font-size:9px;color:#8b968f}
+.chat-input{display:flex;gap:9px;align-items:flex-end;max-width:900px;margin:0 auto;
+  padding:8px;border:1px solid #303833;border-radius:14px;background:#141a17}
+.chat-input:focus-within{border-color:#4a6b53}
+.chat-input textarea{flex:1;min-height:38px;max-height:180px;padding:9px 10px;border:0;
+  background:transparent;color:#dfe5e0;font-size:12px;line-height:1.6;resize:vertical;outline:none}
+.chat-send{flex:none;width:38px;height:38px;display:grid;place-items:center;border:0;
+  border-radius:10px;background:linear-gradient(110deg,#9bea75,#d6ffbe);color:#142011;cursor:pointer}
+.chat-send:disabled{opacity:.35;cursor:not-allowed}
+
+/* -- Right: the run ------------------------------------------------------------------------ */
+.panel-head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:13px 15px 0}
+.panel-state{display:inline-flex;align-items:center;gap:6px;font-size:10px;letter-spacing:.09em;
+  text-transform:uppercase;color:#93a09a}
+.panel-state.running{color:#a8c7fa}
+.panel-state.done{color:#a9e68a}
+.panel-state.failed{color:#ffb4ab}
+.panel-stop{display:inline-flex;align-items:center;gap:5px;min-height:0;padding:4px 9px;
+  border:1px solid #6b3a35;border-radius:14px;background:transparent;color:#ffb4ab;
+  font-size:9px;cursor:pointer}
+.panel-stop:hover{background:#2a1917}
+.panel-status{flex:none;margin:6px 15px 10px;font-size:11px;line-height:1.55;color:#c3cdc6}
+.panel-groups{padding-bottom:20px}
+
+.panel-group{border-top:1px solid #1e2521}
+.panel-group-head{display:flex;align-items:center;gap:7px;width:100%;min-height:0;padding:11px 15px;
+  border:0;background:transparent;color:#dfe5e0;text-align:left;cursor:pointer}
+.panel-group-head:hover{background:#131917}
+.panel-group-head b{flex:1;font-size:11px}
+.panel-group-head>svg{flex:none;color:#8b968f;transition:transform .18s var(--easing)}
+.panel-group.open .panel-group-head>svg{transform:rotate(90deg)}
+.panel-count{padding:2px 7px;border-radius:11px;background:#1a211d;color:#9fb0a6;font-size:9px}
+.panel-group-body{padding:2px 15px 15px;display:flex;flex-direction:column;gap:9px}
+.panel-hint{margin:0;font-size:10px;line-height:1.6;color:#8b968f}
+
+/* The pipeline as a spine. Seven stages read as a list rather than a row of chips: a list has
+   room for what each stage actually found, and the bar joining the marks makes both the order
+   and how far the run has travelled legible before a single word is read. */
+.pipe{list-style:none;margin:0;padding:0}
+.pipe-step{position:relative;display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;
+  padding-bottom:13px}
+.pipe-step:last-child{padding-bottom:0}
+.pipe-mark{width:22px;height:22px;display:grid;place-items:center;border-radius:50%;
+  border:1px solid #5a695f;background:#141a17;color:#8b968f}
+/* The connector carries no information the mark and its text do not, but it is what makes the
+   seven stages read as one spine — so it is drawn at 3:1 against the panel rather than as a
+   hairline that vanishes on a dim laptop screen. */
+.pipe-step:not(:last-child) .pipe-mark:after{content:'';position:absolute;left:9.5px;top:23px;
+  bottom:1px;width:3px;background:#5a695f;border-radius:2px}
+.pipe-body{display:flex;flex-direction:column;gap:2px;min-width:0;padding-top:2px}
+.pipe-body b{font-size:11px;color:#aab5ad;text-transform:capitalize}
+.pipe-body small{font-size:9px;line-height:1.45;color:#8b968f;overflow-wrap:anywhere}
+.pipe-step.done .pipe-mark{border-color:#3d7333;background:#17240f;color:#b8f49b}
+.pipe-step.done .pipe-mark:after{background:#4d8a42}
+.pipe-step.done .pipe-body b{color:#dfe5e0}
+.pipe-step.running .pipe-mark{border-color:#3f74b5;background:#131e2b;color:#9fcaff}
+.pipe-step.running .pipe-body b{color:#cfe2ff}
+.pipe-step.failed .pipe-mark{border-color:#a5584b;background:#241715;color:#ffb4ab}
+.pipe-step.failed .pipe-mark:after{background:#a0554a}
+.pipe-step.failed .pipe-body b,.pipe-step.failed .pipe-body small{color:#ffb4ab}
+.pipe-step.pending .pipe-body b{color:#8b968f}
+
+.panel-field{display:flex;flex-direction:column;gap:5px;font-size:10px;color:#9aa59e}
+.panel-field small{color:#7d8a82;font-size:9px}
+.panel-field input,.panel-field select{height:34px;padding:0 10px;border-radius:8px;
+  border:1px solid #303833;background:#161b18;color:#dfe5e0;font-size:11px}
+.panel-field input:focus{border-color:#4a6b53}
+.panel-detect{display:flex;align-items:flex-start;gap:6px;margin:0;font-size:10px;line-height:1.55;
+  color:#9fb0a6}
+.panel-detect svg{flex:none;margin-top:2px}
+.panel-detect.bad{color:#ffb4ab}
+.panel-toggle{display:inline-flex;align-items:center;gap:7px;min-height:34px;padding:0 11px;
+  border:1px solid #3d7333;border-radius:20px;background:#151d15;color:#b8f49b;font-size:11px;
+  cursor:pointer}
+.panel-toggle.muted{border-color:#303833;background:#161b18;color:#b6c0b8}
+.panel-toggle:hover{border-color:#5f8f52}
+
+.panel-files{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:1px}
+.panel-files li{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;
+  font-size:10px;color:#b6c0b8}
+.panel-files li:hover{background:#141a17}
+.panel-files li>svg:first-child{flex:none;color:#8b968f}
+.panel-files li.bad>svg:first-child{color:#ffb4ab}
+.panel-files li>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel-files svg.ok{flex:none;color:#a9e68a}
+.panel-files svg.bad{flex:none;color:#ffb4ab}
+.panel-file{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0;min-height:0;padding:0;
+  border:0;background:transparent;color:inherit;text-align:left;cursor:pointer}
+.panel-file span{font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel-file small{font-size:9px;line-height:1.4;color:#8b968f}
+.panel-file:hover span{color:#cfe8d5;text-decoration:underline}
+.panel-apply{display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;
+  height:38px;margin-top:4px;border:0;border-radius:10px;
+  background:linear-gradient(110deg,#9bea75,#d6ffbe);color:#142011;font-weight:700;font-size:11px;
+  cursor:pointer}
+.panel-apply:disabled{opacity:.38;cursor:not-allowed}
+.panel-applied{display:flex;align-items:center;gap:6px;margin:4px 0 0;font-size:10px;color:#b7ee9e}
+
+/* -- Narrow viewports ---------------------------------------------------------------------- */
+/* Three columns stop being honest well before the window does. The rail goes first — it is
+   navigation, and a session of two or three attempts is navigable by scrolling. The panel is
+   the last thing to go, because losing sight of the run is the failure this layout exists to
+   prevent. */
+@media(max-width:760px){
+  .chat-turn{margin-bottom:20px}
+  .chat-message.user p{max-width:94%}
+  .chat-narration-stage{display:block;min-width:0;margin:0 0 2px}
+}
+@media(prefers-reduced-motion:reduce){
+  .panel-group-head>svg{transition:none}
+}
+
+/* ------------------------------------------------------------------------------------------
+   Dockable panels. See Dock.tsx for why these are the reader's to move, not mine to fix.
+
+   The shell is a flex row and every docked piece carries an `order`, so a panel changes sides
+   without changing places in the DOM. Widths come from the element's own inline style, which
+   is what the splitter writes as you drag.
+   ------------------------------------------------------------------------------------------ */
+.dock-shell{flex:1;min-height:0;display:flex;align-items:stretch}
+.dock-center{order:0;flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
+.dock-pane{flex:none;min-width:0;min-height:0;display:flex;flex-direction:column;
+  background:#0f1412;overflow:hidden}
+.dock-pane.left{border-right:1px solid #232a25}
+.dock-pane.right{border-left:1px solid #232a25}
+
+/* The divider is 8px of target around a 1px line. A 1px hit area is a 1px hit area no matter
+   how good it looks; every resize handle worth using is wider than it appears.
+   It takes its own 8px of layout rather than straddling the boundary on negative margins: a
+   handle that overhangs sits directly on top of the scrollbar of whichever column is beside
+   it, and then dragging that scrollbar resizes the panel instead. */
+.dock-splitter{flex:none;width:8px;position:relative;z-index:5;cursor:col-resize;
+  background:transparent;display:flex;align-items:center;justify-content:center;touch-action:none}
+.dock-splitter i{width:1px;height:100%;background:#232a25;transition:background .12s var(--easing),
+  width .12s var(--easing)}
+.dock-splitter:hover i,.dock-splitter:focus-visible i{width:3px;background:#5f8f52}
+.dock-splitter:focus-visible{outline:3px solid #a8c7fa;outline-offset:-2px;border-radius:3px}
+/* While dragging, the cursor is the divider's wherever it has got to, and nothing selects. */
+body.dock-resizing{cursor:col-resize;user-select:none}
+body.dock-resizing *{cursor:col-resize!important}
+
+.dock-head{flex:none;display:flex;align-items:center;gap:8px;height:40px;padding:0 8px 0 13px;
+  border-bottom:1px solid #1e2521;color:#dfe5e0}
+.dock-head>svg{flex:none;color:#a9e68a}
+.dock-head b{flex:1;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#c3cdc6;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dock-controls{flex:none;display:flex;gap:2px}
+.dock-btn{width:28px;height:28px;min-height:0;display:grid;place-items:center;border:0;
+  border-radius:7px;background:transparent;color:#9aa59e;cursor:pointer}
+.dock-btn:hover{background:#1a211d;color:#e3eae4}
+.dock-body{flex:1;min-height:0;overflow:hidden auto}
+
+/* Collapsed: a strip that still says what it is. A panel that collapses to nothing sends the
+   reader hunting the header for whatever brings it back. */
+.dock-strip{flex:none;width:32px;min-height:0;padding:12px 0;display:flex;flex-direction:column;
+  align-items:center;gap:12px;border:0;background:#0c100e;color:#9aa59e;cursor:pointer}
+.dock-strip.left{border-right:1px solid #232a25}
+.dock-strip.right{border-left:1px solid #232a25}
+.dock-strip:hover{background:#131917;color:#e3eae4}
+.dock-strip span{writing-mode:vertical-rl;font-size:10px;letter-spacing:.1em;text-transform:uppercase}
+.dock-strip.left span{transform:rotate(180deg)}
+
+/* Floating: below the threshold the panel stops displacing the centre column and covers it. */
+.dock-pane.floating{position:fixed;top:64px;bottom:0;z-index:41;
+  box-shadow:0 0 48px rgba(0,0,0,.5)}
+.dock-pane.floating.left{left:0}
+.dock-pane.floating.right{right:0}
+.dock-scrim{position:fixed;inset:64px 0 0;z-index:40;border:0;padding:0;
+  background:rgba(6,9,7,.62);cursor:pointer}
+
+.dock-toggle{display:inline-flex;align-items:center;gap:7px;min-height:36px;padding:0 10px;
+  border:1px solid #303833;border-radius:10px;background:#141a17;color:#9aa59e;cursor:pointer}
+.dock-toggle:hover{border-color:#4a5850;color:#e3eae4}
+
+@media(prefers-reduced-motion:reduce){
+  .dock-splitter i{transition:none}
+}
+
+/* Docked evidence: the panel keeps its timeline and drops its frame, because the frame — the
+   width, the border, the heading, the controls — is now the dock's job. */
+.evidence-panel.docked{width:auto;flex:none;border:0;background:transparent;overflow:visible}

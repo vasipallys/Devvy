@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Bot, Code2, FileText, Globe2, Home, Image, Menu, MessageSquare, Paperclip, Plus, Search, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Bot, Code2, FileText, Globe2, Home, Image, MessageSquare, Paperclip, Plus, Search, Send, ShieldCheck, Sparkles, Square, Trash2, X } from 'lucide-react'
 import { marked } from 'marked'
 import { api, API, attachToJob } from './api'
+import { DockPane, DockToggle, useDock } from './Dock'
 import { EvidencePanel } from './EvidencePanel'
 import { Tooltip } from './Tooltip'
 import { SystemStatusChip } from './SystemStatusChip'
@@ -71,7 +72,14 @@ export function App({ onHome, initialConversationId, onConversationChange }: {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState(''); const [mode, setMode] = useState<Mode>('auto')
   const [attachments, setAttachments] = useState<Attachment[]>([]); const [sending, setSending] = useState(false)
-  const [sidebar, setSidebar] = useState(true); const [error, setError] = useState(''); const [query, setQuery] = useState('')
+  // Both side panels are the reader's to size, move and put away, and the choice persists.
+  const listDock = useDock('chat.conversations', {
+    side: 'left', width: 270, min: 210, max: 420, overlayBelow: 900,
+  })
+  const evidenceDock = useDock('chat.evidence', {
+    side: 'right', width: 304, min: 240, max: 560, overlayBelow: 1000,
+  })
+  const [error, setError] = useState(''); const [query, setQuery] = useState('')
   const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
   const [activeJobId, setActiveJobId] = useState<string>()
   const endRef = useRef<HTMLDivElement>(null); const fileRef = useRef<HTMLInputElement>(null); const abortRef = useRef<AbortController | undefined>(undefined)
@@ -191,17 +199,17 @@ export function App({ onHome, initialConversationId, onConversationChange }: {
     }
   }
   const filtered = conversations.filter(x => x.title.toLowerCase().includes(query.toLowerCase()))
-  return <div className="shell">
-    <aside className={sidebar ? 'sidebar' : 'sidebar closed'}>
-      <div className="brand"><div className="brand-mark"><Sparkles size={18}/></div><span>Devvy</span><button className="icon" onClick={() => setSidebar(false)}><X size={18}/></button></div>
+  return <div className="shell dock-shell">
+    <DockPane dock={listDock} label="Conversations" icon={<MessageSquare size={14}/>} className="sidebar">
+      <div className="brand"><div className="brand-mark"><Sparkles size={18}/></div><span>Devvy</span></div>
       {onHome && <button className="home-nav" onClick={onHome}><Home size={17}/> Home</button>}
       <button className="new-chat" onClick={createChat}><Plus size={17}/> New chat</button>
       <div className="search"><Search size={15}/><input aria-label="Search conversations" placeholder="Search conversations" value={query} onChange={e => setQuery(e.target.value)}/></div>
       <div className="history"><div className="section-label">Recent</div>{filtered.map(chat => <div key={chat.id} className={`history-item ${activeId === chat.id ? 'active' : ''}`}><button className="history-open" onClick={() => setActiveId(chat.id)}><MessageSquare size={15}/><span>{chat.title}</span></button><button className="history-delete" aria-label={`Delete ${chat.title}`} onClick={() => removeChat(chat.id)}><Trash2 size={14}/></button></div>)}</div>
       <div className="local-badge"><span className="pulse"/><div><b>Local workspace</b><small>Private on your machine</small></div></div>
-    </aside>
-    <main>
-      <header><button className="icon" aria-label="Toggle navigation" onClick={() => setSidebar(!sidebar)}><Menu size={19}/></button>{onHome && <button className="icon" title="Home" onClick={onHome}><Home size={18}/></button>}<div className="workspace-title"><b>Chat</b><span>Grounded local assistant</span></div><div className="header-spacer"/>{activeId && conversations.some(item => item.id === activeId) && <ShareButton resourceType="conversation" resourceId={activeId}/>}<SystemStatusChip/></header>
+    </DockPane>
+    <main className="dock-center">
+      <header><DockToggle dock={listDock} label="the conversation list"/>{onHome && <button className="icon" title="Home" onClick={onHome}><Home size={18}/></button>}<div className="workspace-title"><b>Chat</b><span>Grounded local assistant</span></div><div className="header-spacer"/>{activeId && conversations.some(item => item.id === activeId) && <ShareButton resourceType="conversation" resourceId={activeId}/>}<SystemStatusChip/><DockToggle dock={evidenceDock} label="the evidence panel"/></header>
       <section className="conversation">
         {!messages.length ? <div className="welcome"><div className="orb"><Sparkles size={31}/></div><h1>What can I help you build?</h1><p>Chat privately with Devvy, write production code, research the web, analyze documents, or generate images.</p><div className="suggestions">{[
           ['Build an API', 'Create a FastAPI service with authentication', Code2], ['Analyze a document', 'Summarize and extract key findings', FileText],
@@ -237,7 +245,9 @@ export function App({ onHome, initialConversationId, onConversationChange }: {
           </div></div><small className="disclaimer">Devvy runs locally and can make mistakes. Verify important information.</small>
       </footer>
     </main>
-    <EvidencePanel events={runEvents}/>
+    <DockPane dock={evidenceDock} label="Run evidence" icon={<ShieldCheck size={14}/>}>
+      <EvidencePanel events={runEvents} docked/>
+    </DockPane>
     <div className="sr-only" aria-live="polite">{sending ? 'Devvy is working' : error || (runEvents.length ? runEvents[runEvents.length - 1].label : '')}</div>
   </div>
 }

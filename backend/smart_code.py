@@ -208,6 +208,60 @@ class SmartCodeModelOutput(BaseModel):
         return normalized
 
 
+def inspect_workspace(path: str) -> dict[str, Any]:
+    """What kind of folder is this, and therefore what kind of change is being asked for.
+
+    Asking the user to choose "generate" or "modify" asks them to describe something the
+    application can see for itself: an empty folder can only be generated into, and a folder
+    with source in it is being modified. Getting that wrong is not cosmetic — it decides
+    whether existing files are read as context and whether a named target must already exist.
+
+    Only counts and languages are returned, never file names. Mode inference needs to know
+    *whether* there is code, not what it is called.
+    """
+    try:
+        root = Path(path).expanduser().resolve()
+    except (OSError, ValueError):
+        return {"exists": False, "reason": "That path could not be read."}
+    if not root.exists():
+        return {"exists": False, "reason": "That folder does not exist yet."}
+    if not root.is_dir():
+        return {"exists": False, "reason": "That path is a file, not a folder."}
+
+    # `_walk`, not `_scan`: scanning ranks files against an objective and caps at 40, which
+    # would report "40 files" for every repository larger than that and make the count
+    # meaningless. Counting needs the raw walk.
+    counts: dict[str, int] = {}
+    total = 0
+    for item, _size in _walk(root):
+        suffix = item.suffix.lower()
+        if suffix not in SOURCE_EXTENSIONS or not item.is_file():
+            continue
+        counts[suffix] = counts.get(suffix, 0) + 1
+        total += 1
+        if total >= 5000:
+            # A ceiling so an enormous tree cannot make this endpoint slow. The distinction
+            # this answers is "empty or not", which 5000 files settles decisively.
+            break
+
+    languages = [
+        suffix.lstrip(".")
+        for suffix, _ in sorted(counts.items(), key=lambda pair: pair[1], reverse=True)[:4]
+    ]
+    return {
+        "exists": True,
+        "path": str(root),
+        "name": root.name,
+        "source_files": total,
+        "languages": languages,
+        # An empty folder can only be generated into; one with code is being modified. The
+        # user can still override, but the default should not be a question they answer worse
+        # than the application can.
+        "suggested_mode": "generate" if total == 0 else "modify",
+        "empty": total == 0,
+    }
+
+
 def _dedupe(values: list[str]) -> list[str]:
     """Drop repeats while keeping order.
 

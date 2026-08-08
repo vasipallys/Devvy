@@ -21,6 +21,8 @@ export interface SmartCodePreview {
   /** False when `plan`/`summary` are Devvy's stand-ins, not the model's own words. */
   plan_supplied?: boolean
   summary_supplied?: boolean
+  /** How to deploy what this change produces. */
+  deploy_steps?: string[]
   edits: { action: 'create' | 'replace'; path: string; content: string; reason: string }[]
   findings: { severity: string; message: string; path?: string; suggestion?: string }[]
   diffs: Record<string, string>
@@ -564,4 +566,16 @@ export interface EstimateResult extends Record<string, unknown> {
     }
     determinism: string
   }
+}
+
+/** What Smart Code found in a chosen folder. Counts and languages only — never file names. */
+export interface WorkspaceInfo {
+  exists: boolean
+  reason?: string
+  path?: string
+  name?: string
+  source_files?: number
+  languages?: string[]
+  suggested_mode?: 'generate' | 'modify'
+  empty?: boolean
 }

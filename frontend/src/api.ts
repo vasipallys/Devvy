@@ -1,7 +1,7 @@
 import type {
   AgentEvent, Attachment, Conversation, EstimateDecision, EstimateHistoryEntry, EstimateHistoryPage,
   EstimateHistoryStats, JobDetail, JobStatus, JobSummary, Message, Mode,
-  SmartCodeRequest, SystemStatus,
+  SmartCodeRequest, SystemStatus, WorkspaceInfo,
   AuthState, ResourceShare, ShareResource, WorkspaceUser,
 } from './types'
 
@@ -204,6 +204,15 @@ export const api = {
   submitSmartCode: (payload: SmartCodeRequest) =>
     json<{ job_id: string }>('/api/smart-code/jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }),
+  /** What kind of folder is this? Drives the detected mode, so the user is not asked. */
+  inspectWorkspace: (path: string) =>
+    json<WorkspaceInfo>(`/api/smart-code/workspace?${new URLSearchParams({ path })}`),
+  /** Continue a finished run: the previous failures become the brief, plus your instruction. */
+  fixSmartCode: (jobId: string, instruction: string) =>
+    json<{ job_id: string; corrected_from: string }>(`/api/smart-code/jobs/${jobId}/fix`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instruction }),
     }),
   smartCodeApply: (previewToken: string) => json<any>('/api/smart-code/apply', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

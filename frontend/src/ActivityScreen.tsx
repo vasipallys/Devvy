@@ -4,6 +4,7 @@ import {
   PlugZap, RotateCw, Square, Timer,
 } from 'lucide-react'
 import { api } from './api'
+import { DockPane, DockToggle, useDock } from './Dock'
 import { EvidencePanel } from './EvidencePanel'
 import { SystemStatusChip } from './SystemStatusChip'
 import { Tooltip } from './Tooltip'
@@ -104,6 +105,11 @@ export function ActivityScreen({ onHome, onOpenConversation, onOpenWorkspace, in
   initialJobId?: string
 }) {
   const { jobs, active, error, refresh, cancel } = useJobs()
+  // The list is wide by default because job titles are long, but a reader comparing two runs
+  // wants the detail pane instead — so the split is theirs, and it persists.
+  const listDock = useDock('activity.requests', {
+    side: 'left', width: 360, min: 260, max: 520, overlayBelow: 900,
+  })
   const [selected, setSelected] = useState<string | undefined>(initialJobId)
   const [detail, setDetail] = useState<JobDetail>()
   const [detailError, setDetailError] = useState('')
@@ -135,10 +141,11 @@ export function ActivityScreen({ onHome, onOpenConversation, onOpenWorkspace, in
         <Timer /><span><b>Activity</b><small>Requests running and completed</small></span>
       </div>
       <SystemStatusChip />
+      <DockToggle dock={listDock} label="the request list" />
     </header>
 
-    <div className="activity-layout">
-      <aside className="activity-list">
+    <div className="activity-layout dock-shell">
+      <DockPane dock={listDock} label="Requests" icon={<Timer size={14} />} className="activity-list">
         <div className="activity-head">
           <span className="eyebrow">{active > 0 ? `${active} IN PROGRESS` : 'ALL CAUGHT UP'}</span>
           <button className="text-action" onClick={refresh}><RotateCw size={13} /> Refresh</button>
@@ -159,9 +166,9 @@ export function ActivityScreen({ onHome, onOpenConversation, onOpenWorkspace, in
           </p>}
         {finished.map(job => <JobRow key={job.id} job={job} selected={selected === job.id}
           onOpen={() => setSelected(job.id)} onCancel={() => cancel(job.id)} />)}
-      </aside>
+      </DockPane>
 
-      <main className="activity-detail">
+      <main className="activity-detail dock-center">
         {!detail && !detailError && <div className="activity-placeholder">
           <Timer size={34} />
           <p>Select a request to see its status, evidence, and response.</p>

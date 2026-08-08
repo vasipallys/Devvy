@@ -1,11 +1,13 @@
 import { ActivityScreen } from './ActivityScreen'
+import { useAuth } from './AuthContext'
+import { DockScope } from './Dock'
 import { AccountDock } from './AccountDock'
 import { AccountScreen } from './AccountScreen'
 import { App as ChatApp } from './App'
 import { ErrorBoundary } from './ErrorBoundary'
 import { EstimateCodeScreen } from './EstimateCodeScreen'
 import { HomeScreen } from './HomeScreen'
-import { SmartCodeScreen } from './SmartCodeScreen'
+import { SmartCodeChat } from './SmartCodeChat'
 import { TalkScreen } from './TalkScreen'
 import { useJobs } from './useJobs'
 import { useRoute } from './useRoute'
@@ -18,11 +20,14 @@ export function DesktopApp() {
   // Mounted once at the shell so the close guard and the activity badge apply on every
   // screen, not only where a request happened to be started.
   const { active } = useJobs()
+  // Panel widths and sides are stored per signed-in user, so two people sharing a browser do
+  // not inherit each other's layout. Docking itself knows nothing about sessions.
+  const { user } = useAuth()
   const home = () => navigate({ page: 'home' })
 
   // Keyed per page so navigating away from a crashed screen clears the boundary, and a
   // crash in one workspace can never blank out the others.
-  return <>
+  return <DockScope value={user?.id ?? 'local'}>
   <ErrorBoundary key={route.page} onHome={route.page === 'home' ? undefined : home}>
     {route.page === 'chat'
       ? <ChatApp
@@ -32,7 +37,7 @@ export function DesktopApp() {
         />
       : route.page === 'talk' ? <TalkScreen onHome={home} initialJobId={route.id} />
       : route.page === 'smart-code'
-        ? <SmartCodeScreen onHome={home} initialJobId={route.id} />
+        ? <SmartCodeChat onHome={home} initialJobId={route.id} />
       : route.page === 'estimate-code'
         ? <EstimateCodeScreen
             onHome={home}
@@ -58,5 +63,5 @@ export function DesktopApp() {
         />}
   </ErrorBoundary>
   <AccountDock onAccount={() => navigate({ page: 'account' })}/>
-  </>
+  </DockScope>
 }

@@ -92,7 +92,9 @@ from backend.jobs import FINISHED as FINISHED_JOB_STATES, Job, JobContext, JobRu
 from backend.model import GemmaRuntime
 from backend.observability import configure_observability
 from backend.schemas import ChatRequest, RenameRequest
-from backend.smart_code import SmartCodeApplyRequest, SmartCodeRequest, SmartCodeService
+from backend.smart_code import (
+    SmartCodeApplyRequest, SmartCodeRequest, SmartCodeService, inspect_workspace,
+)
 from backend.tools import extract_document
 from backend.voice_engine import VoiceEngine
 
@@ -1561,6 +1563,18 @@ def submit_smart_code(payload: SmartCodeRequest, request: Request):
         "smart-code", payload.objective[:120], payload.model_dump(mode="json"), owner_id=owner
     )
     return {"job_id": str(job.id)}
+
+
+@app.get("/api/smart-code/workspace")
+def smart_code_workspace(path: str = Query(min_length=1, max_length=2000)):
+    """Describe a folder so the UI can infer the kind of change without asking the user.
+
+    Authenticated only, like every other Smart Code route, and deliberately thin: counts and
+    languages, never file names. Smart Code already lets an authenticated user point a run at
+    any path on this machine, so this adds no capability — it only lets the interface stop
+    asking a question it can answer itself.
+    """
+    return inspect_workspace(path)
 
 
 @app.post("/api/smart-code/jobs/{job_id}/fix", status_code=202)
