@@ -250,6 +250,28 @@ new one. For the same reason `start()` MUST reset the stop flag, or a restarted 
 evaluates an already-false loop condition, exits immediately, and every later submission sits
 queued forever with no error anywhere.
 
+#### 4.5.0 Fair scheduling across users
+
+Concurrency is one job at a time, so **queue order is the only scheduling lever there is** —
+and strict FIFO is the wrong one the moment a second person uses the application.
+
+A ten-story batch takes roughly twenty minutes per story. Under FIFO, a colleague who sends a
+ninety-second chat message a moment later waits more than three hours behind it. Neither user
+did anything unreasonable, and the result does not read as a busy machine — it reads as a
+broken product.
+
+The queue MUST therefore be served **round-robin by owner**: among users with queued work, the
+one who has waited longest since a job of theirs last *started* goes next, and a user who has
+never run anything goes first. Within a single user, their own jobs stay strictly FIFO.
+
+Consequences, all intended: everybody's first job starts before anybody's second; a long batch
+costs its owner throughput rather than costing everyone else availability; and with
+authentication disabled every job is ownerless, the group collapses to one, and the policy is
+exactly FIFO again.
+
+Fairness MUST NOT be confused with capacity. `MAX_ACTIVE_JOBS_PER_USER` bounds how much any one
+user may have in flight; fair ordering decides who goes next among what is already queued.
+
 Concurrency MUST be one job at a time. `GemmaRuntime` already serializes generation behind a
 single lock, so a wider pool would only queue inside the model while making progress reporting
 dishonest.
@@ -748,6 +770,191 @@ Generate/Modify with an instruction to return the smallest concrete whole-file c
   and verification, and expires after 30 minutes.
 - `can_apply` is true only when at least one file was materialized and every check passed.
 
+#### 10.3.1 A degraded run must not borrow the language of a successful one
+
+Three separate claims were observed on a single screen for a run that produced nothing:
+every pipeline stage green, a banner reading "Verification failed", and a plan and summary
+attributed to the model that it never wrote. Each was independently wrong.
+
+- **Zero checks is not zero failures.** `passed == len(checks)` is trivially true for an empty
+  list, so a run with no file reported "Structural checks: 0/0 passed" and a green Verify
+  stage — success claimed for work never done. A stage that had nothing to check MUST report
+  that, and MUST NOT report completion outside review mode.
+- **Name the actual blocker.** "Verification failed" was shown whenever the gate was shut,
+  including when no file existed to verify. The status MUST distinguish *no file produced*
+  from *the file failed its checks*; they have different remedies.
+- **Never attribute a stand-in to the model.** Schema defaults keep the contract satisfiable,
+  but the result MUST record whether the summary and plan are the model's words
+  (`plan_supplied`, `summary_supplied`). A blocker MUST NOT say "its plan is below" above a
+  plan this application invented, and the UI MUST show an absent plan as absent.
+
+#### 10.3.2 One pipeline, both ends of the model range
+
+A change is requested as one structured answer. When that answer arrives complete *and
+parseable* the run proceeds — a capable model is never second-guessed. Otherwise the change is
+**decomposed** rather than abandoned.
+
+A one-shot answer fails in **three** ways, and the fallback MUST cover all of them:
+
+| Failure | What arrives |
+| --- | --- |
+| Absent | Valid output carrying no edits |
+| Broken | Edits whose content does not parse |
+| **Unreadable** | Output too malformed to parse as JSON — the generation call *raises* |
+
+The third is the one that reached users, and the one a fallback most easily misses: the
+exception escaped the generation call and took the whole run down *before* the fallback that
+exists for exactly this case could execute. An answer too malformed to read is the strongest
+possible signal that the question was too big — not a reason to stop asking.
+
+**Unusable is not the same as absent.** Keying that decision on "did any edits come back"
+misses the second case too: a request for a full API with tests returned a single 28-line file
+carrying a bare `@app` decorator directly above `if __name__ == "__main__":`, and the pipeline
+treated one broken file as an answer. The proposed content is therefore parsed *before* it is
+materialised — cheap, and it needs no filesystem — so a one-shot answer whose files do not
+parse takes the same path as one that produced nothing.
+
+Changing strategy must be able to help and must never be able to hurt: a decomposed result
+replaces the one-shot answer only when it leaves **fewer** unparseable files. A worse second
+attempt is discarded, so the user keeps the first result they could at least read.
+
+The rungs:
+
+1. **Plan** — ask only for a file manifest: path, purpose, kind. A short answer a 1B model can
+   give reliably.
+2. **Write** — one focused generation per planned file, returning **raw file text, not JSON**.
+3. **Verify and repair** each file independently.
+4. **Check coherence** across the change.
+
+Two decisions carry this section.
+
+**Ask for one file at a time.** "A production-ready API with validation, auth, error handling
+and logging" is not one answer; it is six. Asked as one it came back as a single file with a
+syntax error on line 21. Asked as six it comes back as six files, each verified and repairable
+on its own, and one failure costs one file rather than the run.
+
+**Ask for code as text, never inside JSON.** Every newline and quote in fifty lines of source
+must be escaped correctly or the whole answer is unparseable, and one slip discards work that
+was otherwise fine. A file is text, so it is requested as text and taken verbatim: nothing to
+escape, nothing to lose, and the output budget is spent on code rather than punctuation.
+
+Model output MUST be de-duplicated before use. A compact model repeats itself: one real run
+listed "Run migrations" and "Create a Dockerfile" twice each in its deployment steps, and a
+numbered list that repeats itself is one nobody trusts. A repeated *file* is worse than untidy
+— it would be generated twice at full CPU cost, and the second would silently overwrite the
+first.
+
+A plan MUST be completed with the artefacts that make a change usable by someone else — a
+README covering install, run, test and deploy, and at least one test file — whatever the model
+remembered to ask for. These are not extras: they are the difference between code that runs on
+the machine that generated it and code a colleague can install, verify and deploy. Deployment
+steps are returned with the result for the same reason.
+
+#### 10.4.1 The repair loop
+
+Generated code that does not parse MUST be repaired **until every check passes, or until the
+escalation runs out of genuinely different questions to ask** — whichever comes first.
+
+One attempt was not enough. A model that failed to patch its own file answers the same question
+the same way, so each round asks a different one:
+
+| Round | Question |
+| --- | --- |
+| 1 | Here is your file and the parser's complaint — fix it |
+| 2 | The same, with the offending lines quoted and "change as little as possible" |
+| 3 | Abandon the broken text; write the file again from its purpose |
+
+Two properties are load-bearing.
+
+**It can only improve the change.** A replacement is kept only when it actually parses, so a
+round producing something worse is discarded and the previous version stands. A round that
+improves nothing does not end the loop, because the next round asks a different question.
+
+**It is bounded.** "Keep going until it passes" cannot be unbounded against a model that cannot
+succeed: every round is a full CPU generation *per broken file*, so an unbounded loop runs
+forever. `MAX_REPAIR_ROUNDS` (3) is where the escalation runs out of distinct strategies.
+
+The parser's line number MUST be carried through to the repair prompt and used to quote the
+surrounding lines. A model asked to fix "line 41" of a sixty-line file has to find line 41
+first, and often fixes something else instead.
+
+When rounds are exhausted the run MUST state how many were used and which files still fail.
+The gate stays shut — a change that does not parse is never written, however many attempts
+were spent on it.
+
+#### 10.4.2 Build coherence, without executing anything
+
+Nothing generated is ever executed. Devvy does not run your tests or your build, and claiming
+otherwise is the one thing this product cannot afford to get wrong — the README it writes gives
+you the commands to run them yourself.
+
+What can be established deterministically is that the change hangs together: a module that
+imports a sibling must have one. Only **relative** imports are checked, because
+`from .models import Item` has exactly one meaning while `import requests` might be a package,
+a local module, or a typo — and a check that guesses produces warnings nobody can act on.
+
+This catches a failure invisible to syntax checking: every file parses, one imports a module
+the change never wrote, and nothing notices until somebody runs it.
+
+#### 10.4.3 Correcting a finished run
+
+A finished run — succeeded or failed — MUST be re-runnable **as a correction**. Re-running from
+the original objective repeats the original mistake, because the model never learns what went
+wrong.
+
+`POST /api/smart-code/jobs/{id}/fix` submits a fresh job whose objective carries the previous
+run's specific defects: the files that did not parse and where, unresolved blocker findings, and
+whether anything was produced at all — plus any instruction the user adds. Only failures are
+listed; work that passed is left alone and explicitly preserved. This is the structured-output
+repair loop's principle applied to a whole run rather than to one answer, and the brief is built
+from the preview the user is looking at, so what the model is told to fix is what they saw.
+
+#### 10.4.0 Structural repair
+
+Verification MUST report the offending **source line**, not only the parser's rule and a line
+number. "expected 'except' or 'finally' block (main.py, line 22)" names a rule; the line is
+what makes it actionable, and it is what the model needs quoted back to fix its own output.
+
+Generated code that does not parse MUST get **one** bounded repair attempt before the gate
+rejects it. The structured-output loop only ever validated the *envelope* — whether the JSON
+carried an edit — never whether the code inside it parsed. So a file with a `try:` and no
+`except` passed generation and died at the write gate with the exact defect already known and
+no attempt made to fix it.
+
+The repair is deliberately narrow, and its safety property is that it can only improve a
+preview:
+
+- one file at a time, sent with the parser's message and the offending line;
+- the whole file is returned, never a diff;
+- a replacement is kept **only if it parses**, so a failed repair leaves the original visible
+  and the gate exactly as shut as it already was;
+- it never runs in review mode, which writes nothing by definition.
+
+Content returned by a repair MUST end with exactly one newline; dropping it turns every
+repaired file into a spurious last-line diff.
+
+#### 10.4.1 Model-supplied paths
+
+A path returned by the model MUST be interpreted as **workspace-relative**, even when it
+begins with a separator or a drive letter. The model has no knowledge of the user's
+filesystem and always means "in this repository": it writes `/app/main.py` for
+`app/main.py`, and — observed in a real run — writes the *route* `/items/generate` when asked
+for an endpoint. Treating those as filesystem-absolute pushed them outside the workspace.
+
+This is not a loosening of containment. Rewriting happens before resolution, and the
+containment check still runs afterwards, so a rewritten path either lands inside the
+workspace or is rejected. Paths supplied by the **user** keep their literal meaning, since
+they may legitimately name an absolute location inside the workspace.
+
+An unusable path MUST cost its own edit and nothing more. Raising aborted the whole preview,
+so one bad entry among several discarded the changes the model got right — after minutes of
+CPU — and surfaced as a traceback. Each rejection MUST appear as a finding in the result, not
+only in a server log. When *every* path is unusable the run degrades exactly as it does for no
+edits at all: the plan is returned, `can_apply` is false, and nothing is written.
+
+The prompt MUST state that a path is a source file and never a URL route, endpoint, or
+directory; the conflation is what produced `/items/generate` in the first place.
+
 ### 10.5 Apply contract
 
 Apply MUST require: `approved=true`; a known, single-use token (popped on use); a token within
@@ -875,6 +1082,17 @@ model policy, and a pending human-review record. Only concise public rationale i
 hidden chain-of-thought MUST NOT be requested or stored.
 
 ### 11.3.2 Agent flow visualisation
+
+Each node carries a compact metric for glancing at ("17 evidence item(s)") and, when opened,
+**the same plain-language narration the evidence panel uses** for that stage — one stage must
+not describe itself two different ways in two places. A node that has not run has no evidence
+to narrate and MUST fall back to why the stage exists, marked as not yet reached; describing
+work that has not happened as though it had is the failure this whole section guards against.
+
+Narration is prose a person reads, so it MUST agree grammatically with its own numbers.
+"7 specialist lenss", "1 touch a protected dimension", and "1 of which need a person" all
+shipped in a first draft here. Narration nobody trusts to be written correctly is not
+obviously trustworthy about anything else, and the singular case is the common one.
 
 The pipeline MUST be shown as a flow, not only as a checklist, in both the live run and the
 stored result. A user watching a multi-minute CPU run needs to see *which agent is working and
@@ -1074,6 +1292,49 @@ an effect's return value as the cleanup function; a non-callable value there cra
 because `EffectCallback` permits `void` and DOM methods are typed `void` regardless of their runtime
 return. An ESLint `no-restricted-syntax` rule enforces it.
 
+#### 12.0.1 A workspace opens on a run, not merely on a workspace
+
+Every workspace route MUST accept the id of the run it was opened on —
+`#/smart-code/{jobId}`, `#/estimate/{jobId}`, `#/talk/{jobId}` — and the screen MUST show
+*that* run.
+
+Opening the workspace without an id was wrong twice over. With several runs of the same kind
+it attached to an arbitrary one, and for a finished run it showed an empty form: the result
+was reachable only from Activity, which is the screen the user had just chosen to leave. It
+also made the state unshareable and lost on reload, unlike every other route.
+
+Behaviour by run state:
+
+| State | Screen shows |
+| --- | --- |
+| Active | Attaches and streams live, as before |
+| Finished with a result | The stored result, plus the inputs that produced it, so re-running is one click rather than retyping |
+| Finished without one | The recorded status and error |
+| Missing, or another user's | The server's 404, unchanged — the two MUST stay indistinguishable |
+
+A restored run MUST NOT be presented as a live one. A Smart Code preview is applied with a
+single-use server-side token that expires and does not survive a restart, so a rebuilt preview
+says what it is and warns that approval may need a fresh run — an Approve button that fails for
+an invisible reason is worse than one that explains itself first.
+
+Talk is the honest exception: it holds each conversation in its socket by design, so there is
+no session to resume. A past turn is shown as a past turn beside a live session. Staging it as
+a resumed conversation would be a lie the next message immediately exposes.
+
+#### 12.1.0 A disabled control must state its own reason
+
+Whenever a primary action is disabled, the reason MUST appear **as visible text beside it**,
+naming the specific check that is blocking it — not only in a status chip elsewhere on the
+page, and not only in an evidence panel the user has to go looking for.
+
+A tooltip is not sufficient here and MUST NOT be relied on: browsers suppress pointer events
+on a `disabled` control, so hover help never reaches the one person who needs it.
+
+Observed: Smart Code's structural verification failed, so *Approve & apply* was correctly
+greyed out — but the failure detail sat in a separate strip, and *Build verified preview* was
+still enabled. The gate was doing its job and the interface read as broken. Blocking the write
+was right; leaving the reason somewhere else was not.
+
 #### 12.1.1 Client-side cost
 
 The SPA is open for hours and mostly idle, so its background cost is a feature of the product.
@@ -1174,6 +1435,42 @@ Evidence values MUST stay legible: URL lists render as clickable hostname chips,
 chips, booleans as yes/no. Retrieved source URLs MUST NOT be collapsed to a count. The empty state
 MUST state that hidden chain-of-thought is never shown or stored.
 
+**Every stage MUST narrate itself in plain language.** Raw measurements are the *readings*, not
+the story: "Files Considered 0, Budget 48000, Target Policy ranked retrieval" says what a number
+was without saying what the stage did, why it matters, or whether zero is normal. A reader who
+did not write the pipeline cannot recover any of that from a key-value table.
+
+Each event therefore leads with one sentence describing what is happening, with its figures
+folded into the prose, and the raw values move behind a *Measurements* disclosure. Evidence
+remains evidence; it is now also readable. Requirements:
+
+- `running` narrates the work in progress, terminal states narrate the outcome — a run that
+  will take minutes must say so, so a slow stage is not mistaken for a stuck one.
+- **A stage MUST name its particulars, not only its counts.** "3 files read" does not answer
+  the one question the stage raises, which is *which* files; "1 of 2 failed to parse" does not
+  say which one, and the reader cannot act without knowing. Every stage therefore emits the
+  specifics it decided on, and narrates them:
+
+  | Stage | Must name |
+  | --- | --- |
+  | classify | The mode, the workspace, whether targets were named or ranked, the risk tier |
+  | retrieve | The repository path and the files actually read |
+  | plan | Every file the change needs, and that tests and docs are among them |
+  | code | Each file drafted and its size, so a stub is distinguishable from an implementation |
+  | verify | Which file failed and the parser's message, and how many passed |
+
+- A checkpoint the UI draws MUST correspond to an event something actually reported.
+  `classify` was previously a green tick for work no event described.
+- A zero MUST be explained, not merely displayed: "no source files were found, so the model is
+  working from your objective alone" is the fact behind `files_included: 0`.
+- Narration MUST NOT restate the headline, and MUST be omitted entirely when the evidence
+  lacks the figures the sentence needs — a sentence full of `?` is worse than the table it
+  replaced.
+- Narration is presentation, so it lives on the client: it describes events already recorded,
+  and improving the wording must never change what a run stores or invalidate a saved
+  trajectory.
+- A malformed evidence payload MUST cost the narration only, never the event itself.
+
 ### 12.6.1 Explanation on hover
 
 Evidence answers *what happened*. The interface must also answer *why it is that way*, without
@@ -1240,6 +1537,29 @@ than partially mitigated: the fix is to connect to the validated IP directly, wh
 with TLS SNI and certificate validation and needs a custom transport. As-built, the exposure
 is bounded by research URLs coming from a search provider rather than from user input, and by
 the deployment being loopback-only.
+
+### 13.0.2 Deployment coherence is checked at startup
+
+Several settings are safe on a laptop and dangerous on a network, and **nothing in normal
+operation reveals the difference** — the application works perfectly right up until the moment
+the mistake matters. The relationship between "who can reach this" and "how is it protected"
+MUST therefore be checked once, before any traffic is served.
+
+| Condition | Action |
+| --- | --- |
+| Non-loopback `APP_HOST` with `AUTH_ENABLED=false` | **Refuse to start** |
+| Non-loopback host with `AUTH_SECURE_COOKIES=false` | Warn loudly |
+| Non-loopback host (CORS accepts any loopback origin) | Warn |
+| `JIRA_WRITE_ENABLED` with authentication disabled | Warn |
+
+Serving unauthenticated on a network is fatal rather than a warning because it cannot be
+recovered by noticing later: every conversation, estimate, and repository path is readable and
+writable by anyone who can reach the port. Refusing to start is a bad afternoon; the
+alternative is not. The transport problems are warnings because they are fixable in place and
+blocking a deploy outright over them would be disproportionate.
+
+The loopback default that everybody actually runs MUST produce no output at all — a check that
+cries wolf on the normal case trains people to ignore it.
 
 ### 13.1 Production hardening
 
@@ -1418,6 +1738,59 @@ cd frontend; npm run preview                             # serve dist/
     write nothing, with a blocker finding explaining why, rather than only an error.
 60. One malformed edit among several does not discard the usable ones, and the count that was
     discarded is reported.
+61. A model path beginning with `/` is written inside the workspace, not rejected as external.
+62. A route-shaped or non-source path drops its own edit, is reported as a finding, and never
+    aborts the run; if every path is unusable the run degrades instead of raising.
+63. A disabled *Approve & apply* names the failing check in visible text beside the button,
+    with the file and the parser's message, and says how many files *did* pass — a run where
+    three of four files are ready must not read the same as one that failed outright.
+64. A verification failure quotes the offending source line, not only the rule and line number.
+65. Code that does not parse gets one repair attempt; a successful repair opens the gate, and
+    a failed one leaves the original proposal visible with the gate still shut.
+66. A run that produced no file reports the verify stage as failed with nothing to check —
+    never as "0/0 passed" — and the status names *no file produced*, not verification.
+67. A summary or plan Devvy supplied is flagged as such, shown as absent in the UI, and never
+    referred to as the model's own.
+68. Every pipeline stage explains itself in a sentence a non-author can read, with raw
+    measurements available but secondary, and no stage renders `undefined` or a bare `?`.
+68a. Each stage names its own particulars — the workspace, the files read, the files planned,
+    the file that failed — rather than reporting counts alone, and no pipeline checkpoint is
+    drawn for work no event reported.
+69. All 16 agent-flow nodes narrate what they did on this run, with correct singular/plural
+    agreement, and a node that has not run says so rather than borrowing a completed one's
+    language.
+70. One user's batch cannot starve another's short request: everybody's first queued job runs
+    before anybody's second, while a single user's own jobs stay in submission order.
+71. With authentication disabled, scheduling is indistinguishable from FIFO.
+72. Workspace scan caches and held previews are both bounded, and expired entries are dropped
+    rather than merely ignored.
+73. A network-reachable host with authentication disabled refuses to start; the loopback
+    default produces no warnings at all.
+74. Opening a run from Activity lands on that run: active ones stream, finished ones show
+    their stored result and inputs, and every workspace route round-trips through the hash.
+75. A run belonging to another user is indistinguishable from one that does not exist.
+76. A restored preview states that it is a completed run rather than presenting a live
+    Approve action.
+77. A model that cannot answer in one shot has the change decomposed into one file per
+    generation, and a model that can is left alone. A one-shot answer whose files do not parse
+    is decomposed rather than accepted, and a decomposed attempt that is worse than the
+    one-shot answer is discarded. An answer too malformed to parse reaches the fallback rather
+    than failing the run, and when the fallback cannot recover either, the result names the
+    real reason rather than reporting an empty one.
+77b. Review mode, which writes nothing and has no fallback, still fails loudly on an
+    unreadable answer instead of degrading silently.
+78. Generated code is requested as raw text, never embedded in JSON.
+79. Every plan yields a README and at least one test file, and deployment steps are returned
+    with the result.
+79a. Repeated deployment steps and repeated planned files are collapsed before use.
+80. A relative import with no matching module fails the build check; third-party imports do
+    not, and nothing generated is executed.
+81. A finished run can be re-run as a correction that names its own failures and preserves
+    what passed.
+82. Code that does not parse is repaired repeatedly, with a different strategy each round,
+    until every check passes; a round that improves nothing does not end the loop.
+83. The repair loop is bounded, never applies a change that still fails, and reports how many
+    rounds were used and what is still failing.
 
 ### 15.2 Regression suite
 

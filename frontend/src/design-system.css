@@ -151,3 +151,41 @@ button:disabled{cursor:not-allowed}
 .truncation-notice span{display:flex;flex-direction:column;gap:2px}
 .truncation-notice b{font-size:11px}
 .truncation-notice small{font-size:10px;line-height:1.5;color:#e0c68f}
+
+/* A blocked write gate states its reason where the blocked button is. */
+.apply-column{display:flex;flex-direction:column;align-items:flex-end;gap:9px;max-width:420px}
+.apply-blocked{display:flex;gap:8px;align-items:flex-start;margin:0;padding:9px 11px;
+  border:1px solid #6b3a35;border-radius:9px;background:#2a1917;color:#ffb4ab;text-align:left}
+.apply-blocked svg{flex:none;margin-top:1px}
+.apply-blocked span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.apply-blocked b{font-size:11px}
+.apply-blocked small{font-size:10px;line-height:1.5;color:#e8b3ac;overflow-wrap:anywhere}
+.apply-blocked .apply-blocked-next{color:#c69b95;margin-top:2px}
+@media(max-width:900px){.apply-column{align-items:stretch;max-width:none}}
+
+/* A plan Devvy invented is shown as absent, never attributed to the model. */
+.plan-absent{color:#8a938c;font-style:italic}
+.plan-absent span{background:#232a25!important;color:#8a938c!important;font-style:normal}
+
+/* Narration leads; the raw measurements stay one click away rather than in the reader's face. */
+.evidence-narration{font-size:10px!important;line-height:1.65!important;color:#cfd8d2!important;margin:0 0 2px}
+.evidence-values{margin-top:7px;border-top:1px solid #242b26;padding-top:6px}
+.evidence-values summary{list-style:none;cursor:pointer;font-size:8px;letter-spacing:.1em;
+  text-transform:uppercase;color:#7f8b83;padding:2px 0}
+.evidence-values summary::-webkit-details-marker{display:none}
+.evidence-values summary:before{content:'▸ ';font-size:9px}
+.evidence-values[open] summary:before{content:'▾ '}
+.evidence-values summary:hover{color:#a9b6ae}
+
+/* An opened flow node explains the run, not just its reading. */
+.flow-detail{display:flex;flex-direction:column;gap:5px;margin-top:7px}
+.flow-narration{font-size:10px;line-height:1.6;color:#4a5850;text-align:left;white-space:normal}
+.flow-node .flow-detail .flow-hint{color:#7b8880;font-style:italic}
+
+/* A screen showing a finished run says so, rather than looking like a live one. */
+.restored-banner{display:flex;gap:9px;align-items:flex-start;margin:0 auto 14px;padding:10px 12px;
+  max-width:1180px;border:1px solid #35506b;border-radius:10px;background:#141d27;color:#a8c7fa}
+.restored-banner svg{flex:none;margin-top:1px}
+.restored-banner span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.restored-banner b{font-size:11px}
+.restored-banner small{font-size:10px;line-height:1.55;color:#9fb4cf}

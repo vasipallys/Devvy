@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, ArrowLeft, Check, Code2, FileCode2, FolderOpen, LoaderCircle, Play, ShieldCheck, Sparkles } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Check, Code2, FileCode2, FolderOpen, History, LoaderCircle, Play, ShieldCheck, Sparkles } from 'lucide-react'
 import { api, attachToJob } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { SystemStatusChip } from './SystemStatusChip'
 import { Tooltip } from './Tooltip'
 import { isJobActive } from './types'
-import type { AgentEvent, SmartCodePreview, SmartCodeRequest } from './types'
+import type { AgentEvent, JobDetail, SmartCodePreview, SmartCodeRequest } from './types'
 
 const pipeline = ['classify', 'retrieve', 'plan', 'code', 'verify', 'critique', 'gate']
 
@@ -32,7 +32,11 @@ function stagesFrom(events: AgentEvent[]): Record<string, string> {
   return stages
 }
 
-export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
+export function SmartCodeScreen({ onHome, initialJobId }: {
+  onHome: () => void
+  /** Open this screen on one specific run, from Activity or a shared link. */
+  initialJobId?: string
+}) {
   const [workspace, setWorkspace] = useState('')
   const [targets, setTargets] = useState<string[]>([])
   const [objective, setObjective] = useState('')
@@ -53,17 +57,71 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
   const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
   const [targetDraft, setTargetDraft] = useState('')
   const [jobId, setJobId] = useState<string>()
+  /** Set when the screen is showing a finished run rebuilt from its stored result rather
+   *  than a live one. Applying is bounded by a server-side token that this screen cannot
+   *  see, so a restored preview must say what it is instead of looking live. */
+  const [restoredAt, setRestoredAt] = useState<string>()
   const abortRef = useRef<AbortController | undefined>(undefined)
 
-  // Rejoin a preview still running on the server after a reload or a tab close.
+  // Open on a specific run when asked; otherwise rejoin whatever of ours is still going.
+  //
+  // Opening "the workspace" was not enough. With several runs it attached to an arbitrary
+  // one, and for a finished run it showed an empty form — the result was reachable only from
+  // Activity, which is the screen you had just chosen to leave.
   useEffect(() => {
     let disposed = false
-    api.jobs().then(({ jobs }) => {
-      const live = jobs.find(job => job.kind === 'smart-code' && isJobActive(job.status))
-      if (live && !disposed) follow(live.id)
-    }).catch(() => undefined)
+    const load = async () => {
+      if (initialJobId) {
+        try {
+          const job = await api.job(initialJobId)
+          if (disposed) return
+          if (isJobActive(job.status)) return follow(job.id)
+          return restore(job)
+        } catch (cause) {
+          // A job that is missing, or belongs to somebody else, is indistinguishable by
+          // design: the server answers 404 either way, and so does this screen.
+          if (!disposed) setError((cause as Error).message)
+          return
+        }
+      }
+      try {
+        const { jobs } = await api.jobs()
+        const live = jobs.find(job => job.kind === 'smart-code' && isJobActive(job.status))
+        if (live && !disposed) follow(live.id)
+      } catch { /* nothing to rejoin */ }
+    }
+    load()
     return () => { disposed = true }
-  }, [])
+  }, [initialJobId])
+
+  /** Rebuild the screen from a finished run's stored result. */
+  function restore(job: JobDetail) {
+    setRunEvents(job.events)
+    setStages({ classify: 'completed', ...stagesFrom(job.events), ...(job.result?.stages || {}) })
+    setRestoredAt(job.completed_at ?? undefined)
+    const request = (job.request ?? {}) as Partial<SmartCodeRequest>
+    // Restoring the inputs too, so "run it again" is one click rather than retyping the
+    // objective from the job title.
+    if (request.workspace_root) setWorkspace(request.workspace_root)
+    if (request.objective) setObjective(request.objective)
+    if (request.mode) setMode(request.mode)
+    if (request.target_paths) setTargets(request.target_paths)
+    if (request.acceptance_criteria) setAcceptance(request.acceptance_criteria.join('\n'))
+    if (request.language) setLanguage(request.language)
+    if (request.framework) setFramework(request.framework)
+    if (request.risk) setRisk(request.risk)
+    const data = job.result?.preview as SmartCodePreview | undefined
+    if (data) {
+      setPreview(data)
+      setActiveDiff(Object.keys(data.diffs || {})[0] || '')
+      setStatus('Showing a completed run')
+    } else if (job.error) {
+      setError(job.error)
+      setStatus(`This run ${job.status}`)
+    } else {
+      setStatus(`This run ${job.status} without producing a preview`)
+    }
+  }
 
   // A browser cannot read a real filesystem path from a file input, so targets are entered
   // as text. They may be absolute, or relative to the workspace root — the API resolves both
@@ -97,9 +155,14 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
             const data = result.preview
             setStages(current => ({ ...current, ...(result.stages || {}) }))
             setPreview(data)
+            // "Verification failed" was reported whenever the gate was shut, including
+            // when the model produced no file at all — naming a check that never ran, on a
+            // screen that simultaneously showed every pipeline stage green.
             setStatus(
               data.can_apply ? 'Verified — review the diff'
-                : mode === 'review' ? 'Review complete' : 'Verification failed',
+                : mode === 'review' ? 'Review complete'
+                : data.edits.length === 0 ? 'No file produced — nothing to apply'
+                : 'Verification failed',
             )
             setActiveDiff(Object.keys(data.diffs || {})[0] || '')
           } else if (status !== 'succeeded') {
@@ -133,6 +196,18 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
     try { await api.cancelJob(jobId) } catch { /* already finished */ }
     abortRef.current?.abort()
   }
+  // The specific checks that are keeping the write gate shut, and how much of the run did
+  // succeed. "3 of 4 files are ready" and "the run failed" are very different situations, and
+  // the gate shutting on one bad file made them look identical.
+  const blockingFailures = (preview?.verification ?? []).filter(item => !item.passed)
+  // Verification reports absolute paths; an edit carries a workspace-relative one. Comparing
+  // them raw silently matches nothing, so every file would look ready.
+  const slashes = (value: string) => value.replaceAll('\\', '/')
+  const brokenPaths = blockingFailures.map(item => slashes(item.path))
+  const readyCount = (preview?.edits ?? []).filter(
+    edit => !brokenPaths.some(path => path.endsWith(slashes(edit.path))),
+  ).length
+
   async function apply() {
     if (!preview?.can_apply || !window.confirm(`Apply ${preview.edits.length} verified file change(s) to ${workspace}?`)) return
     setApplying(true); setError('')
@@ -187,8 +262,58 @@ export function SmartCodeScreen({ onHome }: { onHome: () => void }) {
         {error && <div className="product-error">{error}</div>}
         {!preview && !error && <section className="smart-empty"><Sparkles size={40}/><h1>Production changes start with evidence.</h1><p>Select a workspace and describe the outcome. Smart Code retrieves relevant files, plans the smallest change, generates complete code, verifies it, and waits for your approval before writing.</p></section>}
         {preview && <div className="smart-results">
-          <section className="result-summary"><div><span className="eyebrow">RESULT</span><h2>{preview.summary}</h2></div>{preview.edits.length > 0 && <button className="apply-action" disabled={!preview.can_apply || applying || !!result} onClick={apply}><ShieldCheck size={17}/>{result ? 'Applied' : applying ? 'Applying…' : 'Approve & apply'}</button>}</section>
-          <section className="plan-strip">{preview.plan.map((item, index) => <div key={item}><span>{index + 1}</span>{item}</div>)}</section>
+          {/* A restored preview looks identical to a live one, and is not: approval needs a
+              single-use server-side token that expires and does not survive a restart. Saying
+              so up front beats an Approve button that fails for a reason nobody can see. */}
+          {restoredAt && <div className="restored-banner" role="status">
+            <History size={15}/>
+            <span>
+              <b>Showing a completed run</b>
+              <small>
+                Finished {new Date(restoredAt).toLocaleString()}. The diff and evidence below are
+                exactly what that run produced. Applying needs a live preview — if approval is
+                refused as expired, run it again to get a fresh one.
+              </small>
+            </span>
+          </div>}
+          <section className="result-summary">
+            <div><span className="eyebrow">RESULT</span><h2>{preview.summary}</h2></div>
+            {preview.edits.length > 0 && <div className="apply-column">
+              <button className="apply-action" disabled={!preview.can_apply || applying || !!result} onClick={apply}>
+                <ShieldCheck size={17}/>{result ? 'Applied' : applying ? 'Applying…' : 'Approve & apply'}
+              </button>
+              {/* A disabled button explains itself in text, not a tooltip: browsers suppress
+                  pointer events on a disabled control, so hover help never reaches the one
+                  person who needs it. Blocking the write is correct — leaving the reason on
+                  another part of the page is what made it look broken. */}
+              {!preview.can_apply && !result && <p className="apply-blocked" role="status">
+                <AlertTriangle size={14}/>
+                <span>
+                  <b>
+                    Cannot apply — {blockingFailures.length} of {preview.edits.length} file
+                    {preview.edits.length === 1 ? '' : 's'} failed its checks
+                  </b>
+                  {blockingFailures.map(item => <small key={item.path}>
+                    {item.path.split(/[\\/]/).pop()}: {item.detail}
+                  </small>)}
+                  <small className="apply-blocked-next">
+                    {readyCount > 0
+                      ? `The other ${readyCount} file${readyCount === 1 ? '' : 's'} passed and `
+                        + 'are shown in the diff. Nothing is written until every file parses — '
+                        + 'applying half a change would leave the workspace broken in a way '
+                        + 'that is harder to undo than re-running.'
+                      : 'Devvy will not write code it could not parse.'}
+                    {' '}Re-run, or narrow the objective so the model has room to finish.
+                  </small>
+                </span>
+              </p>}
+            </div>}
+          </section>
+          {preview.plan_supplied === false
+            ? <section className="plan-strip"><div className="plan-absent">
+                <span>—</span>The model did not return a plan for this objective.
+              </div></section>
+            : <section className="plan-strip">{preview.plan.map((item, index) => <div key={item}><span>{index + 1}</span>{item}</div>)}</section>}
           {preview.findings.length > 0 && <section className="finding-list">{preview.findings.map((item, index) => <div key={index} className={item.severity}><b>{item.severity}</b><span>{item.path && `${item.path}: `}{item.message}</span></div>)}</section>}
           {preview.edits.length > 0 && <section className="diff-panel"><nav>{Object.keys(preview.diffs).map(path => <button className={activeDiff === path ? 'active' : ''} key={path} onClick={() => setActiveDiff(path)}>{path}</button>)}</nav><pre>{preview.diffs[activeDiff] || 'No textual changes.'}</pre></section>}
           <section className="verification-row">{preview.verification.map(item => <div className={item.passed ? 'pass' : 'fail'} key={item.path}>{item.passed ? <Check/> : '×'}<span><b>{item.path.split(/[\\/]/).pop()}</b><small>{item.detail}</small></span></div>)}</section>

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import {
   Check, ChevronDown, CircleAlert, CircleDashed, Eye, EyeOff, LoaderCircle, Scale, UserCheck,
 } from 'lucide-react'
+import { narrate } from './evidenceNarration'
 import { Tooltip } from './Tooltip'
 import type { AgentEvent, AgenticPipeline, Calculation } from './types'
 
@@ -137,6 +138,21 @@ function metric(stage: string, events: AgentEvent[]): string | undefined {
   }
 }
 
+/** What this stage actually did, in a sentence, from the run's own evidence.
+ *
+ *  The compact metric beside a node ("17 evidence item(s)", "2055 chars") is a glanceable
+ *  reading, not an explanation: it says what a number was without saying what the stage did or
+ *  whether that number is good. Opening a node should answer the question that made the reader
+ *  open it. The same narration the evidence panel uses is reused deliberately — one stage
+ *  should not describe itself two different ways in two places.
+ *
+ *  A stage that has not run yet has no evidence to narrate, so the node falls back to why the
+ *  stage exists. That is the honest thing to show for work that has not happened. */
+function narrationFor(stage: string, events: AgentEvent[]): string | undefined {
+  const event = [...events].reverse().find(item => item.stage === stage)
+  return event ? narrate(event) : undefined
+}
+
 function StatusMark({ status }: { status: Status }) {
   if (status === 'running') return <LoaderCircle className="spin" size={13} />
   if (status === 'completed') return <Check size={13} />
@@ -145,10 +161,12 @@ function StatusMark({ status }: { status: Status }) {
   return <CircleDashed size={13} />
 }
 
-function FlowNode({ node, status, detail, expanded, onToggle }: {
+function FlowNode({ node, status, detail, narration, expanded, onToggle }: {
   node: Node
   status: Status
   detail?: string
+  /** What this stage did on this run, when it has run. */
+  narration?: string
   expanded: boolean
   onToggle: () => void
 }) {
@@ -166,7 +184,12 @@ function FlowNode({ node, status, detail, expanded, onToggle }: {
       <ChevronDown size={12} className="flow-chevron" />
     </span>
     {detail && <span className="flow-metric">{detail}</span>}
-    {expanded && <span className="flow-hint">{node.hint}</span>}
+    {expanded && <span className="flow-detail">
+      {/* What happened on this run, when it has run; otherwise why the stage exists. Never
+          both — a reader opening a node wants one answer, not a paragraph of scaffolding. */}
+      <span className="flow-narration">{narration ?? node.why}</span>
+      {!narration && <span className="flow-hint">Not reached yet on this run.</span>}
+    </span>}
   </button></Tooltip>
 }
 
@@ -255,7 +278,7 @@ export function AgentFlowDiagram({ events, pipeline, calculation, defaultOpen = 
                   <span className="branch-tag">Pass A</span>
                   {nodes.filter(node => node.branch === 'primary').map(node =>
                     <FlowNode key={node.stage} node={node} status={state[node.stage]}
-                      detail={detailFor(node.stage)}
+                      detail={detailFor(node.stage)} narration={narrationFor(node.stage, events)}
                       expanded={expanded === node.stage}
                       onToggle={() => setExpanded(expanded === node.stage ? undefined : node.stage)} />)}
                 </div>
@@ -263,7 +286,7 @@ export function AgentFlowDiagram({ events, pipeline, calculation, defaultOpen = 
                   <span className="branch-tag blind">Pass B · blind</span>
                   {nodes.filter(node => node.branch === 'reviewer').map(node =>
                     <FlowNode key={node.stage} node={node} status={state[node.stage]}
-                      detail={detailFor(node.stage)}
+                      detail={detailFor(node.stage)} narration={narrationFor(node.stage, events)}
                       expanded={expanded === node.stage}
                       onToggle={() => setExpanded(expanded === node.stage ? undefined : node.stage)} />)}
                 </div>
@@ -271,7 +294,7 @@ export function AgentFlowDiagram({ events, pipeline, calculation, defaultOpen = 
             : <div className="flow-row">
                 {nodes.map(node =>
                   <FlowNode key={node.stage} node={node} status={state[node.stage]}
-                    detail={detailFor(node.stage)}
+                    detail={detailFor(node.stage)} narration={narrationFor(node.stage, events)}
                     expanded={expanded === node.stage}
                     onToggle={() => setExpanded(expanded === node.stage ? undefined : node.stage)} />)}
               </div>}

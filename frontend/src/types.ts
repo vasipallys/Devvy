@@ -18,6 +18,9 @@ export interface SmartCodePreview {
   preview_token: string
   summary: string
   plan: string[]
+  /** False when `plan`/`summary` are Devvy's stand-ins, not the model's own words. */
+  plan_supplied?: boolean
+  summary_supplied?: boolean
   edits: { action: 'create' | 'replace'; path: string; content: string; reason: string }[]
   findings: { severity: string; message: string; path?: string; suggestion?: string }[]
   diffs: Record<string, string>
@@ -40,6 +43,19 @@ export interface SmartCodePreview {
 /* Background jobs. Every model-backed request is a job that outlives the tab that made it. */
 
 export type JobKind = 'chat' | 'estimate' | 'smart-code' | 'talk'
+
+/** Which workspace a request belongs to.
+ *
+ *  Named rather than inlined at the call site because the two vocabularies do not match:
+ *  the job kind is `estimate` and the page is `estimate-code`. TypeScript proves the page
+ *  name is valid; only a mapping written down in one place makes it checkable that it is
+ *  also the *right* one. */
+export function workspacePageFor(kind: JobKind): 'chat' | 'talk' | 'smart-code' | 'estimate-code' {
+  if (kind === 'smart-code') return 'smart-code'
+  if (kind === 'estimate') return 'estimate-code'
+  if (kind === 'talk') return 'talk'
+  return 'chat'
+}
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
 
 export const JOB_FINISHED: JobStatus[] = ['succeeded', 'failed', 'cancelled', 'interrupted']

@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Code2, FileText, Globe2, Image, MessageSquare, Mic, Paperclip, RotateCcw, Send, Sparkles, Square, Video, X } from 'lucide-react'
+import { ArrowLeft, Code2, FileText, Globe2, History, Image, MessageSquare, Mic, Paperclip, RotateCcw, Send, Sparkles, Square, Video, X } from 'lucide-react'
 import { api, API } from './api'
 import { EvidencePanel } from './EvidencePanel'
 import { Tooltip } from './Tooltip'
+import { isJobActive } from './types'
 import type { AgentEvent, Attachment, Mode } from './types'
 // 640px WebP: the avatar renders at 178px, so the 1254px PNG it replaced shipped
 // 2.5 MB — roughly seven times the JavaScript bundle — to fill a small circle.
@@ -41,7 +42,16 @@ const STATE_WHY: Record<string, { label: string; why: string }> = {
   error: { label: 'Error', why: 'Something in the turn failed. The reason is shown rather than hidden, and the session stays open so you can try again.' },
 }
 
-export function TalkScreen({ onHome }: { onHome: () => void }) {
+export function TalkScreen({ onHome, initialJobId }: {
+  onHome: () => void
+  /** A past spoken turn to show alongside a fresh session.
+   *
+   *  Talk keeps its conversation in the socket only, by design — there is no server-side
+   *  history to reopen. So a run opened from Activity is shown as what it is: that turn's
+   *  answer and evidence, beside a live session you can carry on with. Pretending the old
+   *  session had been resumed would be a lie the next message would immediately expose. */
+  initialJobId?: string
+}) {
   const [state, setState] = useState<AgentState>('connecting')
   const [transcript, setTranscript] = useState('')
   const [response, setResponse] = useState('')
@@ -56,6 +66,30 @@ export function TalkScreen({ onHome }: { onHome: () => void }) {
   const [mouthOpen, setMouthOpen] = useState(0)
   const [subtitleWord, setSubtitleWord] = useState(0)
   const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
+  /** Set when this screen was opened on a past turn from Activity. */
+  const [pastTurn, setPastTurn] = useState(false)
+
+  // Show the turn that was asked for. Talk holds its conversation in the socket only, so
+  // there is nothing to "resume" — the honest thing is to show that turn's answer and
+  // evidence beside a live session, clearly labelled, rather than staging it as though the
+  // old session were still open.
+  useEffect(() => {
+    if (!initialJobId) return
+    let disposed = false
+    api.job(initialJobId).then(job => {
+      if (disposed || isJobActive(job.status)) return
+      setRunEvents(job.events)
+      setPastTurn(true)
+      const request = (job.request ?? {}) as { transcript?: string }
+      if (request.transcript) setTranscript(request.transcript)
+      const answer = String(job.result?.response ?? job.output_text ?? '')
+      if (answer) setResponse(answer)
+    }).catch(() => {
+      // Missing and not-yours are the same 404 by design; a live session is still usable.
+      if (!disposed) setPastTurn(false)
+    })
+    return () => { disposed = true }
+  }, [initialJobId])
   const socketRef = useRef<WebSocket | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -191,6 +225,19 @@ export function TalkScreen({ onHome }: { onHome: () => void }) {
   return <div className="talk-screen">
     <header className="talk-header"><button onClick={onHome}><ArrowLeft size={18}/> Home</button><div><Sparkles size={18}/><b>Talk with Devvy</b><span>Local voice companion</span></div><button onClick={reset}><RotateCcw size={16}/> Reset</button></header>
     <main className="talk-main">
+      {/* Talk holds its conversation in the socket, so there is no old session to resume.
+          Showing that turn's answer beside a live session is the honest presentation; staging
+          it as a resumed conversation would be a lie the next message immediately exposes. */}
+      {pastTurn && <div className="restored-banner" role="status">
+        <History size={15}/>
+        <span>
+          <b>Showing a past turn</b>
+          <small>
+            Talk keeps each conversation in its live connection only, so this one cannot be
+            resumed. Speak or type to start a new session — this answer stays until you do.
+          </small>
+        </span>
+      </div>}
       <section className="voice-stage">
         <Tooltip label={STATE_WHY[state]?.label ?? state} detail={STATE_WHY[state]?.why ?? 'The voice session is in this state.'}>
         <div className={`voice-orbit state-${state}`}><div className="orbit-ring ring-one"/><div className="orbit-ring ring-two"/><div className="voice-core face-core"><GeometricAgentFace mouthOpen={mouthOpen} speaking={state === 'speaking'}/></div></div></Tooltip>

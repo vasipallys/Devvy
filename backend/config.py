@@ -89,6 +89,53 @@ class Settings(BaseSettings):
         self.generated_dir.mkdir(parents=True, exist_ok=True)
 
 
+#: Hosts that only the local machine can reach. Anything else is a network deployment, and a
+#: network deployment has to satisfy the checks below before the process will serve traffic.
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def deployment_problems(settings: Settings) -> tuple[list[str], list[str]]:
+    """Configuration that is safe on a laptop and dangerous on a network.
+
+    Every setting here has a sensible local default and a catastrophic remote consequence, and
+    nothing in normal operation reveals the difference — the application works perfectly right
+    up until the moment the mistake matters. So the coherence between "who can reach this" and
+    "how is it protected" is checked once, at startup, and stated out loud.
+
+    Returns (fatal, warnings). Fatal problems stop the process: refusing to start is a bad
+    afternoon, whereas serving everyone's conversations and repositories to an unauthenticated
+    network is not recoverable by noticing later.
+    """
+    remote = settings.app_host not in _LOOPBACK_HOSTS
+    fatal: list[str] = []
+    warnings: list[str] = []
+
+    if remote and not settings.auth_enabled:
+        fatal.append(
+            f"APP_HOST is {settings.app_host!r}, which is reachable from the network, but "
+            "AUTH_ENABLED is false. Every conversation, estimate, and repository path would be "
+            "readable and writable by anyone who can reach this port. Set AUTH_ENABLED=true, or "
+            "bind to 127.0.0.1."
+        )
+    if remote and settings.auth_enabled and not settings.auth_secure_cookies:
+        warnings.append(
+            "AUTH_SECURE_COOKIES is false on a network-reachable host. Session cookies will be "
+            "sent over plain HTTP and can be captured in transit. Set AUTH_SECURE_COOKIES=true "
+            "and serve over HTTPS (directly or behind a TLS-terminating proxy)."
+        )
+    if remote:
+        warnings.append(
+            "Loopback origins are always accepted by CORS. On a network deployment, set "
+            "CORS_ORIGINS to the exact origins you serve the frontend from."
+        )
+    if settings.jira_write_enabled and not settings.auth_enabled:
+        warnings.append(
+            "JIRA_WRITE_ENABLED is true with authentication disabled: anyone who can reach this "
+            "port can write story points into your tracker."
+        )
+    return fatal, warnings
+
+
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()

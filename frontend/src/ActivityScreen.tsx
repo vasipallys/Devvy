@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  ArrowLeft, BrainCircuit, Check, CircleAlert, Code2, LoaderCircle, MessageSquare, Mic,
+  ArrowLeft, ArrowUpRight, BrainCircuit, Check, CircleAlert, Code2, LoaderCircle, MessageSquare, Mic,
   PlugZap, RotateCw, Square, Timer,
 } from 'lucide-react'
 import { api } from './api'
@@ -96,9 +96,11 @@ function JobRow({ job, onOpen, onCancel, selected }: {
   </div>
 }
 
-export function ActivityScreen({ onHome, onOpenConversation, initialJobId }: {
+export function ActivityScreen({ onHome, onOpenConversation, onOpenWorkspace, initialJobId }: {
   onHome: () => void
   onOpenConversation?: (conversationId: string) => void
+  /** Open the workspace *on this run*, not merely the workspace. */
+  onOpenWorkspace?: (kind: JobKind, jobId: string) => void
   initialJobId?: string
 }) {
   const { jobs, active, error, refresh, cancel } = useJobs()
@@ -176,10 +178,21 @@ export function ActivityScreen({ onHome, onOpenConversation, initialJobId }: {
             </div>
             <div className="activity-summary-actions">
               {detail.access?.owner !== false && <ShareButton resourceType="job" resourceId={detail.id}/>}
-              {detail.kind === 'chat' && detail.conversation_id && onOpenConversation &&
-                <button className="primary-action" onClick={() => onOpenConversation(detail.conversation_id!)}>
-                  Open conversation
-                </button>}
+              {/* Activity answers "what is happening"; the workspace is where you act on it.
+                  Chat can land on the exact conversation because a chat job records one.
+                  The others have no per-run destination, so they open their workspace, which
+                  reattaches to a run still in flight on load. Without this the only way back
+                  was Home and then the workspace by hand. */}
+              {detail.kind === 'chat' && detail.conversation_id && onOpenConversation
+                ? <button className="primary-action" onClick={() => onOpenConversation(detail.conversation_id!)}>
+                    <ArrowUpRight size={15}/> Open conversation
+                  </button>
+                : onOpenWorkspace && <button
+                    className="primary-action"
+                    onClick={() => onOpenWorkspace(detail.kind, detail.id)}
+                  >
+                    <ArrowUpRight size={15}/> Open {KIND_META[detail.kind]?.label ?? detail.kind}
+                  </button>}
             </div>
           </section>
 

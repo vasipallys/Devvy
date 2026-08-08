@@ -9,6 +9,7 @@ import { SmartCodeScreen } from './SmartCodeScreen'
 import { TalkScreen } from './TalkScreen'
 import { useJobs } from './useJobs'
 import { useRoute } from './useRoute'
+import { workspacePageFor } from './types'
 
 export function DesktopApp() {
   // Pages come from the URL hash, so Back works, a reload keeps its place, and an estimate
@@ -29,20 +30,23 @@ export function DesktopApp() {
           initialConversationId={route.id}
           onConversationChange={id => navigate({ page: 'chat', id }, true)}
         />
-      : route.page === 'talk' ? <TalkScreen onHome={home} />
-      : route.page === 'smart-code' ? <SmartCodeScreen onHome={home} />
+      : route.page === 'talk' ? <TalkScreen onHome={home} initialJobId={route.id} />
+      : route.page === 'smart-code'
+        ? <SmartCodeScreen onHome={home} initialJobId={route.id} />
       : route.page === 'estimate-code'
         ? <EstimateCodeScreen
             onHome={home}
             initialView={route.view === 'history' ? 'history' : 'new'}
             initialHistoryId={route.view === 'history' ? route.id : undefined}
+            initialJobId={route.view === 'history' ? undefined : route.id}
             onViewChange={(view, id) =>
               navigate({ page: 'estimate-code', view: view === 'history' ? 'history' : undefined, id }, true)}
           />
       : route.page === 'activity'
         ? <ActivityScreen onHome={home}
             initialJobId={route.id}
-            onOpenConversation={id => navigate({ page: 'chat', id })} />
+            onOpenConversation={id => navigate({ page: 'chat', id })}
+            onOpenWorkspace={(kind, jobId) => navigate({ page: workspacePageFor(kind), id: jobId })} />
       : route.page === 'account' ? <AccountScreen onHome={home}/>
       : <HomeScreen
           activeJobs={active}

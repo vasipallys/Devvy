@@ -1,4 +1,5 @@
 import { Check, ChevronDown, CircleAlert, Clock3, Database, LoaderCircle, RotateCw, ShieldCheck } from 'lucide-react'
+import { narrate } from './evidenceNarration'
 import { Tooltip } from './Tooltip'
 import type { AgentEvent } from './types'
 
@@ -62,7 +63,17 @@ export function EvidencePanel({ events, title = 'Run evidence', compact = false 
         <summary><Tooltip label={STATUS_MEANING[event.status]?.label ?? event.status}
           detail={STATUS_MEANING[event.status]?.why ?? 'A stage of the run reported this state.'}>
           <span className={`evidence-icon ${event.status}`}><StatusIcon status={event.status}/></span></Tooltip><span><b>{event.label}</b><small>{event.stage.replaceAll('_', ' ')} · {(event.elapsed_ms / 1000).toFixed(1)}s</small></span><ChevronDown/></summary>
-        {(event.detail || event.evidence) && <div className="evidence-detail">{event.detail && <p>{event.detail}</p>}{event.evidence && Object.entries(event.evidence).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><EvidenceValue value={value}/></div>)}</div>}
+        {(event.detail || event.evidence || narrate(event)) && <div className="evidence-detail">
+          {/* The narration comes first because it is what a reader needs: what this stage is
+              doing and why. The measurements stay underneath — evidence is still evidence,
+              it just no longer arrives as a bare key-value table nobody can interpret. */}
+          {narrate(event) && <p className="evidence-narration">{narrate(event)}</p>}
+          {event.detail && <p>{event.detail}</p>}
+          {event.evidence && Object.keys(event.evidence).length > 0 && <details className="evidence-values">
+            <summary>Measurements</summary>
+            {Object.entries(event.evidence).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><EvidenceValue value={value}/></div>)}
+          </details>}
+        </div>}
       </details>)}</div>}
   </aside>
 }

@@ -55,7 +55,7 @@ from backend.auth import (
     validate_password,
     verify_password,
 )
-from backend.config import get_settings
+from backend.config import deployment_problems, get_settings
 from backend.db import (
     Conversation, Message, create_conversation, engine, init_db, list_messages, now, utc_iso,
 )
@@ -112,6 +112,15 @@ job_runner = JobRunner(engine, retention_days=settings.job_retention_days)
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    # Before anything is served, not after. A deployment that is unsafe for its reachability
+    # must fail here, where somebody is watching, rather than work perfectly until it doesn't.
+    fatal, warnings = deployment_problems(settings)
+    for message in warnings:
+        logger.warning("Deployment: %s", message)
+    if fatal:
+        for message in fatal:
+            logger.critical("Refusing to start: %s", message)
+        raise RuntimeError(fatal[0])
     init_db()
     if settings.app_host not in {"127.0.0.1", "localhost", "::1"}:
         if not settings.auth_enabled:
@@ -1552,6 +1561,39 @@ def submit_smart_code(payload: SmartCodeRequest, request: Request):
         "smart-code", payload.objective[:120], payload.model_dump(mode="json"), owner_id=owner
     )
     return {"job_id": str(job.id)}
+
+
+@app.post("/api/smart-code/jobs/{job_id}/fix", status_code=202)
+def fix_smart_code(job_id: UUID, request: Request, payload: dict = Body(default={})):
+    """Re-run a finished Smart Code job with its own failures as the brief.
+
+    Re-running from the original objective repeats the original mistake — the model never
+    learns what went wrong. This submits a fresh job whose objective carries the specific
+    defects the last run produced, so the retry is a correction rather than another guess.
+    """
+    if not _resource_access(request, "job", job_id):
+        raise HTTPException(404, "Job not found")
+    detail = job_runner.get(job_id)
+    if detail is None:
+        raise HTTPException(404, "Job not found")
+    if detail["status"] not in FINISHED_JOB_STATES:
+        raise HTTPException(409, "That request is still running. Wait for it, or cancel it.")
+
+    original = dict(detail.get("request") or {})
+    if not original.get("objective"):
+        raise HTTPException(409, "That request cannot be retried — its inputs were not recorded.")
+    preview = (detail.get("result") or {}).get("preview") or {}
+    brief = smart_code_service.correction_brief(preview, str(payload.get("instruction", "")))
+    original["objective"] = (
+        f"{original['objective']}\n\n---\nCORRECTION\n{brief}"
+    )
+
+    owner = actor_id(request)
+    ensure_job_capacity(owner)
+    job = job_runner.submit(
+        "smart-code", f"Fix: {str(original['objective'])[:100]}", original, owner_id=owner
+    )
+    return {"job_id": str(job.id), "corrected_from": str(job_id)}
 
 
 @app.post("/api/smart-code/apply")

@@ -47,6 +47,13 @@ export function parseRoute(hash: string): Route {
   if (page === 'estimate-code' && segments[1] === 'history') {
     return { page, view: 'history', id: segments[2] }
   }
+  // A workspace can be opened *on a specific run*: `#/smart-code/{jobId}`. Without the id in
+  // the URL the screen could only guess which run to show, and guessing is wrong twice over —
+  // it picks an arbitrary one when several are active, and shows nothing at all for a run that
+  // has already finished. It also makes the address shareable and reload-safe like every
+  // other route here.
+  if (page === 'smart-code' || page === 'talk') return { page, id: segments[1] }
+  if (page === 'estimate-code') return { page, id: segments[1] }
   return { page }
 }
 
@@ -55,10 +62,15 @@ export function buildRoute(route: Route): string {
   if (route.page === 'chat') return route.id ? `#/chat/${route.id}` : '#/chat'
   if (route.page === 'activity') return route.id ? `#/activity/${route.id}` : '#/activity'
   if (route.page === 'estimate-code') {
-    if (route.view !== 'history') return '#/estimate'
-    return route.id ? `#/estimate/history/${route.id}` : '#/estimate/history'
+    if (route.view === 'history') {
+      return route.id ? `#/estimate/history/${route.id}` : '#/estimate/history'
+    }
+    return route.id ? `#/estimate/${route.id}` : '#/estimate'
   }
   const slug = Object.entries(PAGES).find(([, value]) => value === route.page)?.[0]
+  if (route.page === 'smart-code' || route.page === 'talk') {
+    return route.id ? `#/${slug}/${route.id}` : `#/${slug}`
+  }
   return `#/${slug ?? ''}`
 }
 

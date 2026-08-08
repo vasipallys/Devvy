@@ -6,11 +6,12 @@ reconstruct the whole run, and a process restart never leaves a job claiming to 
 """
 
 import asyncio
+from uuid import UUID
 
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from backend.jobs import STOP_TIMEOUT_SECONDS, Job, JobContext, JobRunner
+from backend.jobs import STOP_TIMEOUT_SECONDS, Job, JobContext, JobRunner, now
 
 
 @pytest.fixture
@@ -372,3 +373,90 @@ async def test_a_finished_job_is_never_rewritten_by_a_later_cancel(runner):
     final = runner.get(job.id)
     assert final["status"] == "succeeded"
     assert final["result"] == {"answer": 42}
+
+
+def test_the_queue_is_served_fairly_across_users(runner):
+    """One user's batch must not starve everyone else.
+
+    Concurrency is one job at a time, so queue order is the only lever there is. Under FIFO,
+    a colleague submitting a ten-story batch pushes a ninety-second chat message more than
+    three hours down the queue — neither user did anything unreasonable, and the application
+    reads as broken rather than busy.
+    """
+    from uuid import uuid4 as new_id
+
+    heavy, light = new_id(), new_id()
+
+    async def handler(_request, _context):
+        return {}
+
+    runner.register("demo", handler)
+    # The batch user queues first and queues a lot.
+    for index in range(5):
+        runner.submit("demo", f"batch {index}", {"n": index}, owner_id=heavy)
+    runner.submit("demo", "one quick question", {}, owner_id=light)
+
+    served: list[UUID] = []
+    with Session(runner.engine) as session:
+        for _ in range(6):
+            candidate = runner._next_candidate(session)
+            assert candidate is not None
+            served.append(candidate.owner_id)
+            # Mark it started so the next choice sees this owner as recently served.
+            candidate.status = "running"
+            candidate.started_at = now()
+            session.add(candidate)
+            session.commit()
+
+    assert served[0] == heavy, "the earliest submission still goes first"
+    assert served[1] == light, (
+        "the second slot belongs to the waiting user, not the batch's second story"
+    )
+    assert served.count(light) == 1 and served.count(heavy) == 5
+    assert served[2:] == [heavy] * 4, "with nobody else waiting, the batch resumes"
+
+
+def test_a_single_user_queue_stays_strictly_fifo(runner):
+    """Fairness between users must not reorder one user's own work."""
+    from uuid import uuid4 as new_id
+
+    owner = new_id()
+
+    async def handler(_request, _context):
+        return {}
+
+    runner.register("demo", handler)
+    submitted = [runner.submit("demo", f"job {i}", {"i": i}, owner_id=owner).id for i in range(4)]
+
+    served = []
+    with Session(runner.engine) as session:
+        for _ in range(4):
+            candidate = runner._next_candidate(session)
+            served.append(candidate.id)
+            candidate.status = "running"
+            candidate.started_at = now()
+            session.add(candidate)
+            session.commit()
+
+    assert served == submitted, "a user's own jobs run in the order they were submitted"
+
+
+def test_unauthenticated_jobs_behave_exactly_like_fifo(runner):
+    """With auth disabled every job is ownerless, so fairness collapses to plain FIFO."""
+    async def handler(_request, _context):
+        return {}
+
+    runner.register("demo", handler)
+    submitted = [runner.submit("demo", f"job {i}", {"i": i}).id for i in range(3)]
+
+    served = []
+    with Session(runner.engine) as session:
+        for _ in range(3):
+            candidate = runner._next_candidate(session)
+            served.append(candidate.id)
+            candidate.status = "running"
+            candidate.started_at = now()
+            session.add(candidate)
+            session.commit()
+
+    assert served == submitted

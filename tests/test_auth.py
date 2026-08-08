@@ -212,3 +212,37 @@ def test_the_login_limiter_still_blocks_after_a_sweep():
         limiter.allow(f"10.0.0.2:other{index}@example.com")
         limiter.allow(key)
     assert limiter.allow(key) is False, "an active lockout survives eviction"
+
+
+def test_a_public_host_without_authentication_refuses_to_start():
+    """The one misconfiguration that cannot be recovered by noticing it later."""
+    from backend.config import Settings, deployment_problems
+
+    fatal, _ = deployment_problems(
+        Settings(app_host="0.0.0.0", auth_enabled=False, phoenix_enabled=False)
+    )
+    assert fatal, "serving unauthenticated on a network must be fatal, not a warning"
+    assert "AUTH_ENABLED" in fatal[0]
+
+
+def test_a_public_host_with_insecure_cookies_is_warned_about():
+    from backend.config import Settings, deployment_problems
+
+    fatal, warnings = deployment_problems(
+        Settings(
+            app_host="0.0.0.0", auth_enabled=True, auth_secure_cookies=False,
+            phoenix_enabled=False,
+        )
+    )
+    assert not fatal, "a fixable transport problem must not block a deploy outright"
+    assert any("AUTH_SECURE_COOKIES" in item for item in warnings)
+
+
+def test_the_local_default_is_clean():
+    """The laptop configuration everybody actually runs must produce no noise at all."""
+    from backend.config import Settings, deployment_problems
+
+    fatal, warnings = deployment_problems(
+        Settings(app_host="127.0.0.1", auth_enabled=True, phoenix_enabled=False)
+    )
+    assert fatal == [] and warnings == []

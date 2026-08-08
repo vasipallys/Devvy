@@ -175,10 +175,14 @@ function StackPanel({ stack, config, onChange }: {
 
 
 
-export function EstimateCodeScreen({ onHome, initialView = 'new', initialHistoryId, onViewChange }: {
+export function EstimateCodeScreen({
+  onHome, initialView = 'new', initialHistoryId, initialJobId, onViewChange,
+}: {
   onHome: () => void
   initialView?: 'new' | 'history'
   initialHistoryId?: string
+  /** Open this screen on one specific run, from Activity or a shared link. */
+  initialJobId?: string
   onViewChange?: (view: 'new' | 'history', id?: string) => void
 }) {
   const [source, setSource] = useState<'manual' | 'upload' | 'jira'>('manual')
@@ -210,14 +214,44 @@ export function EstimateCodeScreen({ onHome, initialView = 'new', initialHistory
   }, [initialView])
   // Reopening the screen rejoins an estimate still running on the server rather than
   // presenting an idle form while work is in flight.
+  // Open on a specific run when asked; otherwise rejoin whatever of ours is still going.
+  // Without the id, several concurrent estimates made this a coin flip, and a finished one
+  // showed an empty form — its result reachable only from the screen you just left.
   useEffect(() => {
     let disposed = false
-    api.jobs().then(({ jobs }) => {
-      const live = jobs.find(job => job.kind === 'estimate' && isJobActive(job.status))
-      if (live && !disposed) follow(live.id)
-    }).catch(() => undefined)
+    const load = async () => {
+      if (initialJobId) {
+        try {
+          const job = await api.job(initialJobId)
+          if (disposed) return
+          if (isJobActive(job.status)) return follow(job.id)
+          setRunEvents(job.events)
+          setStepsDone(derivedSteps(job.events))
+          const produced: EstimateResult[] = job.result?.results ?? []
+          if (produced.length) {
+            setResults(produced)
+            setResult(produced[0])
+            setStatus(`Showing a completed estimate${produced.length > 1 ? ` (${produced.length} stories)` : ''}`)
+          } else {
+            setStatus(`This run ${job.status} without producing an estimate`)
+            if (job.error) setError(job.error)
+          }
+        } catch (cause) {
+          // Missing and not-yours are deliberately indistinguishable: the server answers 404
+          // for both, and so does this screen.
+          if (!disposed) setError((cause as Error).message)
+        }
+        return
+      }
+      try {
+        const { jobs } = await api.jobs()
+        const live = jobs.find(job => job.kind === 'estimate' && isJobActive(job.status))
+        if (live && !disposed) follow(live.id)
+      } catch { /* nothing to rejoin */ }
+    }
+    load()
     return () => { disposed = true }
-  }, [])
+  }, [initialJobId])
   const setField = <K extends keyof Story>(field: K, value: Story[K]) => setStory(current => ({ ...current, [field]: value }))
   function setCriterion(index: number, value: string) {
     setField('acceptance_criteria', story.acceptance_criteria.map((item, i) => i === index ? value : item))

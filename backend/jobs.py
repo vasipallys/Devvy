@@ -580,17 +580,67 @@ class JobRunner:
             with contextlib.suppress(asyncio.CancelledError, TimeoutError):
                 await asyncio.wait_for(asyncio.shield(self._worker), STOP_TIMEOUT_SECONDS)
 
+    def _next_candidate(self, session: Session) -> Job | None:
+        """Choose the next job to run, fairly across users.
+
+        Concurrency is one job at a time — the model runtime serializes generation behind a
+        single lock, so a wider pool would only queue inside the model. That makes the *order*
+        of the queue the only lever there is, and strict FIFO is the wrong one as soon as a
+        second person uses the application.
+
+        A ten-story batch takes twenty minutes per story. Under FIFO the colleague who sends a
+        ninety-second chat message one moment later waits more than three hours behind it,
+        which does not read as a slow machine — it reads as a broken product. Neither user did
+        anything unreasonable.
+
+        So the queue is served round-robin by owner: among users with queued work, the one who
+        has waited longest since a job of theirs last *started* goes next, and a user who has
+        never run anything goes first. Within one user, their own jobs stay strictly FIFO.
+        Everybody's first job therefore starts before anybody's second, and a long batch costs
+        its owner throughput rather than costing everyone else availability.
+
+        With authentication disabled every job has no owner, the group collapses to one, and
+        this is exactly FIFO again.
+        """
+        queued = list(
+            session.exec(select(Job).where(Job.status == "queued").order_by(col(Job.created_at)))
+        )
+        if not queued:
+            return None
+        # When did each owner last have a job start? Never-served owners sort first.
+        last_started: dict[UUID | None, datetime] = {}
+        for owner, started in session.exec(
+            select(Job.owner_id, func.max(Job.started_at))
+            .where(col(Job.started_at).is_not(None))
+            .group_by(col(Job.owner_id))
+        ).all():
+            if started is not None:
+                last_started[owner] = started
+
+        epoch = datetime.min.replace(tzinfo=timezone.utc)
+
+        def served_at(job: Job) -> datetime:
+            when = last_started.get(job.owner_id)
+            if when is None:
+                return epoch
+            return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+        def created_at(job: Job) -> datetime:
+            value = job.created_at
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+        # Least-recently-served owner first; their own oldest job within that.
+        return min(queued, key=lambda job: (served_at(job), created_at(job)))
+
     def claim_next(self) -> tuple[UUID, str, dict, UUID | None] | None:
-        """Take the oldest queued job and mark it running, exactly once.
+        """Take the next queued job and mark it running, exactly once.
 
         The transition is a conditional UPDATE rather than a read-then-write, so two
         workers racing on the same database cannot both claim the same row: only the
         update whose ``WHERE status = 'queued'`` still matches reports a changed row.
         """
         with Session(self.engine) as session:
-            candidate = session.exec(
-                select(Job).where(Job.status == "queued").order_by(Job.created_at).limit(1)
-            ).first()
+            candidate = self._next_candidate(session)
             if candidate is None:
                 return None
             claimed = session.execute(
