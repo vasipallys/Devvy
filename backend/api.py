@@ -77,6 +77,7 @@ from backend.estimate_history import (
     estimate_stats,
     get_estimate,
     list_estimates,
+    reference_corpus,
     save_estimate,
 )
 from backend.estimation_framework import (
@@ -1710,7 +1711,11 @@ async def estimate_one(story, context: JobContext, index: int, total: int) -> di
         progress_queue.put_nowait(event)
 
     prefix = f"[{index + 1}/{total}] " if total > 1 else ""
-    task = asyncio.create_task(estimate_service.estimate(story, progress))
+    # EAGLE §10: the estimate is anchored against this owner's own history. Read here rather
+    # than inside the service so the service stays free of database concerns, and scoped to the
+    # owner because another team's velocity is not evidence about this one.
+    history = await asyncio.to_thread(reference_corpus, engine, context.owner_id)
+    task = asyncio.create_task(estimate_service.estimate(story, progress, history))
     elapsed = 0
     emitted: set[str] = set()
     try:

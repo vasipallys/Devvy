@@ -330,6 +330,98 @@ const NARRATION: Record<
         + `${verb(count(evidence.human_approval_required) ?? 0, 'needs', 'need')} a person to confirm`
       : ''}.`,
 
+  // -- EAGLE governance -------------------------------------------------------------------
+
+  contract: evidence =>
+    `Sealed the estimation contract for ${text(evidence.story_id) || 'this story'}: objective, `
+    + `acceptance criteria, stack and rules are now fixed for the run, so nothing can move `
+    + `underneath the estimate while it is being made. `
+    + `${plural(count(evidence.required_evidence) ?? 0, 'kind')} of evidence `
+    + `${verb(count(evidence.required_evidence) ?? 0, 'is', 'are')} required before publishing, `
+    + `and the run may spend at most ${num(evidence.max_debate_rounds) ?? 2} debate round(s).`,
+
+  eagle_conflict: evidence => {
+    const disputed = count(evidence.disputed) ?? 0
+    const estimators = num(evidence.estimator_count) ?? 0
+    if (!disputed) {
+      return `The ${plural(estimators, 'independent assessment')} agreed on every factor — no `
+        + 'spread of two or more, and no elevated score left standing without evidence.'
+    }
+    return `Compared ${plural(estimators, 'independent assessment')} factor by factor and found `
+      + `${plural(disputed, 'disputed factor')}${list(evidence.disputed) ? ` (${list(evidence.disputed)})` : ''}. `
+      + `A spread of two or more disputes, and so does an elevated score with nothing behind it — `
+      + `which is what stops a missing answer settling quietly on a middling number.`
+  },
+
+  eagle_review: evidence => {
+    const blocker = num(evidence.blocker) ?? 0
+    const material = num(evidence.material) ?? 0
+    const advisory = num(evidence.advisory) ?? 0
+    const total = blocker + material + advisory
+    if (!total) {
+      return 'The critic, the adversarial reviewer and the optimistic reviewer all passed: '
+        + 'nothing was found that was missed, under-counted, or counted twice.'
+    }
+    return `Three reviewers argued against the estimate from opposite directions and raised `
+      + `${plural(total, 'finding')}`
+      + `${blocker ? `, ${blocker} blocking` : ''}${material ? `, ${material} material` : ''}. `
+      + 'The adversarial pass looks only for reasons this is too low; the optimistic pass only '
+      + 'for complexity counted twice — so neither can inflate the number unopposed.'
+  },
+
+  eagle_debate: (evidence, status) => {
+    const factors = count(evidence.factors) ?? 0
+    const unresolved = count(evidence.unresolved) ?? 0
+    const base = `Re-examined ${plural(factors, 'disputed factor')} only — the rest of the `
+      + 'pipeline was not re-run, because one contested score is not a reason to re-do the work '
+      + `that was already agreed. Bounded at ${num(evidence.max_rounds) ?? 2} rounds.`
+    if (status === 'waiting' || unresolved) {
+      return `${base} ${plural(unresolved, 'factor')} still `
+        + `${verb(unresolved, 'has', 'have')} no agreed score; further rounds would not converge, `
+        + 'so this goes to a human specialist.'
+    }
+    return base
+  },
+
+  eagle_validation: evidence => {
+    const failed = count(evidence.failed_rules) ?? 0
+    const gate = text(evidence.spike_gate)
+    const triggers = count(evidence.spike_triggers) ?? 0
+    const rules = failed
+      ? `${plural(failed, 'validation rule')} failed${list(evidence.failed_rules) ? `: ${list(evidence.failed_rules)}` : ''}. `
+        + 'The estimate is still shown, but it has not satisfied its own contract.'
+      : 'Every deterministic rule passed: sixteen factors, all in range, every elevated score '
+        + 'evidenced, and the adjustments still reconcile to the adjusted total.'
+    if (gate && gate !== 'PROCEED') {
+      return `${rules} The spike gate then fired on ${plural(triggers, 'rule')} and returned `
+        + `${gate.replaceAll('_', ' ').toLowerCase()} — refusing to estimate is a valid answer, `
+        + 'and a more honest one than a number nobody can support.'
+    }
+    return `${rules} No spike rule fired, so the story is safe to estimate as written.`
+  },
+
+  eagle_reference: evidence => {
+    const matches = count(evidence.matches) ?? 0
+    if (!matches) {
+      return 'Nothing comparable exists in history yet, so this estimate has no anchor. The '
+        + 'first estimates for a stack are the ones most worth reviewing, not the ones to trust.'
+    }
+    const relative = text(evidence.relative) || 'similar'
+    const range = evidence.implied_range as { lower?: number; upper?: number } | undefined
+    const best = (evidence.matches as { similarity?: number; points?: number }[] | undefined)?.[0]
+    // The event's own detail repeats this sentence almost word for word, so it is deliberately
+    // not appended: narration that says the same thing twice reads as a bug, not as emphasis.
+    return `Anchored against ${plural(matches, 'historical story', 'historical stories')} that `
+      + `${verb(matches, 'was', 'were')} the same shape of work, not merely the same words — `
+      + `similarity compares all sixteen factor scores, so a story matches on how it was built `
+      + `rather than on its vocabulary. `
+      + `${best?.similarity !== undefined
+        ? `The closest is ${(best.similarity * 100).toFixed(0)}% similar at ${best.points} points, and t`
+        : 'T'}`
+      + `his story reads as ${relative}`
+      + `${range?.lower !== undefined ? `, implying ${range.lower}–${range.upper} points` : ''}.`
+  },
+
   score_factors: evidence =>
     `Final scorecard assembled: ${count(evidence.model_scored) ?? 0} factors judged by the model and `
     + `${count(evidence.heuristic_filled) ?? 0} inferred from the story text. Every factor shows `
@@ -343,7 +435,8 @@ const NARRATION: Record<
     if (score === undefined || points === undefined) return undefined
     return 'Ran the framework arithmetic in application code, not in the model: the scores total '
       + `${score} after adjustments, landing in band ${String(evidence.band ?? 'its band')}, which `
-      + `maps to ${points} points. ${count(evidence.rules_fired) ?? 0} adjustment rules applied; `
+      + `maps to ${points} points. ${plural(count(evidence.rules_fired) ?? 0, 'adjustment rule')} `
+      + 'applied; '
       + 'you can replay every step by hand.'
   },
 

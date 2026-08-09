@@ -506,6 +506,83 @@ export interface Story {
   stack?: StackProfile
 }
 
+/** EAGLE — the governance layer around the deterministic calculator. */
+export interface EagleEvidence {
+  evidence_id: string
+  factor: string | null
+  claim: string
+  source_type: string
+  source: string
+  location: string
+  confidence: number
+  trusted: boolean
+}
+export interface EagleAggregate {
+  factor: string
+  label: string
+  owner: string
+  scores: number[]
+  spread: number
+  median_score: number
+  status: 'accept' | 'accept_median' | 'dispute'
+  reason: string
+  evidence_ids: string[]
+}
+export interface EagleFinding {
+  reviewer: 'critic' | 'adversarial' | 'optimistic'
+  finding: string
+  severity: 'blocker' | 'material' | 'advisory'
+  factor: string | null
+  evidence_ids: string[]
+  suggested_correction: string
+  confidence: number
+}
+export interface EagleReference {
+  id: string
+  title: string
+  points: number
+  similarity: number
+  components: Record<string, number>
+  differences: string[]
+}
+export interface Eagle {
+  version: string
+  contract: {
+    story_id: string
+    title: string
+    objective: string
+    acceptance_criteria: string[]
+    contract_hash: string
+    contract_version: number
+    max_debate_rounds: number
+    completion: Record<string, boolean>
+    stop_conditions: Record<string, string>
+    expected_stacks: Record<string, string>
+  }
+  blackboard: { records: EagleEvidence[]; sources: Record<string, number> }
+  factor_aggregates: EagleAggregate[]
+  findings: EagleFinding[]
+  debate: {
+    rounds: { round: number; factor: string; label: string; proponent: string
+      challenge: string; resolution: string; resolved: boolean; selected_score: number }[]
+    unresolved: string[]
+    escalation: 'NONE' | 'HUMAN_REVIEW'
+    factors_debated: string[]
+  }
+  validation: { passed: boolean; rules: { rule: string; passed: boolean; detail: string }[] }
+  spike_gate: { decision: string; triggered: string[]; summary: string }
+  references: {
+    matches: EagleReference[]
+    closest: EagleReference | null
+    relative_assessment: 'smaller' | 'similar' | 'larger' | 'unknown'
+    implied_range: { lower: number; likely: number; upper: number } | null
+    anchors: Record<string, number>
+    note: string
+  }
+  snapshot: Record<string, unknown>
+  failure_attribution: { layer: string; detail: string; remedy: string }[]
+}
+
 export interface EstimateResult extends Record<string, unknown> {
   framework: { name: string; version: string; document: string; factor_count: number }
   story: Story
@@ -530,6 +607,8 @@ export interface EstimateResult extends Record<string, unknown> {
   detailed_reasoning: DetailedReasoning
   suggestions: EstimationSuggestion[]
   agentic_pipeline: AgenticPipeline
+  /** Present on estimates produced by the EAGLE harness. */
+  eagle?: Eagle
   risk_flags: RiskFlag[]
   anchor_comparison: string
   anchors_considered: { points: number; title: string; stack: string }[]

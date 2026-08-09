@@ -274,6 +274,51 @@ def _tally(session, column, owner_id: UUID | None = None) -> dict[str, int]:
     return {str(value): int(count) for value, count in rows if value not in (None, "")}
 
 
+#: How many past estimates the reference comparator may anchor against. The result blob is
+#: loaded for each one, so this is capped: an anchor is only useful if it is genuinely similar,
+#: and the hundredth-most-recent story is not going to be the closest match to this one.
+REFERENCE_CORPUS_LIMIT = 60
+
+
+def reference_corpus(
+    engine, owner_id: UUID | None = None, limit: int = REFERENCE_CORPUS_LIMIT
+) -> list[dict[str, Any]]:
+    """The minimum a story needs to be compared against (EAGLE §10).
+
+    Only the factor vector, the points and the stack come back — not the whole estimate. The
+    comparator needs the shape of the work, and carrying the rest would make anchoring cost
+    more than estimating.
+    """
+    with Session(engine) as session:
+        statement = select(EstimateRecord).order_by(EstimateRecord.created_at.desc())
+        if owner_id is not None:
+            statement = statement.where(EstimateRecord.owner_id == owner_id)
+        rows = session.exec(statement.limit(limit)).all()
+    corpus = []
+    for item in rows:
+        scorecard = (item.result or {}).get("scorecard") or []
+        if not scorecard:
+            continue
+        corpus.append(
+            {
+                "id": str(item.id),
+                "title": item.title,
+                "tldr": item.tldr,
+                "points": item.decided_points or item.points,
+                "frontend": item.frontend,
+                "backend": item.backend,
+                "result": {
+                    "scorecard": [
+                        {"factor": entry.get("factor"), "score": entry.get("score")}
+                        for entry in scorecard
+                        if entry.get("factor")
+                    ]
+                },
+            }
+        )
+    return corpus
+
+
 def estimate_stats(engine, owner_id: UUID | None = None) -> dict[str, Any]:
     """Aggregates that turn a log into a calibration record.
 

@@ -112,9 +112,9 @@ button:disabled{cursor:not-allowed}
 .markdown{font-size:14px;line-height:1.72}.markdown h1,.markdown h2,.markdown h3{letter-spacing:-.02em}.markdown blockquote{border-left:3px solid #6e8a64;margin-left:0;padding-left:14px;color:#aeb8b1}
 
 /* Product screens */
-.product-header,.estimate-header{height:64px;padding:0 20px}.product-header>.system-chip,.estimate-header>.system-chip,.product-header>.code-header-tools{margin-left:auto}.smart-workspace>.evidence-panel.compact{margin-top:12px}
-.smart-controls input,.smart-controls textarea,.smart-controls select,.story-card input,.story-card textarea,.story-card select{min-height:42px}.smart-controls label{font-size:11px;letter-spacing:.01em}.smart-pipeline b{font-size:11px}.smart-pipeline small{font-size:9px;color:#818d84}
-.primary-action,.apply-action,.estimate-action{min-height:44px}.pipeline-panel{box-shadow:0 12px 34px rgba(0,0,0,.14)}
+.product-header,.estimate-header{height:64px;padding:0 20px}.product-header>.system-chip,.estimate-header>.system-chip,.product-header>.code-header-tools{margin-left:auto}
+.smart-controls input,.smart-controls textarea,.smart-controls select,.story-card input,.story-card textarea,.story-card select{min-height:42px}
+.primary-action,.apply-action,.estimate-action{min-height:44px}
 .estimate-result>.evidence-panel{margin:0;border:0;border-bottom:1px solid #dce4d8;border-radius:0;background:#f7faf5;color:#193126}.estimate-result>.evidence-panel .evidence-heading{background:#edf3e9;border-color:#d8e1d4}.estimate-result>.evidence-panel .evidence-timeline details{background:#fff;border-color:#dbe4d7}.estimate-result>.evidence-panel .evidence-detail{background:#f7faf5;border-color:#dbe4d7}.estimate-result>.evidence-panel .evidence-heading small,.estimate-result>.evidence-panel .evidence-timeline summary small,.estimate-result>.evidence-panel .evidence-detail>div span{color:#66776d}.estimate-result>.evidence-panel .evidence-timeline summary b,.estimate-result>.evidence-panel .evidence-detail>div b{color:#244638}
 .estimate-header .system-chip{background:#164f3f;border-color:#4b796a}.estimate-header .system-chip small{color:#bdd8cc}
 
@@ -151,21 +151,7 @@ button:disabled{cursor:not-allowed}
 .truncation-notice span{display:flex;flex-direction:column;gap:2px}
 .truncation-notice b{font-size:11px}
 .truncation-notice small{font-size:10px;line-height:1.5;color:#e0c68f}
-
-/* A blocked write gate states its reason where the blocked button is. */
-.apply-column{display:flex;flex-direction:column;align-items:flex-end;gap:9px;max-width:420px}
-.apply-blocked{display:flex;gap:8px;align-items:flex-start;margin:0;padding:9px 11px;
-  border:1px solid #6b3a35;border-radius:9px;background:#2a1917;color:#ffb4ab;text-align:left}
-.apply-blocked svg{flex:none;margin-top:1px}
-.apply-blocked span{display:flex;flex-direction:column;gap:3px;min-width:0}
-.apply-blocked b{font-size:11px}
-.apply-blocked small{font-size:10px;line-height:1.5;color:#e8b3ac;overflow-wrap:anywhere}
-.apply-blocked .apply-blocked-next{color:#c69b95;margin-top:2px}
-@media(max-width:900px){.apply-column{align-items:stretch;max-width:none}}
-
-/* A plan Devvy invented is shown as absent, never attributed to the model. */
-.plan-absent{color:#8a938c;font-style:italic}
-.plan-absent span{background:#232a25!important;color:#8a938c!important;font-style:normal}
+@media(max-width:900px){}
 
 /* Narration leads; the raw measurements stay one click away rather than in the reader's face. */
 .evidence-narration{font-size:10px!important;line-height:1.65!important;color:#cfd8d2!important;margin:0 0 2px}
@@ -209,9 +195,6 @@ button:disabled{cursor:not-allowed}
 .code-screen{display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden;
   background:radial-gradient(circle at 50% 0,#172018,#0b0d0e 34%)}
 .code-header-tools{display:flex;align-items:center;gap:10px}
-.icon-button{width:36px;height:36px;display:grid;place-items:center;border:1px solid #303833;
-  border-radius:10px;background:#141a17;color:#9aa59e;cursor:pointer}
-.icon-button:hover{border-color:#4a5850;color:#e3eae4}
 .code-progress{display:inline-flex;align-items:center;gap:7px;max-width:280px;min-height:36px;
   padding:0 12px;border:1px solid #303833;border-radius:20px;background:#141a17;color:#a8c7fa;
   font-size:11px;cursor:pointer}
@@ -542,4 +525,104 @@ body.dock-resizing *{cursor:col-resize!important}
 @media(max-width:640px){
   .prompt-modal{padding:0}
   .prompt-dialog{width:100%;max-height:100vh;border:0;border-radius:0}
+}
+
+/* ------------------------------------------------------------------------------------------
+   EAGLE governance panel. Reads as evidence, not as a second verdict: the recommendation is
+   already stated above it, and what this section adds is the account of how that number
+   survived being challenged.
+   ------------------------------------------------------------------------------------------ */
+.eagle-panel{margin-top:16px;border:1px solid #2b332d;border-radius:14px;background:#101613;
+  overflow:hidden}
+.eagle-head{display:flex;align-items:center;gap:10px;padding:13px 16px;
+  border-bottom:1px solid #232a25;background:#131b16}
+.eagle-head>svg{flex:none;color:#a9e68a}
+.eagle-head span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.eagle-head b{font-size:12px;color:#e3eae4}
+.eagle-head small{font-size:9px;line-height:1.5;color:#8b968f}
+
+.eagle-block{padding:13px 16px;border-bottom:1px solid #1e2521}
+.eagle-block:last-child{border-bottom:0}
+.eagle-block h4{display:flex;align-items:center;gap:7px;margin:0 0 9px;font-size:10px;
+  letter-spacing:.08em;text-transform:uppercase;color:#9fb0a6}
+.eagle-block h4 svg{color:#a9e68a}
+.eagle-note{margin:0 0 9px;font-size:10px;line-height:1.65;color:#8b968f}
+.eagle-clear{display:flex;align-items:center;gap:7px;margin:0;font-size:11px;color:#b8f49b}
+
+.eagle-contract{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:9px}
+.eagle-contract>*{padding:4px 9px;border:1px solid #2f3a33;border-radius:14px;background:#161d19;
+  font-size:10px;color:#b6c0b8}
+.eagle-contract code{font-family:'Cascadia Code',Consolas,monospace;color:#a8c7fa}
+.eagle-stops{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.eagle-stops li{display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:12px;
+  background:#161d19;font-size:9px;color:#8b968f}
+.eagle-stops b{color:#ffd38b}
+
+.eagle-table{width:100%;border-collapse:collapse;font-size:10px;color:#b6c0b8}
+.eagle-table th{text-align:left;padding:5px 8px;border-bottom:1px solid #2b332d;color:#8b968f;
+  font-weight:600;text-transform:uppercase;letter-spacing:.06em;font-size:9px}
+.eagle-table td{padding:6px 8px;border-bottom:1px solid #1a211d;vertical-align:top;line-height:1.5}
+.eagle-table tr:last-child td{border-bottom:0}
+.eagle-table b{color:#dfe5e0}
+
+.eagle-debate{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.eagle-debate li{padding:8px 11px;border-left:2px solid #3f74b5;background:#131a20;
+  display:flex;flex-direction:column;gap:3px}
+.eagle-debate b{font-size:10px;color:#cfe2ff}
+.eagle-debate small{font-size:9px;line-height:1.55;color:#a9b6c4}
+.eagle-resolution{color:#8b968f}
+.eagle-escalate{display:flex;align-items:flex-start;gap:7px;margin:10px 0 0;padding:8px 11px;
+  border:1px solid #6b4f22;border-radius:9px;background:#241d12;color:#ffd38b;font-size:10px;
+  line-height:1.55}
+.eagle-escalate svg{flex:none;margin-top:1px}
+
+.eagle-reviewer{margin-bottom:11px}
+.eagle-reviewer:last-child{margin-bottom:0}
+.eagle-reviewer h5{display:inline-flex;align-items:center;gap:6px;margin:0 0 6px;font-size:10px;
+  color:#c3cdc6}
+.eagle-reviewer h5 span{padding:1px 6px;border-radius:10px;background:#1a211d;color:#9fb0a6;
+  font-size:9px}
+.eagle-reviewer ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.eagle-reviewer li{display:flex;gap:8px;padding:7px 10px;border-radius:8px;background:#141a17;
+  border:1px solid #232a25}
+.eagle-reviewer li>span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.eagle-reviewer b{font-size:10px;line-height:1.55;color:#dfe5e0}
+.eagle-reviewer small{font-size:9px;line-height:1.5;color:#9aa59e}
+.eagle-cite{color:#7d8a82;font-family:'Cascadia Code',Consolas,monospace}
+.eagle-severity{flex:none;align-self:flex-start;padding:2px 7px;border-radius:10px;font-size:8px;
+  letter-spacing:.06em;text-transform:uppercase}
+.eagle-severity.blocker{background:#3a2221;color:#ffb4ab}
+.eagle-severity.material{background:#3a301d;color:#ffd38b}
+.eagle-severity.advisory{background:#1f2e3d;color:#a8c7fa}
+
+.eagle-rules{list-style:none;margin:0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:5px}
+.eagle-rules li{display:flex;gap:7px;padding:6px 9px;border-radius:7px;background:#141a17}
+.eagle-rules li>svg{flex:none;margin-top:2px}
+.eagle-rules li.ok>svg{color:#a9e68a}
+.eagle-rules li.bad{background:#241715}
+.eagle-rules li.bad>svg{color:#ffb4ab}
+.eagle-rules span{display:flex;flex-direction:column;gap:2px;min-width:0}
+.eagle-rules b{font-size:10px;color:#dfe5e0}
+.eagle-rules small{font-size:9px;line-height:1.45;color:#8b968f;overflow-wrap:anywhere}
+
+.eagle-gate{display:flex;flex-direction:column;gap:3px;margin:10px 0 0;padding:9px 11px;
+  border:1px solid #3c6534;border-radius:9px;background:#151d15;color:#b8f49b;font-size:10px}
+.eagle-gate.blocked{border-color:#6b4f22;background:#241d12;color:#ffd38b}
+.eagle-gate span,.eagle-gate small{color:#9fb0a6;line-height:1.55}
+.eagle-gate.blocked span,.eagle-gate.blocked small{color:#d9c091}
+
+.eagle-range{margin:9px 0 0;font-size:10px;line-height:1.6;color:#b6c0b8}
+.eagle-range b{color:#dfe5e0}
+.eagle-failures{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.eagle-failures li{display:flex;gap:9px;padding:7px 10px;border-radius:8px;background:#141a17}
+.eagle-failures span:last-child{display:flex;flex-direction:column;gap:2px;min-width:0}
+.eagle-failures b{font-size:10px;color:#dfe5e0}
+.eagle-failures small{font-size:9px;line-height:1.5;color:#9aa59e}
+.eagle-layer{flex:none;align-self:flex-start;padding:2px 7px;border-radius:10px;background:#2a1917;
+  color:#ffb4ab;font-size:8px;letter-spacing:.06em;text-transform:uppercase}
+
+@media(max-width:760px){
+  .eagle-rules{grid-template-columns:1fr}
+  .eagle-table{font-size:9px}
 }

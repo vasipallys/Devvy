@@ -171,3 +171,56 @@ class AgentRun:
         if self._finished:
             return
         await asyncio.to_thread(self.finish, status, summary=summary)
+
+
+# ------------------------------------------------------------------------------------------
+# Grounding contract
+# ------------------------------------------------------------------------------------------
+
+#: The rule every model-backed workflow in this application carries, verbatim.
+#:
+#: A local 1B model's failure mode is not refusing to answer — it is answering anyway. Asked
+#: about a field the story never mentions, it will describe a plausible one, and the result is
+#: indistinguishable from evidence: it lands in a scorecard, gets an evidence id, and is read by
+#: someone who was not in the room. Fabrication that arrives inside an evidence-based product is
+#: worse than no answer at all, because the whole surface is built to be trusted.
+#:
+#: So the contract is the same everywhere and says the same thing four ways, because a model
+#: this size does not reliably generalise from one phrasing: use only what is written, do not
+#: infer, say plainly when the text does not contain the answer, and — because a bare refusal is
+#: not useful to the person who wrote the story — say what would need to be added.
+#:
+#: Kept here rather than copied into four prompts so the wording cannot drift between agents,
+#: and so a change to the rule is a change to one string.
+#: The exact sentence a workflow must return when the answer is not in the text. Kept as its
+#: own constant, on one line, for two reasons: an instruction to "say exactly X" where X is
+#: split across a line break is not an exact instruction, and a fixed phrase is something a
+#: reader can recognise and a test can assert.
+NO_INFORMATION = "The provided text does not contain this information."
+
+GROUNDING_CONTRACT = f"""<grounding_contract>
+Use only the facts directly stated in the context above. Do not use outside facts, prior
+knowledge about similar systems, or assumptions about how this is "usually" done.
+
+Do not guess, extrapolate, or add information that is not explicitly written. Do not invent
+file names, endpoints, tables, screens, libraries, versions, or requirements. If two readings
+of the text are possible, do not pick one.
+
+If the information needed is missing, say exactly: "{NO_INFORMATION}"
+Then say what could be added to the story to answer it — name the specific missing fact, not a
+general request for more detail.
+
+Act as a strict extractor. Process only the given words and numbers. Absence of a detail is a
+finding to report, never a gap to fill.
+</grounding_contract>"""
+
+#: The same contract compressed to a single paragraph, for prompts that are already at their
+#: character budget and would otherwise lose story evidence to make room for policy.
+GROUNDING_CONTRACT_BRIEF = (
+    "Use only the facts directly stated in the context above. Do not use outside facts or "
+    "assumptions about how this is usually done. Do not guess, extrapolate, or add anything "
+    "not explicitly written — no invented files, endpoints, tables, screens, or requirements. "
+    f'If the information is missing, say exactly: "{NO_INFORMATION}" and name the specific fact '
+    "that would have to be added to the story. Act as a strict extractor: process only the "
+    "given words and numbers."
+)

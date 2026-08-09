@@ -1,6 +1,6 @@
 import {
-  createContext, useCallback, useContext, useMemo, useRef, useState, useSyncExternalStore,
-  type CSSProperties, type ReactNode,
+  createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
+  useSyncExternalStore, type CSSProperties, type ReactNode,
 } from 'react'
 import {
   ChevronLeft, ChevronRight, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
@@ -78,6 +78,9 @@ export interface Dock {
   setCollapsed: (collapsed: boolean) => void
   toggle: () => void
   reset: () => void
+  /** Suspends persistence for the duration of a drag; `endDrag` writes the settled width once. */
+  beginDrag: () => void
+  endDrag: () => void
 }
 
 const STORE = 'devvy.layout.v1'
@@ -150,13 +153,24 @@ export function useDock(id: string, options: DockOptions = {}): Dock {
     }
   })
 
+  const dragging = useRef(false)
+  const latest = useRef(state)
+  latest.current = state
+
+  // Persistence is a side effect, so it lives in an effect rather than inside the state
+  // updater. Two reasons, both of which bit: an updater must be pure because React may call it
+  // twice, and a drag emits a pointermove per frame — writing there re-serialised the entire
+  // layout store to disk sixty times a second for as long as the divider was held.
+  //
+  // Block body: a concise arrow returns its expression, and React calls that as the cleanup.
+  useEffect(() => {
+    if (dragging.current) return
+    writeStore(key, state)
+  }, [key, state])
+
   const commit = useCallback((update: Partial<DockState>) => {
-    setState(current => {
-      const next = { ...current, ...update }
-      writeStore(key, next)
-      return next
-    })
-  }, [key])
+    setState(current => ({ ...current, ...update }))
+  }, [])
 
   const overlay = useMatches(`(max-width:${overlayBelow}px)`)
   const hidden = useMatches(`(max-width:${Math.max(hideBelow, 1)}px)`) && hideBelow > 0
@@ -174,12 +188,13 @@ export function useDock(id: string, options: DockOptions = {}): Dock {
     setSide: side => commit({ side }),
     setWidth: width => commit({ width: clamp(width) }),
     setCollapsed: collapsed => commit({ collapsed }),
-    toggle: () => setState(current => {
-      const next = { ...current, collapsed: !current.collapsed }
-      writeStore(key, next)
-      return next
-    }),
+    toggle: () => commit({ collapsed: !latest.current.collapsed }),
     reset: () => commit({ width: clamp(defaultWidth), side: defaultSide, collapsed: false }),
+    beginDrag: () => { dragging.current = true },
+    endDrag: () => {
+      dragging.current = false
+      writeStore(key, latest.current)
+    },
   }
 }
 
@@ -218,6 +233,7 @@ function Splitter({ dock, label, order }: { dock: Dock; label: string; order: nu
       // dropping the moment the cursor outruns it.
       event.currentTarget.setPointerCapture(event.pointerId)
       draggingRef.current = true
+      dock.beginDrag()
       document.body.classList.add('dock-resizing')
     }}
     onPointerMove={event => {
@@ -226,11 +242,13 @@ function Splitter({ dock, label, order }: { dock: Dock; label: string; order: nu
     }}
     onPointerUp={event => {
       draggingRef.current = false
+      dock.endDrag()
       event.currentTarget.releasePointerCapture(event.pointerId)
       document.body.classList.remove('dock-resizing')
     }}
     onPointerCancel={() => {
       draggingRef.current = false
+      dock.endDrag()
       document.body.classList.remove('dock-resizing')
     }}
     onDoubleClick={() => dock.setWidth(dock.defaultWidth)}

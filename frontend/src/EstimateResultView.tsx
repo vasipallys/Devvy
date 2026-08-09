@@ -1,16 +1,20 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   AlertTriangle, Anchor, BrainCircuit, Check, ChevronDown, CircleSlash, Download, FlaskConical,
   GitBranch, Lightbulb, TrendingDown,
   Layers, ShieldCheck, Sigma, Target, X,
 } from 'lucide-react'
+import { api } from './api'
+import { DecisionPanel, ReEstimatePanel } from './DecisionPanel'
 import { EvidencePanel } from './EvidencePanel'
 import { Tooltip } from './Tooltip'
 import { AgentFlowDiagram } from './AgentFlowDiagram'
+import { EaglePanel } from './EaglePanel'
 import { EstimationPipelineReport } from './EstimationPipelineReport'
 import type {
   AgentEvent, Calculation, EstimateConfig, EstimateResult, FactorScore, PolicyCheck,
   Points, Recommendation,
+  EstimateHistoryEntry,
 } from './types'
 
 export const RECOMMENDATIONS: Record<Recommendation, { label: string; tone: string; blurb: string }> = {
@@ -194,19 +198,38 @@ function SuggestionsPanel({ result }: { result: EstimateResult }) {
 /** Renders one estimate. Shared by a live run and a stored history entry so a recalled
  *  estimate shows the same scorecard, ledger, and gates as the day it was produced —
  *  which is the whole reason the full payload is kept. */
-export function EstimateResultView({ result, config, events, onDownload, onWriteJira }: {
+export function EstimateResultView({
+  result, config, events, onDownload, onWriteJira, onReEstimate,
+}: {
   result: EstimateResult
   config?: EstimateConfig
   events: AgentEvent[]
   onDownload?: () => void
   onWriteJira?: () => void
+  /** Present on a live result. History recalls a finished record and re-runs from there. */
+  onReEstimate?: (correction: string) => void | Promise<void>
 }) {
+  const [entry, setEntry] = useState<EstimateHistoryEntry | undefined>()
+
+  // Block body: a concise arrow returns its expression, and React calls that as the cleanup.
+  //
+  // The estimate is written to history by the job that produced it, and the decision is
+  // recorded against that record. Without loading it, the pipeline's closing line — "the team
+  // owns this number" — had nowhere on the page to be answered.
+  useEffect(() => {
+    let disposed = false
+    const id = result.history_id
+    if (!id) { setEntry(undefined); return }
+    api.estimateHistoryDetail(String(id))
+      .then(loaded => { if (!disposed) setEntry(loaded) })
+      .catch(() => { if (!disposed) setEntry(undefined) })
+    return () => { disposed = true }
+  }, [result.history_id])
+
   const verdict = RECOMMENDATIONS[result.recommendation]
   const fibonacci: Points[] = config?.framework.fibonacci ?? [3, 5, 8, 13, 21, 34]
   if (!verdict) return null
   return <article className="estimate-result">
-        <EvidencePanel events={events} compact title="Estimation evidence" />
-
         <Tooltip label={verdict.label}
           detail="The recommendation comes from the framework's decision rules, not from the model's opinion: the points, the failed gates, and the uncertainty score together decide whether this story can be started as written.">
           <div className={`verdict verdict-${verdict.tone}`}>
@@ -257,6 +280,15 @@ export function EstimateResultView({ result, config, events, onDownload, onWrite
         />
         <EstimationPipelineReport result={result} />
 
+        {/* The governance layer sits with the pipeline report rather than beside the number:
+            it is the account of how the number survived challenge, not a competing verdict. */}
+        {result.eagle && <EaglePanel eagle={result.eagle} />}
+
+        {/* The pipeline ends by saying the team owns the number. These are where they say so —
+            on the page that made the claim, rather than in a different screen. */}
+        {entry && <DecisionPanel entry={entry} onDecided={setEntry} />}
+        {onReEstimate && <ReEstimatePanel onReEstimate={onReEstimate} />}
+
         <Detail title="Framework appendix: detailed reasoning">
           <p className="detail-lede"><BrainCircuit size={17} />Replayable rationale from story evidence and deterministic framework rules. Private chain-of-thought is neither requested nor shown.</p>
           <DetailedReasoningPanel result={result} />
@@ -264,12 +296,12 @@ export function EstimateResultView({ result, config, events, onDownload, onWrite
 
         <SuggestionsPanel result={result} />
 
-        <Detail title="The calculation, step by step">
+        <Detail title="The calculation, step by step" open>
           <p className="detail-lede"><Sigma size={17} />{result.evidence.determinism}</p>
           <CalculationLedger calculation={result.calculation} />
         </Detail>
 
-        <Detail title="16-factor scorecard" count={result.scorecard.length}>
+        <Detail title="16-factor scorecard" count={result.scorecard.length} open>
           <p className="detail-lede">
             <b>What drives this:</b> {result.drivers.join(' · ')}. {result.drivers_explanation}
           </p>
@@ -352,6 +384,16 @@ export function EstimateResultView({ result, config, events, onDownload, onWrite
               : `The model's own guess was ${result.evidence.model_cross_check.model_points} points; the framework calculated ${result.evidence.model_cross_check.calculated_points}. They ${result.evidence.model_cross_check.agreement === 'agrees' ? 'agree' : 'diverge'}.`}
             {' '}{result.evidence.model_cross_check.note}
           </p>
+        </Detail>
+
+        {/* The raw trajectory, last. It is the audit record behind everything above, so it
+            belongs with the provenance rather than in front of the answer it produced. */}
+        <Detail title="Run trajectory" count={events.length}>
+          <p className="detail-lede">
+            Every stage this run emitted, in order, with the measurements each one recorded.
+            The sections above are this same evidence, read.
+          </p>
+          <EvidencePanel events={events} compact docked title="Estimation evidence" />
         </Detail>
       </article>
 }

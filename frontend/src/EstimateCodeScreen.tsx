@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowLeft, BrainCircuit, Check, FileSpreadsheet, History, Keyboard,
   Layers, LoaderCircle, PanelsTopLeft, Plus, Target, Trash2,
 } from 'lucide-react'
-import { AgentFlowDiagram } from './AgentFlowDiagram'
+import { STAGE_WHY } from './AgentFlowDiagram'
 import { Tooltip } from './Tooltip'
 import { api, attachToJob } from './api'
-import { EvidencePanel } from './EvidencePanel'
+import { narrate } from './evidenceNarration'
 import { EstimateHistoryPanel } from './EstimateHistoryPanel'
 import { EstimateResultView, RECOMMENDATIONS } from './EstimateResultView'
 import { SystemStatusChip } from './SystemStatusChip'
@@ -16,12 +16,15 @@ import type {
 } from './types'
 
 const steps = [
-  'normalize', 'readiness', 'assemble_context', 'declare_stack', 'specialist_routing',
+  'contract', 'normalize', 'readiness', 'assemble_context', 'declare_stack', 'specialist_routing',
   'primary_estimate', 'specialist_analysis', 'blind_review', 'disagreement', 'critic', 'arbitration',
+  'eagle_conflict', 'eagle_review', 'eagle_debate',
   'score_factors', 'apply_base_adjustments', 'apply_stack_adjustments', 'map_to_fibonacci',
-  'evaluate_gates', 'decide', 'consistency_audit', 'human_review',
+  'evaluate_gates', 'decide', 'eagle_validation', 'eagle_reference', 'consistency_audit',
+  'human_review',
 ]
 const labels: Record<string, string> = {
+  contract: 'Seal the estimation contract',
   normalize: 'Normalize evidence & create input hash',
   readiness: 'Evaluate story readiness',
   assemble_context: 'Bound the story evidence',
@@ -33,12 +36,17 @@ const labels: Record<string, string> = {
   disagreement: 'Detect material disagreements',
   critic: 'Challenge conflicting claims',
   arbitration: 'Apply resolution policy',
+  eagle_conflict: 'Measure independent agreement',
+  eagle_review: 'Critic, adversarial & optimistic review',
+  eagle_debate: 'Debate the disputed factors',
   score_factors: 'Build final 16-factor scorecard',
   apply_base_adjustments: 'Apply base adjustments',
   apply_stack_adjustments: 'Apply stack adjustments',
   map_to_fibonacci: 'Map to Fibonacci',
   evaluate_gates: 'Evaluate spike & split gates',
   decide: 'Reach framework recommendation',
+  eagle_validation: 'Enforce deterministic validation & spike gate',
+  eagle_reference: 'Anchor against historical stories',
   consistency_audit: 'Replay and audit consistency',
   human_review: 'Hand off for human consensus',
 }
@@ -47,6 +55,7 @@ const labels: Record<string, string> = {
  *  the job stream carries agent events, and the checklist is derived from them so a
  *  reattaching client reconstructs the same progress from the snapshot alone. */
 const NODE_MAP: Record<string, string[]> = {
+  contract: ['contract'],
   normalize: ['normalize'],
   readiness: ['readiness'],
   assemble_context: ['assemble_context'],
@@ -58,12 +67,81 @@ const NODE_MAP: Record<string, string[]> = {
   disagreement: ['disagreement'],
   critic: ['critic'],
   arbitration: ['arbitration'],
+  eagle_conflict: ['eagle_conflict'],
+  eagle_review: ['eagle_review'],
+  eagle_debate: ['eagle_debate'],
+  eagle_validation: ['eagle_validation'],
+  eagle_reference: ['eagle_reference'],
   score_factors: ['score_factors'],
   calculate: ['apply_base_adjustments', 'apply_stack_adjustments', 'map_to_fibonacci'],
   policy_gate: ['evaluate_gates', 'decide'],
   consistency_audit: ['consistency_audit'],
   human_review: ['human_review'],
 }
+/** Why each EAGLE step exists. The rest come from the flow diagram's node definitions, so
+ *  the explanation lives in one place and the checklist does not need a second view to reach
+ *  it. */
+const EAGLE_WHY: Record<string, string> = {
+  contract: 'The objective, acceptance criteria, stack and rules are frozen and hashed before '
+    + 'anything is scored. Two runs with the same hash were given the same problem — which is '
+    + 'the only way to explain why two estimates differ.',
+  eagle_conflict: 'The independent assessments are compared factor by factor. A spread of two '
+    + 'or more disputes, and so does an elevated score with no evidence behind it, so a missing '
+    + 'answer can never settle quietly on a middling number.',
+  eagle_review: 'Three reviewers argue from opposite directions: the critic attacks the '
+    + 'estimate, the adversarial pass looks only for reasons it is too low, and the optimistic '
+    + 'pass only for complexity counted twice. Neither side can inflate unopposed.',
+  eagle_debate: 'Only the disputed factors are re-examined, for a bounded number of rounds. One '
+    + 'contested score is not a reason to redo work that was already agreed, and a debate that '
+    + 'could run forever would reintroduce the variance blind scoring removed.',
+  eagle_validation: 'The objective rules run in code, not in a prompt: sixteen factors, all in '
+    + 'range, every elevated score evidenced, adjustments reconciling to the total — then the '
+    + 'spike gate, which is allowed to refuse to estimate at all.',
+  eagle_reference: 'The estimate is anchored against past stories that were the same shape of '
+    + 'work, compared on all sixteen factor scores rather than on shared vocabulary. A weak '
+    + 'match is reported as weak instead of being used as an anchor.',
+}
+
+/** The five phases a reader can name, and the steps that belong to each.
+ *
+ *  Twenty-five steps in one column is a 1,900px ribbon that no layout can sit beside without
+ *  leaving a hole. Grouped into phases they lay out as a wide, shallow grid instead — which is
+ *  also how a person actually holds the pipeline in their head: gather evidence, assess it
+ *  independently, reconcile the differences, calculate, decide. */
+const PHASES: { id: string; title: string; blurb: string; steps: string[] }[] = [
+  {
+    id: 'intake', title: 'Evidence',
+    blurb: 'Freeze the problem and gather what can be known about it.',
+    steps: ['contract', 'normalize', 'readiness', 'assemble_context', 'declare_stack',
+      'specialist_routing'],
+  },
+  {
+    id: 'independent', title: 'Independent assessment',
+    blurb: 'Score the sixteen factors, twice, without either pass seeing the other.',
+    steps: ['primary_estimate', 'specialist_analysis', 'blind_review'],
+  },
+  {
+    id: 'reconcile', title: 'Challenge',
+    blurb: 'Find where the assessments disagree and argue it out on evidence.',
+    steps: ['disagreement', 'critic', 'arbitration', 'eagle_conflict', 'eagle_review',
+      'eagle_debate'],
+  },
+  {
+    id: 'deterministic', title: 'Calculation',
+    blurb: 'Fixed arithmetic and gates, in code — replayable by hand.',
+    steps: ['score_factors', 'apply_base_adjustments', 'apply_stack_adjustments',
+      'map_to_fibonacci', 'evaluate_gates', 'decide', 'eagle_validation', 'eagle_reference',
+      'consistency_audit'],
+  },
+  { id: 'human', title: 'Your decision', blurb: 'The team owns the number.', steps: ['human_review'] },
+]
+
+/** Checklist step → the explanation for the stage that produces it. */
+const whyForStep = (step: string): string =>
+  EAGLE_WHY[step]
+  ?? STAGE_WHY[Object.keys(NODE_MAP).find(stage => NODE_MAP[stage].includes(step)) ?? step]
+  ?? 'A stage of the deterministic estimation pipeline.'
+
 const nodesFor = (event: AgentEvent): string[] =>
   event.status === 'completed' || event.status === 'validated' ? NODE_MAP[event.stage] ?? [] : []
 const derivedSteps = (events: AgentEvent[]): string[] =>
@@ -197,6 +275,42 @@ export function EstimateCodeScreen({
   const [results, setResults] = useState<EstimateResult[]>([])
   const [error, setError] = useState('')
   const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
+  /** Checklist step → the sentence describing what that step found, kept live as events land.
+   *  Derived rather than stored, so a client reattaching mid-run rebuilds the same narration
+   *  from the snapshot it is handed. */
+  const currentStepRef = useRef<HTMLLIElement>(null)
+  const feedEndRef = useRef<HTMLLIElement>(null)
+
+  /** The stage in flight: the first that has not reported. Derived rather than counted, because
+   *  some stages legitimately never run — there is no debate when nothing is disputed. */
+  const activeStep = loading ? steps.find(step => !stepsDone.includes(step)) : undefined
+
+  // Block body: a concise arrow returns its expression, and React calls that as the cleanup.
+  //
+  // The feed follows itself so the newest sentence is the one on screen; `nearest` keeps the
+  // scrolling inside the feed rather than dragging the page away from the form.
+  useEffect(() => {
+    feedEndRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [stepsDone.length])
+  const narration = useMemo(() => {
+    const spoken: Record<string, { text: string; status: string }> = {}
+    for (const event of runEvents) {
+      const said = narrate(event)
+      if (!said) continue
+      for (const node of NODE_MAP[event.stage] ?? []) {
+        spoken[node] = { text: said, status: event.status }
+      }
+    }
+    return spoken
+  }, [runEvents])
+
+  /** Narration in pipeline order, for the stages that have reported. */
+  const feed = useMemo(
+    () => steps
+      .filter(step => narration[step])
+      .map(step => ({ step, ...narration[step] })),
+    [narration],
+  )
   const [upload, setUpload] = useState<any>()
   const [mapping, setMapping] = useState<Record<string, string | null>>({})
   const [jiraProject, setJiraProject] = useState('')
@@ -319,6 +433,28 @@ export function EstimateCodeScreen({
       })
       await follow(job_id)
     } catch (cause) { setLoading(false); setError((cause as Error).message) }
+  }
+
+  /** Estimate this story again from scratch, optionally with detail the story left out.
+   *
+   *  The previous result is not passed anywhere: a correction is appended to the story as
+   *  evidence, and the pipeline runs clean. Feeding a model its own last answer produces a
+   *  polite adjustment of that answer, which is the anchoring the blind pass exists to avoid. */
+  async function reEstimate(correction: string) {
+    if (!result) return
+    const previous = result.story
+    setResult(undefined)
+    await estimateOne({
+      title: previous.title,
+      user_story: previous.user_story
+        + (correction ? `
+
+Additional detail supplied by the team: ${correction}` : ''),
+      acceptance_criteria: [...previous.acceptance_criteria],
+      technical_breakdown: previous.technical_breakdown,
+      key: previous.key,
+      source: previous.source,
+    })
   }
 
   async function estimateMany(items: Story[]) {
@@ -507,32 +643,80 @@ export function EstimateCodeScreen({
           </div>}
         </section>
 
-        <section className={`estimate-pipeline ${loading ? 'active' : ''}`}>
-          <span className="eyebrow">LIVE REASONING</span>
-          <h2>{status || 'Your evidence pipeline'}</h2>
-          {loading && <p className="pipeline-note">
-            This runs on the server. You can close the tab — the estimate keeps going and
-            waits for you in Activity.
-          </p>}
-          {steps.map((step, index) => {
-            const done = stepsDone.includes(step)
-            const current = loading && index === stepsDone.length
-            return <div className={done ? 'done' : current ? 'current' : ''} key={step}>
-              {done ? <Check /> : current ? <LoaderCircle className="spin" /> : <i />}{labels[step]}
-            </div>
-          })}
+        {/* Status as a wide, shallow grid; narration as a feed underneath.
+            These are two different reading jobs and they want two different shapes. A grid is
+            for scanning — where has it got to — and twenty-five rows in one column could not
+            be scanned or sat beside anything. Prose is for reading, one column, in order. */}
+        <section className={`estimate-pipeline ${loading ? 'active' : ''} ${result ? 'settled' : ''}`}>
+          <div className="pipeline-head">
+            <span className="eyebrow">LIVE REASONING</span>
+            <h2>{status || 'Your evidence pipeline'}</h2>
+            {loading && <p className="pipeline-note">
+              This runs on the server. You can close the tab — the estimate keeps going and
+              waits for you in Activity.
+            </p>}
+            {result && <p className="pipeline-settled">
+              <Check size={13} /> {stepsDone.length} of {steps.length} stages completed. The full
+              account is in the report below.
+            </p>}
+            {!loading && !result && <p className="pipeline-note">
+              Five phases, {steps.length} stages. Nothing here is the model's opinion of a number
+              — it scores evidence, and the arithmetic happens in code.
+            </p>}
+          </div>
+
+          <div className="phase-grid">
+            {PHASES.map(phase => {
+              const done = phase.steps.filter(step => stepsDone.includes(step)).length
+              const live = phase.steps.some(step => step === activeStep)
+              return <div
+                key={phase.id}
+                className={`phase ${live ? 'live' : done === phase.steps.length ? 'done' : ''}`}
+              >
+                <Tooltip label={phase.title} detail={phase.blurb}>
+                  <h3>{phase.title}<em>{done}/{phase.steps.length}</em></h3>
+                </Tooltip>
+                <ol>
+                  {phase.steps.map(step => {
+                    const stepDone = stepsDone.includes(step)
+                    const current = step === activeStep
+                    return <li
+                      key={step}
+                      className={stepDone ? 'done' : current ? 'current' : ''}
+                      ref={current ? currentStepRef : undefined}
+                    >
+                      <Tooltip label={labels[step]} detail={whyForStep(step)}>
+                        <span>
+                          {stepDone ? <Check /> : current ? <LoaderCircle className="spin" /> : <i />}
+                          {labels[step]}
+                        </span>
+                      </Tooltip>
+                    </li>
+                  })}
+                </ol>
+              </div>
+            })}
+          </div>
+
+          {/* Every stage that has reported, in the order it happened. */}
+          {feed.length > 0 && <div className="pipeline-feed">
+            <h3>What each stage found</h3>
+            <ol>
+              {feed.map(item => <li key={item.step} className={item.status}>
+                <b>{labels[item.step]}</b>
+                <span>{item.text}</span>
+              </li>)}
+              <li ref={feedEndRef} className="feed-end" />
+            </ol>
+          </div>}
         </section>
       </div>
 
-      {/* While the CPU model works, these are the only things telling the user what has
-          actually happened. The flow diagram shows which agent is running and what it has
-          produced; the evidence panel keeps the raw trajectory. Both appear as soon as the
-          run starts and stay put. */}
-      {(loading || runEvents.length > 0) && !result &&
-        <AgentFlowDiagram events={runEvents} />}
-      {(loading || runEvents.length > 0) && !result &&
-        <EvidencePanel events={runEvents} compact title="Estimation evidence" />}
-
+      {/* One live surface, deliberately. The flow diagram and the evidence panel both
+          narrate the same events the checklist narrates, so a run used to tell the reader the
+          same thing three times in three shapes — and none of the three was authoritative.
+          Both still exist inside the finished result, where they are reference rather than
+          progress; here the checklist is the single account of what is happening. */}
       {results.length > 0 && <section className="batch-results">
         <h2>Batch results</h2>
         {results.map(item => <button key={item.story.key || item.story.title} onClick={() => setResult(item)}>
@@ -544,6 +728,7 @@ export function EstimateCodeScreen({
 
       {result && <EstimateResultView
         result={result}
+        onReEstimate={reEstimate}
         config={config}
         events={runEvents}
         onDownload={download}

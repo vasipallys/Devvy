@@ -41,6 +41,15 @@ const NODES: Node[] = [
   { stage: 'human_review', label: 'Human decision', hint: 'The team owns the estimate', why: 'The recommendation is decision support. The team owns the estimate and may accept, override, spike, or decompose it — and that decision is recorded.', lane: 'human' },
 ]
 
+/** Why each stage exists, keyed by service stage.
+ *
+ *  Exported because the live checklist needs the same explanation. It used to be reachable
+ *  only by opening this diagram, which meant showing a second view of the same run to say
+ *  something the checklist could have said in a tooltip. */
+export const STAGE_WHY: Record<string, string> = Object.fromEntries(
+  NODES.map(node => [node.stage, node.why]),
+)
+
 const LANES: { id: Node['lane']; title: string; blurb: string }[] = [
   { id: 'intake', title: 'Intake', blurb: 'Turn the story into stable, bounded evidence.' },
   { id: 'independent', title: 'Two independent assessments', blurb: 'Two model passes score the same evidence separately. The reviewer is blind to the first.' },

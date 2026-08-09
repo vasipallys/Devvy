@@ -12,6 +12,13 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["frontend/node_modules/vite/bin/vite.js", "frontend", "--open", "false"],
       "port": 5173
+    },
+    {
+      "name": "frontend-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["frontend/node_modules/vite/bin/vite.js", "preview", "frontend",
+                      "--port", "4173"],
+      "port": 4173
     }
   ]
 }

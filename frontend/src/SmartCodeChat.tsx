@@ -78,15 +78,21 @@ interface Turn {
 const slashes = (value: string) => value.replaceAll('\\', '/')
 const base = (path: string) => path.split(/[\\/]/).pop() || path
 
-/** The last terminal reading a stage published, so the panel can quote real figures. */
-function evidenceOf(events: AgentEvent[], stage: string): Record<string, unknown> {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event.stage === stage && event.status !== 'running') {
-      return (event.evidence ?? {}) as Record<string, unknown>
+/**
+ * The last terminal reading each stage published, so the panel can quote real figures.
+ *
+ * One pass for the whole pipeline rather than one scan per stage: the seven stages were each
+ * walking the entire event list on every render, and a run streams hundreds of events, so the
+ * cost grew with the square of how long the run had been going.
+ */
+function evidenceByStage(events: AgentEvent[]): Record<string, Record<string, unknown>> {
+  const latest: Record<string, Record<string, unknown>> = {}
+  for (const event of events) {
+    if (event.status !== 'running') {
+      latest[event.stage] = (event.evidence ?? {}) as Record<string, unknown>
     }
   }
-  return {}
+  return latest
 }
 
 const size = (value: unknown): number =>
@@ -100,8 +106,7 @@ const strings = (value: unknown): string[] =>
  * the stage is for. "8 of 34 files" tells you the run is proceeding; "reads the repository"
  * would be true before the run started and is therefore worth nothing while you wait.
  */
-function stageFact(turn: Turn, step: string): string {
-  const evidence = evidenceOf(turn.events, step)
+function stageFact(turn: Turn, step: string, evidence: Record<string, unknown>): string {
   switch (step) {
     case 'classify': {
       const mode = typeof evidence.mode === 'string' ? evidence.mode : ''
@@ -151,12 +156,13 @@ function stageFact(turn: Turn, step: string): string {
  */
 function Pipeline({ turn }: { turn: Turn }) {
   const done = Object.keys(turn.stages).length
+  const evidence = useMemo(() => evidenceByStage(turn.events), [turn.events])
   return <ol className="pipe">
     {PIPELINE.map((step, index) => {
       const state = turn.stages[step]
       const running = turn.running && index === done
       const status = state === 'failed' ? 'failed' : state ? 'done' : running ? 'running' : 'pending'
-      const fact = stageFact(turn, step)
+      const fact = stageFact(turn, step, evidence[step] ?? {})
       return <li key={step} className={`pipe-step ${status}`}>
         <span className="pipe-mark" aria-hidden>
           {status === 'failed' ? <AlertTriangle size={11} />
@@ -185,16 +191,21 @@ function Pipeline({ turn }: { turn: Turn }) {
 function PromptDialog({ text, onClose }: { text: string; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   const [copied, setCopied] = useState(false)
+  // The caller passes a fresh arrow every render. Held in a ref so the listener below can stay
+  // mounted once — keyed on `onClose` it re-ran on every render, and the re-run dragged focus
+  // back to the dialog container, so pressing Copy immediately lost the button.
+  const close = useRef(onClose)
+  close.current = onClose
 
   // Block body: a concise arrow returns its expression, and React calls an effect's return
   // value as the cleanup function.
   useEffect(() => {
     // Focus moves into the dialog, or a keyboard user is left tabbing the transcript behind it.
     ref.current?.focus()
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close.current() }
     window.addEventListener('keydown', onKey)
     return () => { window.removeEventListener('keydown', onKey) }
-  }, [onClose])
+  }, [])
 
   const lines = text.split('\n')
   return <div className="prompt-modal" onClick={onClose}>
@@ -435,8 +446,7 @@ export function SmartCodeChat({ onHome, initialJobId }: {
 
   /** Files this run actually read — the evidence the answer is grounded in. */
   const sources = useMemo(() => {
-    if (!current) return [] as string[]
-    const evidence = evidenceOf(current.events, 'retrieve')
+    const evidence = current ? evidenceByStage(current.events).retrieve ?? {} : {}
     const read = strings(evidence.files_read)
     return read.length ? read : strings(evidence.files_included)
   }, [current])

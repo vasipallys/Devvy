@@ -50,7 +50,22 @@ from backend.estimation_framework import (
     risk_flags,
     spike_template,
 )
-from backend.harness import ContextSource, assemble_context
+from backend.harness import ContextSource, assemble_context, GROUNDING_CONTRACT_BRIEF
+from backend.eagle import (
+    EAGLE_VERSION,
+    adversarial_review,
+    aggregate,
+    attribute_failure,
+    build_blackboard,
+    build_contract,
+    build_snapshot,
+    compare_references,
+    critic_review,
+    debate,
+    optimistic_review,
+    spike_gate,
+    validate,
+)
 from backend.estimation_pipeline import (
     PROTECTED_FACTORS,
     PIPELINE_VERSION,
@@ -360,22 +375,125 @@ def _story_evidence(story: Story) -> str:
     ).lower()
 
 
+#: Verbs that describe an intention rather than a change. They are the strongest textual signal
+#: of an unclear story, and they are independent of length — "investigate the vendor API" is six
+#: words and wide open, while "change the button label to Log in" is seven words and closed.
+_VAGUE = (
+    "improve", "optimise", "optimize", "enhance", "review", "revisit", "refactor as needed",
+    "support", "handle", "as required", "etc", "and so on", "tbd", "tbc", "somehow",
+    "if needed", "where possible",
+)
+
+#: Stories that ask for an answer rather than a change. These are different in kind from merely
+#: vague ones: "improve performance" is an under-specified change, but "investigate whether the
+#: vendor API works" has no known implementation path at all, which is the definition of maximum
+#: uncertainty and the case the spike gate exists for.
+_EXPLORATORY = (
+    "investigate", "explore", "research", "look into", "figure out", "find out whether",
+    "assess whether", "spike", "proof of concept", "feasibility", "evaluate whether",
+)
+
+
+#: Marks of a story that closes its own scope: a quoted literal, a from/to, an identifier, a
+#: number, a file or field name. Short is not the same as unspecified — "rename `customerName`
+#: to `customer_name`" is seven words and completely bounded.
+_CONCRETE = re.compile(
+    r"""['"`][^'"`]{2,}['"`]"""      # a quoted literal
+    r"""|\bfrom\s+\S+\s+to\s+\S+"""  # a stated transition
+    r"""|\b\w+[._]\w+\b"""           # an identifier: customer_name, orders.status
+    r"""|\b\d+\b"""                  # a number: 20 per page, 500ms
+    r"""|\b[a-z]+[A-Z]\w*\b"""       # camelCase: customerName
+)
+
+
+def _story_specified(story: Story, evidence: str) -> bool:
+    """Does the story pin down its own finished state?
+
+    This, not length, is what licenses a low score. A story that states what "done" looks like
+    can be scored small on the factors it does not mention, because it has bounded itself. A
+    story that does not — "improve reporting", "support the new vendor" — has said nothing
+    about scope, and reading that silence as simplicity is how an unbounded piece of work gets
+    a confident small number.
+    """
+    if story.acceptance_criteria or story.technical_breakdown:
+        return True
+    # A concrete marker still needs a sentence around it: a bare number in three words is
+    # not a specification.
+    return bool(_CONCRETE.search(evidence)) and len(evidence.strip()) >= 24
+
+
+def _story_scale(story: Story, evidence: str) -> int:
+    """0-3: how much work the *shape* of the story implies, before any factor is considered.
+
+    Needed because an absence of evidence means opposite things at opposite sizes. A story of
+    twelve words that never mentions testing probably has very little; a story with eight
+    acceptance criteria across three components that never mentions testing has plenty — the
+    story just failed to say so. Scoring both at the same baseline is what made every estimate
+    land in the same band.
+    """
+    length = len(evidence.strip())
+    signals = (
+        length >= 220,
+        length >= 700,
+        len(story.acceptance_criteria) >= 3,
+        len(story.acceptance_criteria) >= 6,
+        bool(story.technical_breakdown),
+        len(story.components) >= 2,
+    )
+    return min(3, sum(signals))
+
+
 def _heuristic_score(factor_id: str, story: Story, evidence: str) -> tuple[int, str]:
     """Derive a defensible 1-5 score from story text when the model skipped a factor."""
     stack = story.stack
+    scale = _story_scale(story, evidence)
+    vague = [term for term in _VAGUE if term in evidence]
+    exploratory = [term for term in _EXPLORATORY if term in evidence]
+
     if factor_id == "requirements_clarity":
         count = len(story.acceptance_criteria)
+        if exploratory:
+            return 5, (
+                f"The story asks to {exploratory[0]} — there is no described finished state to "
+                f"build against."
+            )
+        if vague:
+            return (
+                min(5, 3 + (scale == 0)),
+                f"The story asks to {vague[0]} rather than describing a finished state.",
+            )
         if count >= 3 and len(evidence) > 240:
             return 2, f"{count} acceptance criteria and a substantive description are present."
         if count >= 1:
             return 3, f"Only {count} acceptance criterion/criteria supplied; gaps are likely."
+        # A short, self-contained change with no criteria is not ambiguous — it is small. The
+        # previous rule scored it 4, which is why a one-line copy change came out the same size
+        # as a migration.
+        if scale == 0:
+            return 2, "No criteria, but the change is small and states its own finished state."
         return 4, "No acceptance criteria were supplied, so the requirement is not pinned down."
 
     if factor_id == "uncertainty":
-        if not story.acceptance_criteria and len(evidence.strip()) < 160:
-            return 4, "Sparse story evidence leaves the implementation path undefined."
+        if stack.maturity_level == 5:
+            return 5, "The declared framework is bleeding-edge; unknowns dominate."
+        if exploratory:
+            # Maximum uncertainty by definition: the story is asking what the work is. The
+            # framework's spike gate keys on 5, so this is what stops the pipeline handing back
+            # a confident number for a question nobody has answered yet.
+            return 5, (
+                f"The story asks to {exploratory[0]} rather than to build something; the "
+                f"implementation path is unknown by design."
+            )
+        if vague:
+            return 4, f"The story is exploratory ('{vague[0]}'), so the path is not yet known."
         if stack.scenario in {"new_framework", "framework_upgrade"}:
             return 4, f"The declared scenario ({stack.scenario.replace('_', ' ')}) carries unknowns."
+        if not story.acceptance_criteria and scale == 0:
+            return 3, "Sparse story evidence, though the change itself is small."
+        if scale >= 2 and story.technical_breakdown:
+            return 2, "The story is substantial but the implementation path is described."
+        if scale == 0:
+            return 2, "A small, self-contained change with little room for surprise."
         return 3, "Evidence exists, but implementation unknowns have not been ruled out."
 
     if factor_id == "frontend_effort" and stack.frontend == "none":
@@ -385,9 +503,37 @@ def _heuristic_score(factor_id: str, story: Story, evidence: str) -> tuple[int, 
 
     terms = _KEYWORDS.get(factor_id, ())
     matched = [term for term in terms if term in evidence]
+    label = FACTOR_BY_ID[factor_id].label.lower()
     if not matched:
-        return 2, f"No explicit {FACTOR_BY_ID[factor_id].label.lower()} evidence; scored at baseline."
-    score = min(5, 2 + len(matched))
+        # Absence of evidence is not evidence of absence. A story that has bounded itself may be
+        # scored low on what it does not mention; a story that has not says nothing about scope,
+        # and scoring that silence as "small" is the failure this whole framework exists to
+        # avoid. Either way the reason states which of the two happened, because a 1 that means
+        # "the story rules this out" and a 4 that means "the story never said" are different
+        # claims and a reader has to be able to tell them apart.
+        if not _story_specified(story, evidence):
+            return 4, (
+                f"The story does not say whether {label} is involved, and it does not state "
+                f"what done looks like. Scored high because unstated scope is unbounded, not "
+                f"because evidence was found."
+            )
+        if scale == 0:
+            return 1, (
+                f"The story states its finished state and no {label} work follows from it."
+            )
+        if scale >= 3:
+            return 3, (
+                f"The story is large and says nothing about {label}; unstated work at this size "
+                f"is more likely to exist than not."
+            )
+        return 2, (
+            f"The story bounds its scope and gives no {label} evidence; scored at baseline for "
+            f"a story this size."
+        )
+
+    # Matches drive the score; the size of the story nudges it by at most one, so a single
+    # incidental keyword in a long story cannot reach the top of the scale on its own.
+    score = min(5, 1 + min(3, len(matched)) + (1 if scale >= 2 else 0))
     sample = ", ".join(sorted(matched)[:3])
     return score, f"Story evidence mentions {sample}."
 
@@ -725,10 +871,20 @@ def build_prompt(story: Story) -> tuple[str, list[dict]]:
 FACTOR RUBRIC — score every factor from 1 to 5:
 {_rubric(stack)}
 
+{GROUNDING_CONTRACT_BRIEF}
+
 Rules:
-- Score all 16 factors using their exact ids. A factor with no supporting evidence scores 1 or 2.
-- Give each score a reason of at most 20 words, quoting or paraphrasing the story evidence.
-- Do not add requirements the story does not state.
+- Score all 16 factors using their exact ids.
+- Score only what the story says. Do not invent requirements, components, integrations, or
+  constraints it does not state, and do not assume a technology it does not name.
+- Silence is not evidence that the work is small. If the story does not give you enough to
+  judge a factor, score it 4 and say so in the reason — for example "the story does not say
+  whether existing data must be migrated". Unstated scope is unbounded scope, and an estimate
+  that reads absence as simplicity is how a two-line story becomes a two-week surprise.
+- Score a factor 1 or 2 only when the story positively bounds it: it states the finished state,
+  names the files or screens involved, or the change is self-evidently closed.
+- Give each score a reason of at most 25 words, quoting or paraphrasing the story evidence, or
+  naming exactly what the story failed to say.
 - Name the 2-3 factors that genuinely drive the size.
 - List hidden sub-tasks the story text omits but the work implies.
 
@@ -833,7 +989,29 @@ class EstimateService:
         self,
         story: Story,
         progress: Callable[[dict[str, Any]], None] | None = None,
+        reference_history: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        # EAGLE §2: the contract is fixed before anything reads the story, and every later
+        # stage works against it rather than against a story someone can still edit.
+        contract = build_contract(story)
+        if progress:
+            progress(
+                {
+                    "stage": "contract",
+                    "status": "completed",
+                    "label": f"Estimation contract {contract.contract_hash[7:15]} sealed",
+                    "detail": (
+                        "Objective, acceptance criteria, stack, completion rules and stop "
+                        "conditions are frozen for the run."
+                    ),
+                    "evidence": {
+                        "story_id": contract.story_id,
+                        "required_evidence": list(contract.required_evidence()),
+                        "stop_conditions": contract.stop_conditions.model_dump(),
+                        "max_debate_rounds": contract.max_debate_rounds,
+                    },
+                }
+            )
         canonical = canonical_story(story)
         readiness = evaluate_readiness(story, canonical)
         pipeline_mode, specialist_routes = route_specialists(story)
@@ -1064,6 +1242,102 @@ class EstimateService:
         arbitrated_scores, arbitration = arbitrate(
             primary_assessment, reviewer_assessment, disagreements
         )
+
+        # -- EAGLE governance ---------------------------------------------------------------
+        # The blackboard is built from what the scorers actually cited, so a heuristic fill is
+        # recorded as a low-confidence claim rather than passed off as something read from the
+        # story. Everything downstream cites these records by id.
+        board = build_blackboard(story, primary_scorecard)
+        proposals = [
+            {item.factor: item.score_most_likely for item in primary_assessment.dimensions},
+            {item.factor: item.score_most_likely for item in reviewer_assessment.dimensions},
+        ]
+        medians, aggregates = aggregate(proposals, board)
+        eagle_findings = (
+            critic_review(aggregates, medians, story.stack, board)
+            + adversarial_review(medians, story.stack, board, _story_evidence(story))
+            + optimistic_review(medians, story.stack, board)
+        )
+        resolved_scores, debate_outcome = debate(aggregates, eagle_findings, contract)
+        # The resolved scores carry the same shape the framework expects, with the reason kept
+        # from whichever proposal the debate settled on.
+        arbitrated_scores = {
+            factor: {
+                "score": score,
+                "why": next(
+                    (row.reason for row in aggregates if row.factor == factor), "median accepted"
+                ),
+            }
+            for factor, score in resolved_scores.items()
+        }
+        if progress:
+            disputed = [row for row in aggregates if row.status == "dispute"]
+            progress(
+                {
+                    "stage": "eagle_conflict",
+                    "status": "completed" if not disputed else "retrying",
+                    "label": (
+                        f"{len(disputed)} factor(s) disputed on spread or missing evidence"
+                        if disputed else "Independent proposals agree on every factor"
+                    ),
+                    "detail": (
+                        "Spread of 0 accepts, 1 accepts the median, 2 or more disputes; an "
+                        "elevated score with no evidence disputes regardless of agreement."
+                    ),
+                    "evidence": {
+                        "disputed": [row.label for row in disputed],
+                        "owners": sorted({row.owner for row in disputed}),
+                        "estimator_count": len(proposals),
+                    },
+                }
+            )
+            progress(
+                {
+                    "stage": "eagle_review",
+                    "status": "completed",
+                    "label": (
+                        f"Critic, adversarial and optimistic reviewers raised "
+                        f"{len(eagle_findings)} finding(s)"
+                    ),
+                    "detail": (
+                        "The adversarial reviewer looks only for under-estimation; the "
+                        "optimistic reviewer only for complexity counted twice."
+                    ),
+                    "evidence": {
+                        "blocker": sum(i.severity == "blocker" for i in eagle_findings),
+                        "material": sum(i.severity == "material" for i in eagle_findings),
+                        "advisory": sum(i.severity == "advisory" for i in eagle_findings),
+                        "by_reviewer": {
+                            name: sum(i.reviewer == name for i in eagle_findings)
+                            for name in ("critic", "adversarial", "optimistic")
+                        },
+                    },
+                }
+            )
+            if debate_outcome.rounds:
+                progress(
+                    {
+                        "stage": "eagle_debate",
+                        "status": (
+                            "waiting" if debate_outcome.escalation == "HUMAN_REVIEW"
+                            else "completed"
+                        ),
+                        "label": (
+                            f"Targeted debate over {len(debate_outcome.factors_debated)} "
+                            f"disputed factor(s) in {len(debate_outcome.rounds)} round(s)"
+                        ),
+                        "detail": (
+                            "Only disputed factors are re-examined; the rest of the pipeline "
+                            "is not re-run."
+                        ),
+                        "evidence": {
+                            "factors": debate_outcome.factors_debated,
+                            "unresolved": debate_outcome.unresolved,
+                            "escalation": debate_outcome.escalation,
+                            "max_rounds": contract.max_debate_rounds,
+                        },
+                    }
+                )
         if progress:
             material = sum(item.material for item in disagreements)
             progress(
@@ -1159,8 +1433,87 @@ class EstimateService:
             story.stack,
             blind_review_executed,
         )
+        # -- EAGLE governance package ------------------------------------------------------
+        # Everything here is decided in code. §17 validates what is objectively checkable,
+        # §20 is allowed to refuse to estimate, §10 anchors against history, §22 records what
+        # would have to change for two runs to differ, and §29 says which layer failed.
+        calculation_result = Calculation.model_validate(result["calculation"])
+        validation = validate(final_scores, story.stack, board, calculation_result)
+        gate = spike_gate(final_scores, story.stack)
+        references = compare_references(
+            story, final_scores, result["points"], reference_history or []
+        )
+        snapshot = build_snapshot(
+            contract,
+            canonical["input_hash"],
+            story.stack,
+            self.settings.model_id,
+            len(proposals),
+            len(reference_history or []),
+        )
+        failures = attribute_failure(validation, debate_outcome, board, len(proposals))
+        if progress:
+            progress(
+                {
+                    "stage": "eagle_validation",
+                    "status": "completed" if validation.passed else "failed",
+                    "label": (
+                        f"{sum(i.passed for i in validation.rules)} of {len(validation.rules)} "
+                        f"deterministic validation rules passed"
+                    ),
+                    "detail": (
+                        "Objective rules are enforced in code, not in a prompt: factor count, "
+                        "score range, evidence for elevated scores, and that the adjustments "
+                        "still reconcile to the adjusted score."
+                    ),
+                    "evidence": {
+                        "failed_rules": [i.rule for i in validation.failures()],
+                        "spike_gate": gate.decision,
+                        "spike_triggers": gate.triggered,
+                    },
+                }
+            )
+            progress(
+                {
+                    "stage": "eagle_reference",
+                    "status": "completed",
+                    "label": (
+                        f"Closest of {len(reference_history or [])} historical estimate(s): "
+                        f"{references.closest.points} points at "
+                        f"{references.closest.similarity:.0%} similarity"
+                        if references.closest
+                        else "No comparable historical estimate to anchor against"
+                    ),
+                    "detail": references.note,
+                    "evidence": {
+                        "matches": [
+                            {"title": m.title, "points": m.points, "similarity": m.similarity}
+                            for m in references.matches
+                        ],
+                        "implied_range": references.implied_range,
+                        "relative": references.relative_assessment,
+                    },
+                }
+            )
+        result["eagle"] = {
+            "version": EAGLE_VERSION,
+            "contract": contract.model_dump(mode="json"),
+            "blackboard": {
+                "records": [item.model_dump() for item in board.records],
+                "sources": board.sources(),
+            },
+            "factor_aggregates": [item.model_dump() for item in aggregates],
+            "findings": [item.model_dump() for item in eagle_findings],
+            "debate": debate_outcome.model_dump(),
+            "validation": validation.model_dump(),
+            "spike_gate": gate.model_dump(),
+            "references": references.model_dump(),
+            "snapshot": snapshot.model_dump(mode="json"),
+            "failure_attribution": [item.model_dump() for item in failures],
+        }
         result["agentic_pipeline"] = {
             "version": PIPELINE_VERSION,
+            "eagle_version": EAGLE_VERSION,
             "mode": pipeline_mode,
             "status": "HUMAN_REVIEW",
             "canonical_story": canonical,

@@ -1,0 +1,1231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Devvy Estimate Code pipeline - 25 stages across five phases, the agents, conditions, prompts and deterministic rules.">
+<style>*{margin:0;padding:0}img{max-width:100%}</style>
+<title>Live Reasoning — how Devvy produces a story point</title>
+
+<style>
+  /* ----------------------------------------------------------------------------------
+     Palette taken from the application itself: the Estimate Code screen's sage paper and
+     forest header in light, the Smart Code workspace's near-black and lime in dark. The
+     document is set in the product's own two faces — the interface sans for prose, the
+     code face for anything that is an identifier, a delta, or a hash. A pipeline whose
+     whole claim is replayable arithmetic should read like the ledger it is.
+     ---------------------------------------------------------------------------------- */
+  :root {
+    --ground:      #f4f7ef;
+    --surface:     #ffffff;
+    --surface-sunk:#eaf0e4;
+    --ink:         #10231b;
+    --ink-soft:    #3d5145;
+    --stone:       #66786d;
+    --rule:        #d5e0d0;
+    --rule-strong: #b9c9b3;
+    --forest:      #114b3a;
+    --moss:        #17684f;
+    --lime:        #2f7d4f;
+    --refuse:      #a2372b;
+    --warn:        #8a6413;
+    --mark:        #e6f0dd;
+
+    --sans: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    --mono: 'Cascadia Code', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+    --measure: 68ch;
+    --rail: 232px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:      #0b0e0d;
+      --surface:     #111513;
+      --surface-sunk:#161c18;
+      --ink:         #edf2ee;
+      --ink-soft:    #c2cdc5;
+      --stone:       #93a099;
+      --rule:        #242c27;
+      --rule-strong: #35403a;
+      --forest:      #b7f397;
+      --moss:        #a9e68a;
+      --lime:        #8ee06a;
+      --refuse:      #ffb4ab;
+      --warn:        #ffd38b;
+      --mark:        #1a2618;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0b0e0d; --surface:#111513; --surface-sunk:#161c18;
+    --ink:#edf2ee; --ink-soft:#c2cdc5; --stone:#93a099;
+    --rule:#242c27; --rule-strong:#35403a;
+    --forest:#b7f397; --moss:#a9e68a; --lime:#8ee06a;
+    --refuse:#ffb4ab; --warn:#ffd38b; --mark:#1a2618;
+  }
+  :root[data-theme="light"] {
+    --ground:#f4f7ef; --surface:#ffffff; --surface-sunk:#eaf0e4;
+    --ink:#10231b; --ink-soft:#3d5145; --stone:#66786d;
+    --rule:#d5e0d0; --rule-strong:#b9c9b3;
+    --forest:#114b3a; --moss:#17684f; --lime:#2f7d4f;
+    --refuse:#a2372b; --warn:#8a6413; --mark:#e6f0dd;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    display: grid;
+    grid-template-columns: var(--rail) minmax(0, 1fr);
+    gap: 48px;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 32px 120px;
+  }
+
+  /* -- Masthead ------------------------------------------------------------------- */
+  header.masthead {
+    grid-column: 1 / -1;
+    padding: 72px 0 40px;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 44px;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--moss);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-size: clamp(34px, 5vw, 54px);
+    line-height: 1.04;
+    letter-spacing: -.035em;
+    font-weight: 700;
+    margin: 0 0 18px;
+    text-wrap: balance;
+    max-width: 20ch;
+  }
+  .standfirst {
+    font-size: 17px;
+    line-height: 1.65;
+    color: var(--ink-soft);
+    max-width: 62ch;
+    margin: 0 0 26px;
+  }
+  .versions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .versions span {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 5px 10px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 3px;
+    color: var(--ink-soft);
+    background: var(--surface);
+  }
+  .versions b { color: var(--moss); font-weight: 600; }
+
+  /* -- Rail ----------------------------------------------------------------------- */
+  nav.rail { position: sticky; top: 28px; align-self: start; font-size: 13px; }
+  nav.rail h2 {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--stone);
+    margin: 0 0 14px;
+    font-weight: 500;
+  }
+  nav.rail ol { list-style: none; margin: 0 0 26px; padding: 0; }
+  nav.rail li { border-left: 2px solid var(--rule); }
+  nav.rail li.p1 { border-left-color: var(--lime); }
+  nav.rail li.p2 { border-left-color: #4a86cd; }
+  nav.rail li.p3 { border-left-color: var(--warn); }
+  nav.rail li.p4 { border-left-color: var(--moss); }
+  nav.rail li.p5 { border-left-color: var(--refuse); }
+  nav.rail a {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 7px 0 7px 13px;
+    color: var(--ink-soft);
+    text-decoration: none;
+  }
+  nav.rail a:hover { color: var(--ink); background: var(--surface); }
+  nav.rail a:focus-visible { outline: 2px solid var(--moss); outline-offset: -2px; }
+  nav.rail em {
+    font-family: var(--mono); font-style: normal; font-size: 11px;
+    color: var(--stone); font-variant-numeric: tabular-nums;
+  }
+  nav.rail .plain { border-left: 0; }
+  nav.rail .plain a { padding-left: 15px; }
+
+  /* -- Prose ---------------------------------------------------------------------- */
+  main { min-width: 0; }
+  main > section { margin-bottom: 60px; scroll-margin-top: 24px; }
+  p { max-width: var(--measure); }
+
+  h2.phase {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    font-size: 27px;
+    letter-spacing: -.02em;
+    margin: 0 0 6px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--phase, var(--rule-strong));
+  }
+  h2.phase .n {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--phase, var(--moss));
+    letter-spacing: .1em;
+  }
+  h2.phase .count {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--stone);
+    letter-spacing: .08em;
+  }
+  .phase-lede { color: var(--ink-soft); font-size: 16px; margin: 14px 0 30px; }
+
+  h3.plain { font-size: 21px; letter-spacing: -.015em; margin: 0 0 14px; }
+
+  /* -- Stage record ---------------------------------------------------------------- */
+  article.stage {
+    border-left: 2px solid var(--phase, var(--rule-strong));
+    padding: 0 0 4px 22px;
+    margin-bottom: 34px;
+  }
+  article.stage > h3 {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px;
+    font-size: 17px; letter-spacing: -.01em; margin: 0 0 4px;
+  }
+  code.id {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--moss);
+    background: var(--mark);
+    padding: 2px 7px;
+    border-radius: 3px;
+  }
+  .runs {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--stone);
+    margin: 0 0 12px;
+  }
+  .runs b { color: var(--ink-soft); font-weight: 500; }
+  .tag {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; padding: 2px 7px; border-radius: 3px;
+    border: 1px solid currentColor;
+  }
+  .tag.det { color: var(--moss); }
+  .tag.model { color: #4a86cd; }
+  .tag.cond { color: var(--warn); }
+  @media (prefers-color-scheme: dark) { .tag.model { color: #9fcaff; } }
+  :root[data-theme="dark"] .tag.model { color: #9fcaff; }
+
+  /* -- Tables ---------------------------------------------------------------------- */
+  .scroll { overflow-x: auto; margin: 16px 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--stone);
+    font-weight: 500;
+    padding: 0 14px 8px 0;
+    border-bottom: 1px solid var(--rule-strong);
+    white-space: nowrap;
+  }
+  td {
+    padding: 9px 14px 9px 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+    line-height: 1.55;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td code, li code, p code { font-family: var(--mono); font-size: 12.5px; color: var(--ink-soft); }
+  td.num { font-family: var(--mono); text-align: right; white-space: nowrap; }
+  td.delta { font-family: var(--mono); color: var(--moss); font-weight: 600; white-space: nowrap; }
+  td.pts { font-family: var(--mono); font-size: 16px; color: var(--forest); font-weight: 700; }
+
+  /* -- Callouts --------------------------------------------------------------------- */
+  blockquote.rule {
+    margin: 0 0 34px;
+    padding: 26px 30px;
+    background: var(--surface);
+    border: 1px solid var(--rule-strong);
+    border-left: 3px solid var(--moss);
+  }
+  blockquote.rule p {
+    margin: 0; font-size: 19px; line-height: 1.55; letter-spacing: -.01em;
+    max-width: 54ch; font-weight: 600;
+  }
+  aside.note {
+    margin: 18px 0;
+    padding: 16px 20px;
+    background: var(--surface-sunk);
+    border-left: 2px solid var(--rule-strong);
+    font-size: 14px;
+    color: var(--ink-soft);
+  }
+  aside.note p { margin: 0; max-width: 64ch; }
+  aside.note p + p { margin-top: 10px; }
+  aside.note.sharp { border-left-color: var(--refuse); }
+
+  /* -- Phase spine ------------------------------------------------------------------ */
+  ol.spine { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 2px; }
+  ol.spine li {
+    display: grid;
+    grid-template-columns: 34px minmax(140px, 200px) 1fr auto;
+    align-items: center;
+    gap: 16px;
+    padding: 15px 18px;
+    background: var(--surface);
+    border-left: 3px solid var(--c);
+  }
+  ol.spine .idx {
+    font-family: var(--mono); font-size: 11px; color: var(--stone);
+    font-variant-numeric: tabular-nums;
+  }
+  ol.spine b { font-size: 15.5px; letter-spacing: -.01em; }
+  ol.spine span.what { color: var(--ink-soft); font-size: 13.5px; }
+  ol.spine em {
+    font-style: normal; font-family: var(--mono); font-size: 11px; color: var(--stone);
+    white-space: nowrap;
+  }
+
+  /* -- Fibonacci ladder -------------------------------------------------------------- */
+  .ladder { display: grid; gap: 3px; margin: 18px 0; max-width: 560px; }
+  .ladder div {
+    display: grid; grid-template-columns: 96px 1fr 46px; align-items: center; gap: 14px;
+    padding: 9px 14px; background: var(--surface); border-left: 2px solid var(--rule-strong);
+  }
+  .ladder span:first-child {
+    font-family: var(--mono); font-size: 12px; color: var(--stone);
+    font-variant-numeric: tabular-nums;
+  }
+  .ladder .bar { height: 7px; background: var(--moss); border-radius: 1px; opacity: .8; }
+  .ladder b {
+    font-family: var(--mono); font-size: 17px; text-align: right; color: var(--forest);
+  }
+
+  /* -- Code -------------------------------------------------------------------------- */
+  pre {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.68;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 2px solid var(--moss);
+    padding: 20px 22px;
+    overflow-x: auto;
+    margin: 18px 0;
+    white-space: pre;
+    color: var(--ink-soft);
+  }
+  pre b { color: var(--ink); font-weight: 600; }
+
+  ul.tight { max-width: var(--measure); padding-left: 20px; }
+  ul.tight li { margin-bottom: 6px; }
+  ol.numbered { max-width: var(--measure); padding-left: 22px; font-size: 14px; }
+  ol.numbered li { margin-bottom: 5px; }
+
+  strong.lead { color: var(--ink); }
+  .mermaid { margin: 22px 0; }
+
+  footer.colophon {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--rule);
+    padding-top: 26px;
+    font-size: 13px;
+    color: var(--stone);
+    max-width: var(--measure);
+  }
+  footer.colophon code { font-family: var(--mono); font-size: 12px; }
+
+  a { color: var(--moss); }
+
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: 1fr; gap: 0; padding: 0 20px 80px; }
+    nav.rail { position: static; margin-bottom: 40px; }
+    ol.spine li { grid-template-columns: 1fr; gap: 4px; }
+    ol.spine em { justify-self: start; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <header class="masthead">
+    <p class="kicker">Devvy · Estimate Code</p>
+    <h1>How a story becomes a number</h1>
+    <p class="standfirst">
+      Every stage the Live Reasoning panel shows while it works — what runs, what it decides,
+      what it is allowed to refuse, and which prompt a model actually sees. The model is never
+      asked for a story point. It is asked for one thing, sixteen times.
+    </p>
+    <div class="versions">
+      <span>framework <b>2.0</b></span>
+      <span>harness <b>EAGLE-1.0</b></span>
+      <span>pipeline <b>agentic-local-1.0</b></span>
+      <span>rubric <b>3.2</b></span>
+      <span>25 stages · 22 events</span>
+    </div>
+  </header>
+
+  <nav class="rail">
+    <h2>Pipeline</h2>
+    <ol>
+      <li class="p1"><a href="#evidence">Evidence <em>6</em></a></li>
+      <li class="p2"><a href="#independent">Independent assessment <em>3</em></a></li>
+      <li class="p3"><a href="#challenge">Challenge <em>6</em></a></li>
+      <li class="p4"><a href="#calculation">Calculation <em>9</em></a></li>
+      <li class="p5"><a href="#decision">Your decision <em>1</em></a></li>
+    </ol>
+    <h2>Reference</h2>
+    <ol>
+      <li class="plain"><a href="#silence">Reading silence</a></li>
+      <li class="plain"><a href="#panel">Specialist panel</a></li>
+      <li class="plain"><a href="#prompts">The prompts</a></li>
+      <li class="plain"><a href="#arithmetic">The arithmetic</a></li>
+      <li class="plain"><a href="#elsewhere">Other workflows</a></li>
+      <li class="plain"><a href="#repro">Reproducibility</a></li>
+      <li class="plain"><a href="#failure">When it goes wrong</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <section>
+      <blockquote class="rule">
+        <p>Agents discover and reason. Code calculates. Reviewers challenge. Evidence decides.
+        History calibrates.</p>
+      </blockquote>
+
+      <p>
+        The model is asked for a score from 1 to 5 on each of sixteen factors, and a short
+        reason grounded in the story text. Every number after that — the sum, the adjustments,
+        the Fibonacci band, the gates, the recommendation — is arithmetic in application code
+        that a reader can replay by hand.
+      </p>
+      <p>
+        This matters because the runtime is a 1B model on CPU. A model that small cannot be
+        trusted with a number, but it can be trusted to read a paragraph and say whether it
+        mentions a database migration. The pipeline is built around that division.
+      </p>
+
+      <ol class="spine">
+        <li style="--c: var(--lime)">
+          <span class="idx">01</span><b>Evidence</b>
+          <span class="what">Freeze the problem, gather only what can be known</span>
+          <em>6 stages</em>
+        </li>
+        <li style="--c: #4a86cd">
+          <span class="idx">02</span><b>Independent assessment</b>
+          <span class="what">Score sixteen factors, twice, blind</span>
+          <em>3 stages</em>
+        </li>
+        <li style="--c: var(--warn)">
+          <span class="idx">03</span><b>Challenge</b>
+          <span class="what">Find disagreement and argue it out on evidence</span>
+          <em>6 stages</em>
+        </li>
+        <li style="--c: var(--moss)">
+          <span class="idx">04</span><b>Calculation</b>
+          <span class="what">Fixed arithmetic and gates, in code</span>
+          <em>9 stages</em>
+        </li>
+        <li style="--c: var(--refuse)">
+          <span class="idx">05</span><b>Your decision</b>
+          <span class="what">The team owns the number</span>
+          <em>1 stage</em>
+        </li>
+      </ol>
+
+      <aside class="note">
+        <p>
+          25 checklist steps driven by 22 emitted events: three steps come from one
+          <code>calculate</code> event and two from one <code>policy_gate</code> event, because
+          the arithmetic is indivisible but reads better as its parts.
+        </p>
+        <p>
+          Not every stage runs on every story. <code>blind_review</code> and
+          <code>eagle_debate</code> are conditional, and the checklist marks the <em>first
+          outstanding</em> step rather than counting positions — a skipped stage must not stall
+          the display.
+        </p>
+      </aside>
+    </section>
+
+    <!-- ============================ PHASE 1 ============================ -->
+    <section id="evidence" style="--phase: var(--lime)">
+      <h2 class="phase"><span class="n">01</span> Evidence <span class="count">6 stages</span></h2>
+      <p class="phase-lede">Freeze the problem, then gather only what can be known about it.</p>
+
+      <article class="stage">
+        <h3><code class="id">contract</code> Seal the estimation contract <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>eagle.build_contract()</b></p>
+        <p>
+          Converts the story into a frozen, hashed contract: objective, acceptance criteria,
+          affected components, declared stack, completion rules, stop conditions and budget
+          limits. The model is <code>frozen=True</code>, so no later stage can edit what it was
+          asked to do. Budget: 2 debate rounds, 2 retrieval rounds.
+        </p>
+        <div class="scroll"><table>
+          <thead><tr><th>Stop condition</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr><td><code>uncertainty_5</code></td><td><code>SPIKE</code></td></tr>
+            <tr><td><code>insufficient_context</code></td><td><code>CLARIFY</code></td></tr>
+            <tr><td><code>unresolved_disagreement</code></td><td><code>HUMAN_REVIEW</code></td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          The hash is <code>sha256</code> over the whole contract body. <strong class="lead">Two
+          runs with the same hash were given the same problem.</strong> It is the first thing to
+          check when two estimates disagree.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">normalize</code> Normalize evidence, create the input hash <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>estimation_pipeline.canonical_story()</b></p>
+        <p>
+          Sorts labels and components, strips whitespace, assigns evidence ids
+          (<code>EV-TITLE</code>, <code>EV-DESCRIPTION</code>, <code>EV-AC-1…n</code>,
+          <code>EV-TECHNICAL</code>) and hashes the canonical form. Both model passes receive
+          this identical input, so any difference between them is a difference of reading, not
+          of input.
+        </p>
+        <p>
+          Also flags <code>untrusted_instructions_detected</code> — story text matching
+          <code>ignore (all|the|previous)</code>, <code>system prompt</code>,
+          <code>developer message</code>. Story text arrives from Jira, a spreadsheet or a paste
+          box; it is evidence, never instruction.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">readiness</code> Evaluate story readiness <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>estimation_pipeline.evaluate_readiness()</b> · 5 checks</p>
+        <p>
+          Product outcome, acceptance criteria, technical feasibility, security and data,
+          testing and deployment — each returning <code>ready</code>, <code>assumption</code> or
+          <code>blocked</code>.
+        </p>
+        <div class="scroll"><table>
+          <thead><tr><th>Outcome</th><th>Condition</th></tr></thead>
+          <tbody>
+            <tr><td><code>SPIKE_REQUIRED</code></td><td>Story under 80 characters with no acceptance criteria, or two or more blocked checks</td></tr>
+            <tr><td><code>DECOMPOSE_REQUIRED</code></td><td>Declared scenario is <code>framework_migration</code></td></tr>
+            <tr><td><code>ESTIMATE_WITH_ASSUMPTIONS</code></td><td>Any check returned <code>assumption</code></td></tr>
+            <tr><td><code>ESTIMATE</code></td><td>All five ready</td></tr>
+          </tbody>
+        </table></div>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">assemble_context</code> Bound the story evidence <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>harness.assemble_context()</b> · budget 6,000 characters</p>
+        <p>
+          Priority-ordered assembly with a provenance manifest. Every source is wrapped and
+          labelled: <code>&lt;UNTRUSTED EVIDENCE&gt;</code> for the story (priority 100),
+          <code>&lt;TRUSTED CONTEXT&gt;</code> for the declared stack (90) and the calibrated
+          anchors (80). Truncation is recorded per source, so the manifest can say what the
+          budget cut.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">declare_stack</code> Load stack calibration <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>StackProfile.guidance()</b> · <b>.anchors()</b></p>
+        <p>
+          Injects the declared stack's per-factor scoring notes and its 3/5/8-point reference
+          anchors. The same work costs differently on different stacks, and this is where that
+          is applied — not in the model's opinion.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">specialist_routing</code> Route specialist lenses <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>estimation_pipeline.route_specialists()</b> · keyword routing, capped at 8</p>
+        <div class="scroll"><table>
+          <thead><tr><th>Lens</th><th>Owns</th><th>Triggered by</th></tr></thead>
+          <tbody>
+            <tr><td>Product / domain</td><td>requirements_clarity</td><td><em>always</em></td></tr>
+            <tr><td>Test / quality</td><td>test_effort</td><td><em>always</em></td></tr>
+            <tr><td>Architecture</td><td>technical_complexity, integration_surface, reversibility</td><td>architect, integration, api, kafka, migration</td></tr>
+            <tr><td>Frontend</td><td>frontend_effort</td><td>react, angular, ui, screen, accessib</td></tr>
+            <tr><td>Backend</td><td>backend_effort, integration_surface</td><td>backend, service, endpoint, api, spring, fastapi, flask</td></tr>
+            <tr><td>Data / migration</td><td>data_model_change, reversibility</td><td>schema, database, migration, backfill, table</td></tr>
+            <tr><td>Security / compliance</td><td>security_review, regulatory_compliance</td><td>auth, security, pii, payment, audit, compliance</td></tr>
+            <tr><td>DevOps / SRE</td><td>observability_operations, dod_overhead</td><td>deploy, release, metric, alert, terraform, helm</td></tr>
+            <tr><td>Dependency / delivery risk</td><td>cross_team_dependency, uncertainty</td><td>vendor, other team, dependency, external, unknown</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          Product and Test are mandatory on every story — whole-lifecycle coverage. Mode is
+          <code>HIGH_RISK</code> when security, data or dependency routes fire or the scenario is
+          non-standard; otherwise <code>STANDARD</code> above three routes, else
+          <code>COMPACT</code>.
+        </p>
+      </article>
+    </section>
+
+    <!-- ============================ PHASE 2 ============================ -->
+    <section id="independent" style="--phase: #4a86cd">
+      <h2 class="phase"><span class="n">02</span> Independent assessment <span class="count">3 stages</span></h2>
+      <p class="phase-lede">Score the sixteen factors, twice, without either pass seeing the other.</p>
+
+      <article class="stage">
+        <h3><code class="id">primary_estimate</code> Run primary evidence assessment <span class="tag model">model call</span></h3>
+        <p class="runs"><b>structured_output.generate_structured()</b> · 2 attempts, escalating repair</p>
+        <p>
+          The first of only two places a model is called. The prompt carries the bounded labelled
+          context, the 16-factor rubric with its 1- and 5-anchors, the grounding contract, the
+          scoring rules, and the output shape given as a <em>filled example</em> — never as a
+          JSON Schema.
+        </p>
+        <aside class="note sharp">
+          <p>
+            A small model shown a JSON Schema returns the schema. It is valid JSON, it validates
+            whenever required fields have defaults, and it lands as an empty answer — failing the
+            workflow rule instead of the contract and burning both attempts reporting the wrong
+            problem. The loop detects schema echo (<code>$defs</code>, <code>properties</code>,
+            <code>required</code>) and example echo: a whole-object match, or any copied string of
+            30 characters or more.
+          </p>
+        </aside>
+        <p>
+          Whatever the model does not score is filled by keyword heuristics and labelled
+          <code>heuristic</code> — never presented as model judgement.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">specialist_analysis</code> Apply routed specialist lenses <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>estimation_pipeline.specialist_analysis()</b> · projection, not opinion</p>
+        <p>
+          Projects the scored evidence through each routed lens: which dimensions it owns, which
+          are elevated at 4 or above, which were inferred rather than scored, and what evidence
+          would replace the inference. It adds no opinion — it makes ownership and risk visible.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">blind_review</code> Run independent blind review <span class="tag model">model call</span> <span class="tag cond">conditional</span></h3>
+        <p class="runs"><b>blind_review_warranted()</b> · temperature <b>max(settings, 0.7)</b></p>
+        <p>
+          The reviewer receives the same evidence and rubric and never sees the primary scores.
+          It runs warmer on purpose: at a shared temperature both passes converge and the second
+          generation buys nothing.
+        </p>
+        <p>
+          A second full generation roughly doubles wall-clock cost on CPU, so it runs only when a
+          different opinion could change the answer.
+        </p>
+        <div class="scroll"><table>
+          <thead><tr><th>Trigger</th><th>Threshold</th></tr></thead>
+          <tbody>
+            <tr><td>Near a band edge</td><td class="num">within 3 of either edge</td></tr>
+            <tr><td>Protected risk elevated</td><td class="num">any protected factor ≥ 4</td></tr>
+            <tr><td>Broadly elevated</td><td class="num">≥ 3 factors at 4 or above</td></tr>
+            <tr><td>Mostly guessing</td><td class="num">heuristic fills &gt; model scores</td></tr>
+            <tr><td>Stack penalty</td><td class="num">maturity ≥ 4 or experience ≤ 2</td></tr>
+          </tbody>
+        </table></div>
+        <aside class="note">
+          <p>
+            When it does not run, the reviewer <strong class="lead">mirrors the primary</strong> —
+            it never falls back to the heuristic scorecard, because arbitrating against a
+            heuristic manufactures disagreement and silently moves scores. The consistency audit
+            then reports <code>blind_review_executed: false</code> and withholds the stability
+            index rather than reporting a perfect one that is an artefact of mirroring.
+          </p>
+        </aside>
+      </article>
+    </section>
+
+    <!-- ============================ PHASE 3 ============================ -->
+    <section id="challenge" style="--phase: var(--warn)">
+      <h2 class="phase"><span class="n">03</span> Challenge <span class="count">6 stages</span></h2>
+      <p class="phase-lede">Find where the assessments disagree, and argue it out on evidence.</p>
+
+      <article class="stage">
+        <h3><code class="id">disagreement</code> Detect material disagreements <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>compare_assessments()</b></p>
+        <p>
+          Per factor, <code>delta = |primary − reviewer|</code>. A difference is
+          <em>material</em> when delta is 2 or more, or when a <em>protected</em> factor differs
+          by 1 or more with either side at 4 or above.
+        </p>
+        <p>
+          <strong class="lead">Protected factors</strong> — where being wrong is expensive and
+          asymmetric: <code>uncertainty</code>, <code>security_review</code>,
+          <code>regulatory_compliance</code>, <code>data_model_change</code>,
+          <code>reversibility</code>, <code>test_effort</code>.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">critic</code> Challenge conflicting claims <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>criticize()</b></p>
+        <p>
+          For each material disagreement, states what evidence would actually resolve it. The
+          Critic does not estimate: a material difference must not be settled by whichever answer
+          was phrased more confidently.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">arbitration</code> Apply resolution policy <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>arbitrate()</b> · published policy</p>
+        <div class="scroll"><table>
+          <thead><tr><th>Case</th><th>Resolution</th></tr></thead>
+          <tbody>
+            <tr><td>Material <em>and</em> protected</td><td>The higher score, flagged <code>human_approval_required</code></td></tr>
+            <tr><td>Material</td><td>Rounded midpoint</td></tr>
+            <tr><td>Within threshold</td><td>Primary retained</td></tr>
+          </tbody>
+        </table></div>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">eagle_conflict</code> Measure independent agreement <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>eagle.aggregate()</b> · <b>median_scores()</b></p>
+        <div class="scroll"><table>
+          <thead><tr><th>Spread</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td class="num">0</td><td><code>accept</code></td></tr>
+            <tr><td class="num">1</td><td><code>accept_median</code></td></tr>
+            <tr><td class="num">≥ 2</td><td><code>dispute</code></td></tr>
+            <tr><td>elevated score, no evidence above 0.5 confidence</td><td><code>dispute</code>, regardless of agreement</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          That last row is load-bearing. It is what stops <em>missing information → assume medium
+          → score 3</em>. Two estimators agreeing on a number neither can evidence is not
+          agreement; it is a shared guess.
+        </p>
+        <aside class="note">
+          <p>
+            <code>median_scores()</code> implements a true per-factor median for any number of
+            estimators. The pipeline currently supplies two model passes, and the median of two is
+            their midpoint — so <code>snapshot.estimator_count</code> reports how much
+            independence actually backed the number. Adding a third pass needs no other change.
+          </p>
+        </aside>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">eagle_review</code> Critic, adversarial and optimistic review <span class="tag det">deterministic</span></h3>
+        <p class="runs">Three reviewers, deliberately pulling in opposite directions</p>
+
+        <p><strong class="lead">Critic</strong> — attacks the estimate that exists: every disputed
+        factor, naming who owes evidence; any factor at 4 or above with no supporting evidence,
+        raised as a <em>blocker</em>; and cross-team at 4 with integration at 2 or below, which is
+        the shape of waiting time rather than of work.</p>
+
+        <p><strong class="lead">Adversarial</strong> — assumes the estimate is too low and looks
+        only for the most credible reason why.</p>
+        <div class="scroll"><table>
+          <thead><tr><th>Finding</th><th>Fires when</th></tr></thead>
+          <tbody>
+            <tr><td>Migration scored as incidental</td><td>schema / backfill words present, data model ≤ 2</td></tr>
+            <tr><td>Migration with no rollback</td><td>data model ≥ 3, reversibility ≤ 2</td></tr>
+            <tr><td>Undocumented consumers</td><td>api / webhook / event / downstream present, integration ≤ 2</td></tr>
+            <tr><td>Complex but untested</td><td>technical complexity ≥ 4, test effort ≤ 2</td></tr>
+            <tr><td>Unpriced observability</td><td>new signal declared, operations ≤ 2</td></tr>
+            <tr><td>Unfamiliar but certain</td><td>maturity ≥ 4, uncertainty ≤ 2</td></tr>
+          </tbody>
+        </table></div>
+
+        <p><strong class="lead">Optimistic</strong> — the counterweight, so the adversarial pass
+        cannot inflate unopposed. Looks for complexity counted twice or already solved by the
+        platform.</p>
+        <div class="scroll"><table>
+          <thead><tr><th>Pair scored high together</th><th>Usually absorbed by</th></tr></thead>
+          <tbody>
+            <tr><td>security_review + backend_effort</td><td>shared authentication and authorization libraries</td></tr>
+            <tr><td>observability + dod_overhead</td><td>the platform's standard logging and metrics</td></tr>
+            <tr><td>regulatory + security</td><td>one control set satisfying both reviews</td></tr>
+            <tr><td>documentation + dod_overhead</td><td>the team's definition-of-done template</td></tr>
+          </tbody>
+        </table></div>
+
+        <aside class="note">
+          <p>
+            These are deterministic checklist evaluators, not extra model calls. A reviewer whose
+            findings vary between runs cannot be part of a reproducible pipeline, and every check
+            here is decidable from the evidence. Every finding carries all six required fields:
+            finding, severity, factor, evidence ids, suggested correction, confidence.
+          </p>
+        </aside>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">eagle_debate</code> Debate the disputed factors <span class="tag det">deterministic</span> <span class="tag cond">conditional</span></h3>
+        <p class="runs"><b>eagle.debate()</b> · bounded at 2 rounds</p>
+        <p>
+          <strong class="lead">Only disputed factors are re-examined.</strong> One contested score
+          is not a reason to redo work that was already agreed.
+        </p>
+        <div class="scroll"><table>
+          <thead><tr><th>Case</th><th>Resolution</th></tr></thead>
+          <tbody>
+            <tr><td>Protected factor</td><td>Settles to the higher proposal</td></tr>
+            <tr><td>Otherwise</td><td>Settles to the median</td></tr>
+            <tr><td>Survives both rounds</td><td><code>escalation: HUMAN_REVIEW</code></td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          A blocker finding on an <em>undisputed</em> factor also escalates — it is not a scoring
+          disagreement, so it cannot be absorbed into a median.
+        </p>
+      </article>
+    </section>
+
+    <!-- ============================ PHASE 4 ============================ -->
+    <section id="calculation" style="--phase: var(--moss)">
+      <h2 class="phase"><span class="n">04</span> Calculation <span class="count">9 stages</span></h2>
+      <p class="phase-lede">Fixed arithmetic and gates, in code, replayable by hand.</p>
+
+      <article class="stage">
+        <h3><code class="id">score_factors</code> Build the final 16-factor scorecard <span class="tag det">deterministic</span></h3>
+        <p class="runs">Resolved scores, each with its reason and a <b>model</b> / <b>heuristic</b> label</p>
+      </article>
+
+      <article class="stage" id="arithmetic">
+        <h3><code class="id">apply_base_adjustments</code> §8.1 base adjustments <span class="tag det">deterministic</span></h3>
+        <p class="runs">Applied to <b>BASE = Σ(F1…F16)</b></p>
+        <div class="scroll"><table>
+          <thead><tr><th>Rule</th><th>Condition</th><th>Δ</th></tr></thead>
+          <tbody>
+            <tr><td><code>uncertainty_ge_4</code></td><td>Uncertainty ≥ 4 — unknowns compound</td><td class="delta">+3</td></tr>
+            <tr><td><code>cross_team_ge_4</code></td><td>Cross-team dependency ≥ 4 — coordination overhead</td><td class="delta">+2</td></tr>
+            <tr><td><code>reversibility_ge_4</code></td><td>Reversibility ≥ 4 — safety mechanisms add work</td><td class="delta">+2</td></tr>
+            <tr><td><code>review_cycle_tax</code></td><td>Regulatory <em>or</em> security ≥ 4 — review cycle gates</td><td class="delta">+2</td></tr>
+            <tr><td><code>full_stack_tax</code></td><td>Frontend <em>and</em> backend both ≥ 3 — context switching</td><td class="delta">+1</td></tr>
+          </tbody>
+        </table></div>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">apply_stack_adjustments</code> §8.2 stack adjustments <span class="tag det">deterministic</span></h3>
+        <div class="scroll"><table>
+          <thead><tr><th>Rule</th><th>Condition</th><th>Δ</th></tr></thead>
+          <tbody>
+            <tr><td><code>maturity_bleeding_edge</code></td><td>Framework maturity 5</td><td class="delta">+3</td></tr>
+            <tr><td><code>maturity_emerging</code></td><td>Framework maturity 4</td><td class="delta">+2</td></tr>
+            <tr><td><code>maturity_legacy</code></td><td>Framework maturity 1 — legacy / EOL</td><td class="delta">+2</td></tr>
+            <tr><td><code>team_experience_low</code></td><td>Team experience ≤ 2</td><td class="delta">+2</td></tr>
+            <tr><td><code>new_testing_layer</code></td><td>New testing layer introduced</td><td class="delta">+1</td></tr>
+            <tr><td><code>new_observability_signal</code></td><td>New observability signal introduced</td><td class="delta">+1</td></tr>
+            <tr><td><code>build_pattern_change</code></td><td>Build or deployment pattern changes</td><td class="delta">+1</td></tr>
+            <tr><td><code>polyglot_boundary</code></td><td>Additional stacks crossed</td><td class="delta">+1 ea</td></tr>
+          </tbody>
+        </table></div>
+        <aside class="note">
+          <p>
+            Every rule is recorded whether or not it fired, and the applied deltas must accumulate
+            exactly to the adjusted score. A test enforces the reconciliation — it is what lets a
+            reader replay the scorecard by hand.
+          </p>
+        </aside>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">map_to_fibonacci</code> §9 band mapping <span class="tag det">deterministic</span></h3>
+        <div class="ladder">
+          <div><span>≤ 24</span><div class="bar" style="width: 12%"></div><b>3</b></div>
+          <div><span>25 – 34</span><div class="bar" style="width: 24%"></div><b>5</b></div>
+          <div><span>35 – 44</span><div class="bar" style="width: 40%"></div><b>8</b></div>
+          <div><span>45 – 54</span><div class="bar" style="width: 60%"></div><b>13</b></div>
+          <div><span>55 – 64</span><div class="bar" style="width: 80%"></div><b>21</b></div>
+          <div><span>65 +</span><div class="bar" style="width: 100%"></div><b>34</b></div>
+        </div>
+        <p>
+          A framework-maturity cap can hold the result below the band the arithmetic reached;
+          when it does, <code>cap_exceeded</code> is set and the step is shown.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">evaluate_gates</code> §10 policy gates <span class="tag det">deterministic</span></h3>
+        <p class="runs">Seven gates evaluated on every run — <b>a failed gate overrides the number</b></p>
+        <p>
+          <code>uncertainty_max</code> · <code>maturity_max</code> · <code>knowledge_gap</code> ·
+          <code>multiple_extremes</code> · <code>size_ceiling</code> · <code>maturity_cap</code> ·
+          <code>not_a_migration</code>
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">decide</code> Reach the framework recommendation <span class="tag det">deterministic</span></h3>
+        <p class="runs">Gates + points + uncertainty →</p>
+        <p>
+          <code>proceed</code> · <code>decompose</code> · <code>spike_first</code> ·
+          <code>upgrade_framework_first</code> · <code>epic_discovery</code>
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">eagle_validation</code> Validation and spike gate <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>eagle.validate()</b> · 10 rules, each reporting whether it fired</p>
+        <ol class="numbered">
+          <li>Exactly 16 factors</li>
+          <li>Each score is an integer 1–5</li>
+          <li>Every factor ≥ 4 has evidence</li>
+          <li>Framework maturity supplied</li>
+          <li>Team experience supplied</li>
+          <li>Stack penalties validated</li>
+          <li>No duplicate penalty</li>
+          <li>Final output schema valid — deltas reconcile to the adjusted score</li>
+          <li>Spike rules checked</li>
+          <li>Decomposition rules checked</li>
+        </ol>
+        <p style="margin-top: 22px;"><strong class="lead">The spike gate — where the system is
+        allowed to refuse.</strong></p>
+        <div class="scroll"><table>
+          <thead><tr><th>Trigger</th><th>Decision</th></tr></thead>
+          <tbody>
+            <tr><td>Uncertainty = 5</td><td><code>SPIKE</code></td></tr>
+            <tr><td>Framework maturity = 5</td><td><code>SPIKE</code></td></tr>
+            <tr><td>Test effort = 5 — no viable testing strategy</td><td><code>SPIKE</code></td></tr>
+            <tr><td>DoD or observability = 5 — deployment viability unknown</td><td><code>SPIKE</code></td></tr>
+            <tr><td>Team experience ≤ 2 <em>and</em> technical complexity ≥ 4</td><td><code>SPIKE_OR_PAIR</code></td></tr>
+            <tr><td>Two or more factors at 5</td><td><code>DECOMPOSE_OR_SPIKE</code></td></tr>
+          </tbody>
+        </table></div>
+        <aside class="note sharp">
+          <p>
+            A system that refuses to manufacture precision is more reliable than one that always
+            returns a number, because a manufactured number is indistinguishable from an informed
+            one once it reaches a planning board.
+          </p>
+        </aside>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">eagle_reference</code> Anchor against historical stories <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>compare_references()</b> · this owner's own history, most recent 60 with a scorecard</p>
+        <div class="scroll"><table>
+          <thead><tr><th>Signal</th><th>Weight</th><th>What it measures</th></tr></thead>
+          <tbody>
+            <tr><td>Structural</td><td class="num">0.45</td><td>Distance across all 16 factor scores — the <em>shape</em> of the work</td></tr>
+            <tr><td>Semantic</td><td class="num">0.40</td><td>Token overlap of title and summary</td></tr>
+            <tr><td>Stack</td><td class="num">0.15</td><td>Same frontend and backend</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          Returns the closest matches, their differences, an implied range, and whether this story
+          reads as smaller, similar or larger. Below 50% similarity it says so and declines to
+          anchor. With no history it says there is no anchor rather than inventing one.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">consistency_audit</code> Replay and audit consistency <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>consistency_audit()</b> → <code>PASS</code> / <code>PASS_WITH_WARNINGS</code> / <code>HUMAN_REVIEW_REQUIRED</code></p>
+        <p>
+          Replays <code>calculate()</code> from the final scorecard and compares it to what was
+          reported. Also reports the dimension stability index, point stability across both
+          passes, and whether any protected disagreement remains.
+        </p>
+      </article>
+    </section>
+
+    <!-- ============================ PHASE 5 ============================ -->
+    <section id="decision" style="--phase: var(--refuse)">
+      <h2 class="phase"><span class="n">05</span> Your decision <span class="count">1 stage</span></h2>
+      <p class="phase-lede">The team owns the number.</p>
+
+      <article class="stage">
+        <h3><code class="id">human_review</code> Hand off for human consensus</h3>
+        <p>
+          The recommendation is decision support. The team may <strong class="lead">accept</strong>,
+          <strong class="lead">override</strong>, <strong class="lead">spike</strong> or
+          <strong class="lead">decompose</strong> it, and that decision is recorded against the
+          history record — which is what turns history into calibration.
+        </p>
+        <p>
+          The result page also offers re-estimation: from scratch, or with detail the story left
+          out. <strong class="lead">The previous estimate is never passed to the re-run.</strong>
+          A model fed its own last answer returns a polite adjustment of it, which is exactly the
+          anchoring the blind pass exists to remove.
+        </p>
+      </article>
+    </section>
+
+    <!-- ============================ REFERENCE ============================ -->
+    <section id="silence">
+      <h3 class="plain">Reading silence — the rule that decides most estimates</h3>
+      <p>
+        The single most consequential rule in the pipeline, and the one that has been wrong twice.
+        <strong class="lead">Absence of evidence is not evidence of absence.</strong> The
+        discriminator is not how long the story is — it is whether the story bounds its own scope.
+      </p>
+      <p>
+        A story is <em>specified</em> if it has acceptance criteria, a technical breakdown, or a
+        concrete marker in its text: a quoted literal, a stated from→to, an identifier, a number,
+        camelCase.
+      </p>
+      <div class="scroll"><table>
+        <thead><tr><th>Story</th><th>Unmentioned factor</th><th>Reason given</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Specified</strong>, small</td><td class="pts">1</td><td>“The story states its finished state and no <em>X</em> work follows from it.”</td></tr>
+          <tr><td><strong>Specified</strong>, large</td><td class="pts">2–3</td><td>“The story is large and says nothing about <em>X</em>; unstated work at this size is more likely to exist than not.”</td></tr>
+          <tr><td><strong>Not specified</strong></td><td class="pts">4</td><td>“The story does not say whether <em>X</em> is involved… <strong>Scored high because unstated scope is unbounded, not because evidence was found.</strong>”</td></tr>
+        </tbody>
+      </table></div>
+      <p>
+        A 4 meaning <em>“we were not told”</em> and a 4 meaning <em>“we found evidence”</em> are
+        different claims, and the reason column always distinguishes them.
+      </p>
+      <p>
+        Exploratory stories — <em>investigate, explore, research, look into, feasibility</em> — are
+        maximum uncertainty by definition: they ask what the work <em>is</em>. Uncertainty 5, which
+        trips the spike gate. Merely vague stories — <em>improve, optimise, enhance, support,
+        handle</em> — are under-specified changes, not spikes: uncertainty 4.
+      </p>
+    </section>
+
+    <section id="panel">
+      <h3 class="plain">The specialist panel</h3>
+      <p>
+        One specialist owns the primary evidence for each factor. Secondary opinions are allowed;
+        ownership decides who must produce evidence when a factor is challenged.
+      </p>
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th>Factor</th><th>Owner</th></tr></thead>
+        <tbody>
+          <tr><td class="num">1</td><td>Requirements Clarity</td><td>Requirements Analyst</td></tr>
+          <tr><td class="num">2</td><td>Technical Complexity</td><td>Architecture Analyst</td></tr>
+          <tr><td class="num">3</td><td>Integration Surface</td><td>Architecture Analyst</td></tr>
+          <tr><td class="num">4</td><td>Data Model Change</td><td>Data Agent</td></tr>
+          <tr><td class="num">5</td><td>Frontend Effort</td><td>Frontend Agent</td></tr>
+          <tr><td class="num">6</td><td>Backend Effort</td><td>Backend Agent</td></tr>
+          <tr><td class="num">7</td><td>Test Effort</td><td>Test Engineering Agent</td></tr>
+          <tr><td class="num">8</td><td>Regulatory Compliance</td><td>Compliance Agent</td></tr>
+          <tr><td class="num">9</td><td>Security Review</td><td>Security Agent</td></tr>
+          <tr><td class="num">10</td><td>Observability &amp; Operations</td><td>SRE / Observability Agent</td></tr>
+          <tr><td class="num">11</td><td>Cross-Team Dependency</td><td>Dependency Agent</td></tr>
+          <tr><td class="num">12</td><td>Reversibility</td><td>Architecture Analyst</td></tr>
+          <tr><td class="num">13</td><td>Uncertainty / Unknown Unknowns</td><td>Requirements Analyst</td></tr>
+          <tr><td class="num">14</td><td>Performance / Scalability</td><td>Performance Agent</td></tr>
+          <tr><td class="num">15</td><td>Documentation &amp; Knowledge Transfer</td><td>Documentation Agent</td></tr>
+          <tr><td class="num">16</td><td>Definition of Done Overhead</td><td>Delivery / DoD Agent</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="prompts">
+      <h3 class="plain">The prompts</h3>
+      <p>
+        <strong class="lead">The grounding contract</strong> is carried verbatim by every
+        model-backed workflow in the application — Chat, Talk, Smart Code and Estimate. Defined
+        once in <code>backend/harness.py</code> so the wording cannot drift between agents.
+      </p>
+      <pre>Use only the facts directly stated in the context above. Do not use outside facts, prior
+knowledge about similar systems, or assumptions about how this is "usually" done.
+
+Do not guess, extrapolate, or add information that is not explicitly written. Do not invent
+file names, endpoints, tables, screens, libraries, versions, or requirements. If two readings
+of the text are possible, do not pick one.
+
+If the information needed is missing, say exactly: <b>"The provided text does not contain this
+information."</b>
+Then say what could be added to the story to answer it — name the specific missing fact, not a
+general request for more detail.
+
+Act as a strict extractor. Process only the given words and numbers. Absence of a detail is a
+finding to report, never a gap to fill.</pre>
+
+      <p>
+        A one-paragraph form carries the same four rules for Estimate and Smart Code, whose
+        prompts are near their character budget — every character of policy there costs a
+        character of story evidence. 18 tests assert all four rules reach every prompt.
+      </p>
+
+      <p style="margin-top: 30px;"><strong class="lead">The estimation prompt</strong>, in the
+      order the model sees it.</p>
+      <pre>Score the story below against all 16 factors of the estimation framework.
+
+<b>&lt;UNTRUSTED EVIDENCE id="story"&gt;</b>
+{ title, user_story, acceptance_criteria, technical_breakdown, labels, components }
+<b>&lt;/UNTRUSTED EVIDENCE&gt;</b>
+
+<b>&lt;TRUSTED CONTEXT id="stack_profile"&gt;</b>
+{ frontend, backend, database, framework_maturity, team_experience, scenario }
+<b>&lt;/TRUSTED CONTEXT&gt;</b>
+
+<b>&lt;TRUSTED CONTEXT id="anchors"&gt;</b>
+- 3 points (ReactJS): Presentational component driven by props
+- 5 points (ReactJS): Form with validation, API call, and error handling
+- 8 points (ReactJS): Dashboard with filtering, sorting, and real-time updates
+  …per declared stack
+<b>&lt;/TRUSTED CONTEXT&gt;</b>
+
+FACTOR RUBRIC — score every factor from 1 to 5:
+1. requirements_clarity — 1 = Crystal clear acceptance criteria … 5 = Vague or needs discovery
+   Stack calibration: …
+  …16 factors
+
+[grounding contract]
+
+Rules:
+- Score all 16 factors using their exact ids.
+- Score only what the story says. Do not invent requirements, components, integrations, or
+  constraints it does not state, and do not assume a technology it does not name.
+- <b>Silence is not evidence that the work is small.</b> If the story does not give you enough
+  to judge a factor, score it 4 and say so in the reason. Unstated scope is unbounded scope,
+  and an estimate that reads absence as simplicity is how a two-line story becomes a two-week
+  surprise.
+- Score a factor 1 or 2 only when the story positively bounds it.
+- Give each score a reason of at most 25 words, quoting or paraphrasing the story evidence, or
+  naming exactly what the story failed to say.
+- Name the 2-3 factors that genuinely drive the size.
+- List hidden sub-tasks the story text omits but the work implies.
+
+Return one JSON object with these keys:
+  scores: object mapping each factor id to {"score": 1-5, "why": "short reason"}
+  drivers / rationale / hidden_tasks / risks / assumptions / proposed_stories</pre>
+      <p>
+        The blind reviewer receives this same prompt and the same evidence at
+        <code>max(settings.temperature, 0.7)</code>, and never receives the primary scores.
+      </p>
+    </section>
+
+    <section id="elsewhere">
+      <h3 class="plain">The other three workflows</h3>
+      <p>
+        The grounding contract and the untrusted-evidence envelope are shared across the
+        application. The graphs are not.
+      </p>
+      <div class="scroll"><table>
+        <thead><tr><th>Workflow</th><th>Graph</th><th>Routing</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Chat</strong><br><code>agent.py</code></td>
+            <td><code>route → (research | image | respond)</code></td>
+            <td>Keyword match on the last user message in <code>auto</code> mode; attachments outrank the code trigger. <code>route_reason</code> names the matched phrase, and the UI shows it.</td>
+          </tr>
+          <tr>
+            <td><strong>Talk</strong><br><code>agent_graph.py</code></td>
+            <td><code>route_visual → (research →)? companion</code></td>
+            <td>Keyword sets decide <code>requires_research</code> (news, weather, current) and <code>requires_animation</code> (maths and visual terms, which trigger a Manim render).</td>
+          </tr>
+          <tr>
+            <td><strong>Smart Code</strong><br><code>smart_code.py</code></td>
+            <td><code>classify → retrieve → plan → code → generate → verify → critique</code></td>
+            <td>Preview never writes. Apply requires an unexpired single-use token, unchanged-file hashes and passing structural checks, then writes atomically with backups.</td>
+          </tr>
+        </tbody>
+      </table></div>
+      <aside class="note">
+        <p>
+          <strong class="lead">Research must never abort a turn.</strong> Both Chat and Talk wrap
+          <code>web_search</code> and treat a network failure or an empty result set as evidence:
+          the model is told plainly that live data was unavailable and instructed not to invent an
+          answer.
+        </p>
+      </aside>
+    </section>
+
+    <section id="repro">
+      <h3 class="plain">Reproducibility</h3>
+      <p>
+        Every estimate carries a snapshot recording everything that would have to change for two
+        runs to differ.
+      </p>
+      <div class="scroll"><table>
+        <thead><tr><th>Field</th><th>Example</th></tr></thead>
+        <tbody>
+          <tr><td><code>input_hash</code></td><td><code>sha256:f6d2f76d…</code></td></tr>
+          <tr><td><code>contract_hash</code></td><td><code>sha256:f6fda3c6…</code></td></tr>
+          <tr><td><code>estimation_framework_version</code></td><td><code>2.0</code></td></tr>
+          <tr><td><code>factor_rubric_version</code></td><td><code>3.2</code></td></tr>
+          <tr><td><code>agent_graph_version</code></td><td><code>EAGLE-1.0</code></td></tr>
+          <tr><td><code>team_profile</code></td><td><code>maturity-3/experience-3/standard</code></td></tr>
+          <tr><td><code>models</code></td><td>estimator, reviewer, judge (<code>deterministic</code>)</td></tr>
+          <tr><td><code>estimator_count</code></td><td>How much independence actually backed the number</td></tr>
+          <tr><td><code>reference_dataset_size</code></td><td>How many past stories were available to anchor against</td></tr>
+        </tbody>
+      </table></div>
+      <blockquote class="rule">
+        <p>Same story + same code snapshot + same architecture snapshot + same calibration
+        dataset + same harness version = same estimate.</p>
+      </blockquote>
+    </section>
+
+    <section id="failure">
+      <h3 class="plain">When it goes wrong</h3>
+      <p>
+        Failures are classified by architectural layer, because “retry with a bigger prompt” is
+        the wrong response to eleven of these twelve: <code>task_contract</code>,
+        <code>context</code>, <code>retrieval</code>, <code>repository_understanding</code>,
+        <code>reference_story</code>, <code>agent_reasoning</code>, <code>reviewer</code>,
+        <code>judge</code>, <code>rule_engine</code>, <code>model</code>, <code>tool</code>,
+        <code>calibration</code>.
+      </p>
+      <div class="scroll"><table>
+        <thead><tr><th>Symptom</th><th>Layer</th><th>Remedy</th></tr></thead>
+        <tbody>
+          <tr><td>Elevated score with no evidence</td><td><code>retrieval</code></td><td>Retrieve evidence for the factor, or lower it</td></tr>
+          <tr><td>Malformed scorecard</td><td><code>rule_engine</code></td><td>Fix the contract, not the prompt</td></tr>
+          <tr><td>Debate survived its bounds</td><td><code>judge</code></td><td>Escalate to a human; more rounds will not converge</td></tr>
+          <tr><td>Over half the factors from heuristics</td><td><code>context</code></td><td>The story is too thin. Clarify it rather than re-running</td></tr>
+          <tr><td>One assessment backed the estimate</td><td><code>reviewer</code></td><td>A single pass cannot detect its own anchoring</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 class="plain" style="margin-top: 44px;">Degradation, not failure</h3>
+      <p>
+        When the model cannot satisfy the contract across both attempts, the estimate falls back
+        to the heuristic scorecard and reports the degradation in its evidence:
+        <code>model_scored</code>, <code>heuristic_filled</code>, and a per-factor
+        <code>provenance</code> label. The number is still produced, and the reader can see
+        exactly how much of it was read and how much was inferred.
+      </p>
+      <p>
+        That is the whole posture of the pipeline: it would rather show you a weaker answer
+        honestly labelled than a confident one you cannot check.
+      </p>
+    </section>
+
+  </main>
+
+  <footer class="colophon">
+    Written from <code>backend/estimate_code.py</code>, <code>estimation_pipeline.py</code>,
+    <code>eagle.py</code>, <code>estimation_framework.py</code> and <code>harness.py</code>.
+    The canonical copy lives in the repository at <code>LIVE_REASONING.md</code> and should be
+    updated alongside the code it describes.
+  </footer>
+
+</div>
+
+</body>
+</html>

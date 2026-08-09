@@ -2,9 +2,14 @@
 
 **Document status:** As-built implementation and reproducible rebuild specification
 **Application version:** 0.1.0
-**Last verified against source:** 2026-08-06
+**Last verified against source:** 2026-08-09
 **Repository:** `Devvy`
 **Product name:** Devvy — Evidence-Based Development
+
+**Companion documents:** `LIVE_REASONING.md` walks the Estimate Code pipeline stage by stage —
+every agent, condition, threshold and prompt. `CLAUDE.md` carries the working constraints for
+contributors. `agile_story_point_estimation_framework_fullstack.md` is the framework spec the
+deterministic calculator implements.
 
 ## 1. Purpose
 
@@ -156,6 +161,24 @@ flowchart TD
 5. Pages are selected by a hash route (`useRoute`), so Back works, a reload keeps its place,
    and a conversation or stored estimate can be linked to a colleague.
 6. Generated media is served by FastAPI under `/generated`.
+
+Backend modules and their responsibility:
+
+| Module | Owns |
+| --- | --- |
+| `api.py` | Composition root, HTTP and WebSocket surface |
+| `model.py` | The single shared `GemmaRuntime` |
+| `agent.py` / `agent_graph.py` | Chat and Talk LangGraph agents |
+| `smart_code.py` | Repository-aware preview and apply |
+| `estimate_code.py` | Story estimation: prompt, scorecard assembly, heuristic fallback |
+| `estimation_framework.py` | The deterministic v2 calculator — **owns every number** |
+| `estimation_pipeline.py` | Readiness, routing, comparison, arbitration, consistency audit |
+| `eagle.py` | EAGLE governance: contract, blackboard, reviewers, debate, validation, spike gate, references, snapshot, failure attribution |
+| `estimate_history.py` | Durable estimates, decisions, calibration stats, reference corpus |
+| `harness.py` | Context assembly, the grounding contract, the run ledger |
+| `structured_output.py` | The bounded repair loop and echo detection |
+| `jobs.py` | Durable background execution |
+| `auth.py` / `db.py` / `migrations.py` / `config.py` | Sessions, persistence, schema, settings |
 
 Because singletons are built at import time, tests MUST set `PHOENIX_ENABLED=false` in the
 environment **before** importing `backend.api`.
@@ -411,6 +434,39 @@ token counts, and a raw-output preview. "Invalid structured output" alone cannot
 model that ignored the contract from one that ran out of room, and the two need opposite fixes.
 A run cut at the token ceiling MUST NOT have its truncated output replayed as a correction:
 that invites the same overflow. Ask for something smaller instead.
+
+### 4.7 Grounding contract
+
+Every model-backed workflow — Chat, Talk, Smart Code, Estimate Code — MUST carry the same
+grounding contract, defined once in `backend/harness.py` and never restated per agent. A rule
+that holds in three of four prompts is a rule the fourth workflow silently does not have.
+
+The contract states four things, and a change to any of them is a change to one string:
+
+1. Use only the facts directly stated in the supplied context. No outside facts, no prior
+   knowledge about similar systems, no assumptions about how something is "usually" done.
+2. Do not guess, extrapolate, or add information not explicitly written — no invented file
+   names, endpoints, tables, screens, libraries, versions, or requirements. Where two readings
+   are possible, do not pick one.
+3. Where the information is missing, reply with the exact sentence held in `NO_INFORMATION`,
+   then name the specific fact that would have to be added. A bare refusal is not useful to the
+   person who wrote the story.
+4. Act as a strict extractor: process only the given words and numbers. Absence of a detail is
+   a finding to report, never a gap to fill.
+
+`NO_INFORMATION` is its own constant on a single line. An instruction to "say exactly X" where
+X is split across a line break is not an exact instruction, and a fixed phrase is something a
+reader can recognise and a test can assert.
+
+`GROUNDING_CONTRACT` is the full form for Chat and Talk. `GROUNDING_CONTRACT_BRIEF` carries the
+same four rules in one paragraph for Estimate Code and Smart Code, whose prompts sit near their
+character budget — every character of policy there costs a character of evidence. Both forms
+MUST contain all four rules; `tests/test_grounding_contract.py` asserts this per workflow.
+
+The rationale is specific to the runtime. A 1B model's failure mode is not refusing to answer,
+it is answering anyway: asked about a field the story never mentions it describes a plausible
+one. Inside an evidence-based product that fabrication is indistinguishable from evidence — it
+lands in a scorecard, receives an evidence id, and is read by someone who was not in the room.
 
 ---
 
@@ -1121,6 +1177,52 @@ from scorecard to a single Fibonacci value is followable by eye.
 Nodes are buttons: keyboard focusable, `aria-expanded`, and `aria-current="step"` on the running
 node. All text MUST meet WCAG AA contrast (4.5:1) at its rendered size.
 
+### 11.3.3 Reading silence — the scoring rule
+
+The most consequential rule in the estimator, and the one that MUST NOT be changed without
+reading this section. **Absence of evidence is not evidence of absence.**
+
+The discriminator is not how long a story is; it is whether the story **bounds its own scope**.
+A story is *specified* when it carries acceptance criteria, a technical breakdown, or a concrete
+marker in its text — a quoted literal, a stated from→to, an identifier, a number, camelCase
+(`_story_specified`, `_CONCRETE`). A twelve-word story can be completely bounded; a
+twelve-word story can be completely open.
+
+| Story | Unmentioned factor scores | Reason MUST state |
+| --- | --- | --- |
+| Specified, small | 1 | that the story states its finished state and no such work follows |
+| Specified, large | 2–3 | that unstated work at this size is more likely to exist than not |
+| **Not specified** | **4** | that the story does not say, and that the score is high **because unstated scope is unbounded, not because evidence was found** |
+
+A 4 meaning "we were not told" and a 4 meaning "we found evidence" are different claims. The
+reason column MUST distinguish them, because the scorecard is read by people who were not in
+the room.
+
+The same rule governs the prompt. The estimation prompt MUST NOT instruct the model to score
+low on missing evidence; it instructs the model to score 4 and name what the story failed to
+say. Both halves — prompt and heuristic — MUST agree, or the estimate changes depending on
+whether the model held the contract.
+
+Exploratory stories (`_EXPLORATORY`: investigate, explore, research, look into, feasibility)
+are maximum uncertainty by definition — they ask what the work *is*. Uncertainty 5, which trips
+the spike gate. Merely vague stories (`_VAGUE`: improve, optimise, enhance, support, handle) are
+under-specified changes, not spikes: uncertainty 4.
+
+**Two failures this rule has already caused, both regressions to guard against:**
+
+*A fixed floor collapses the scale.* Returning 2 for every unmatched factor puts the minimum
+possible base sum at 32 — already inside the 25–34 band — so no story, however trivial, can
+ever be scored 3 points. With narrow keyword lists, eleven of sixteen factors then return the
+identical score for a copy change and an authentication rewrite, and an entire backlog comes
+back at the same number.
+
+*Size is the wrong discriminator.* Reading a short story as simple scores an unbounded piece of
+work at maximum confidence and minimum points, which is the exact anti-pattern the framework
+exists to prevent.
+
+`tests/test_estimation_spread.py` pins the discrimination rather than any particular value, so
+the rules can be tuned without rewriting the suite.
+
 ### 11.4 Deterministic calculation
 
 1. **Base sum** — the 16 scores (16–80).
@@ -1201,6 +1303,71 @@ For the same reason `agentic_pipeline.model_policy.independent_model_passes` MUS
 actually ran (1 or 2), alongside `blind_review_executed` and the reason. A record whose whole
 purpose is to be checkable against the run cannot state a second opinion that, for most stories,
 never happened.
+
+### 11.7.2 EAGLE governance layer
+
+`backend/eagle.py` implements the Evidence-Augmented Governed Layered Estimation harness
+(`EAGLE_VERSION = "EAGLE-1.0"`) around the deterministic v2 calculator. Its operating rule is
+the one the architecture opens with: *agents discover and reason, code calculates, reviewers
+challenge, evidence decides, history calibrates.*
+
+**Everything in this module is deterministic**, and that is the point rather than a limitation.
+The reproducibility target is *same story + same snapshot + same calibration data + same harness
+= same estimate*, and a rule implemented in a prompt cannot make that promise. The model's job
+stays where it already was: a 1–5 score and a reason per factor.
+
+| Stage | Function | Rule |
+| --- | --- | --- |
+| Contract | `build_contract` | Objective, criteria, stack, completion rules, stop conditions and budgets, frozen and `sha256`-hashed. `frozen=True`, so no later stage can edit what was asked. |
+| Blackboard | `build_blackboard` | Every claim carries id, factor, source type, location, confidence and trust. A heuristic fill is recorded at confidence < 0.5 and MUST NOT be presented at the same confidence as something read from the story. |
+| Aggregate | `aggregate`, `median_scores` | Per-factor median over N estimators. Spread 0 → accept; 1 → accept median; ≥ 2 → dispute; **an elevated score with no evidence above 0.5 confidence → dispute regardless of agreement**. |
+| Review | `critic_review`, `adversarial_review`, `optimistic_review` | Three reviewers pulling in opposite directions. Every finding MUST carry all six fields: finding, severity, factor, evidence ids, suggested correction, confidence. |
+| Debate | `debate` | Bounded at `MAX_DEBATE_ROUNDS = 2`, and MUST touch only disputed factors. Protected factors settle high; everything else settles to the median; survival escalates to `HUMAN_REVIEW`. |
+| Validation | `validate` | Ten objective rules, each reporting whether it fired, so a passing run is as auditable as a failing one. |
+| Spike gate | `spike_gate` | The system MUST be able to answer "do not estimate — spike first". |
+| References | `compare_references` | Three similarity signals — structural 0.45, semantic 0.40, stack 0.15 — reported separately so a weak match is visibly weak. |
+| Snapshot | `build_snapshot` | Everything that would have to change for two runs to differ. |
+| Attribution | `attribute_failure` | Classifies failures across twelve architectural layers. |
+
+The dispute rule for an unevidenced elevated score is load-bearing: it is what stops *missing
+information → assume medium → score 3*. Two estimators agreeing on a number neither can
+evidence is not agreement, it is a shared guess.
+
+`median_scores` implements a true per-factor median for any number of estimators. The pipeline
+supplies **two** model passes, so the median of two is their midpoint; `snapshot.estimator_count`
+MUST report how much independence actually backed the number. Adding a third pass requires no
+other change.
+
+The adversarial and optimistic reviewers are deterministic checklist evaluators, not additional
+model calls. A reviewer whose findings vary between runs cannot be part of a reproducible
+pipeline, and every check they perform is decidable from the evidence. A test asserts they are
+deterministic. The optimistic reviewer exists so the adversarial one cannot inflate unopposed.
+
+Reference comparison reads the requesting owner's own history only (`reference_corpus`, most
+recent 60 records carrying a scorecard). Another team's velocity is not evidence about this one.
+Below 50% similarity the comparator MUST say the match is too weak to anchor against; with no
+history it MUST say there is no anchor rather than inventing one.
+
+The complete package is published at `result.eagle` and rendered by `EaglePanel.tsx`.
+
+### 11.7.3 Human decision and re-estimation
+
+The pipeline ends by declaring that the team owns the number. That declaration MUST be
+answerable **on the page that makes it**. The decision panel is mounted on both the fresh result
+and the recalled history record — the same component, the same record, keyed by
+`result.history_id`.
+
+Re-estimation is part of the decision, not a separate feature: *spike* and *decompose* both mean
+"come back to this". Two actions are offered:
+
+- **Re-estimate from scratch** — the same story, the same rubric.
+- **Re-estimate with detail the story left out** — the correction is appended to the story **as
+  evidence**.
+
+**The previous estimate MUST NOT be passed to the re-run.** A model fed its own last answer
+returns a polite adjustment of that answer, which is exactly the anchoring blind scoring exists
+to remove. Two runs that disagree are reporting that the story is ambiguous, which is
+information rather than a fault.
 
 ### 11.8 Estimate history
 
@@ -1382,16 +1549,68 @@ committed. Playback drives an `AnalyserNode` for mouth animation and word-level 
 socket reconnects with exponential backoff capped at 10 seconds. Reset clears local state and
 sends `{type:"reset"}`.
 
+### 12.3.1 Dockable panels
+
+`Dock.tsx` provides the side-panel primitive used by Smart Code, Chat and Activity. Panel width
+and side are the reader's, not the author's: the same 304px evidence panel is a third of a
+1024px laptop and a sliver of an ultrawide, and the person reading a 200-line diff wants the
+opposite trade from the person watching a pipeline.
+
+- **Resize** — the divider is a `role="separator"` with `aria-orientation`, `aria-valuenow`,
+  `aria-valuemin`, `aria-valuemax` and `aria-controls`. Arrow keys move it (direction follows
+  the side, so on a right panel "left" grows it), `Home`/`End` jump to the limits, `Enter`
+  collapses, double-click resets. A resize handle reachable only by mouse is a handle half the
+  users do not have.
+- **Dock** to either edge — implemented as a CSS `order` change, so no DOM moves and neither
+  focus nor scroll position is lost.
+- **Collapse** to a 32px labelled strip rather than to nothing, so it is one click back.
+
+The divider MUST take its own layout width rather than straddling the boundary on negative
+margins: an overhanging handle sits on top of the adjacent column's scrollbar, and dragging that
+scrollbar then resizes the panel.
+
+Persistence is a side effect and MUST live in an effect, never inside a state updater. An updater
+must be pure because React may call it twice, and a drag emits a `pointermove` per frame —
+writing there re-serialised the whole layout store to disk sixty times a second for as long as
+the divider was held. `beginDrag`/`endDrag` suspend persistence for the drag and write the
+settled width once.
+
+Layout is stored per browser and namespaced by user id through `DockScope`, a context rather
+than a `useAuth()` call. The only thing docking needs from the session is one string, and
+reaching into the auth context for it makes every panel unmountable without a signed-in
+session — including in a test.
+
 ### 12.4 Smart Code UI
 
-Mode, workspace path, target list, objective, language/framework hints, acceptance criteria, and
-risk tier. Targets are added from a text field by button or Enter, de-duplicated, and removable.
-Field hints MUST state that the workspace path is absolute and that an empty target list lets Devvy
-rank files itself.
+Smart Code is a **conversation**, not a form. Building a change is not one question: the first
+attempt reveals what the objective left out, a check fails, something needs narrowing. Forcing
+that through "fill the form again" discarded everything the previous attempt had learned.
 
-The pipeline renders the seven stages with their real status. Results show summary, plan strip,
-findings, per-file diff tabs, verification row, and an apply button enabled only when
-`can_apply` is true. Apply requires a confirmation dialog and appends an `apply` evidence event.
+Each message either starts a run or **corrects the previous one**, carrying the last run's
+specific failures as its brief — which is what makes the loop converge rather than repeat.
+
+The screen is three columns and only the middle one scrolls: the left rail is the session
+(every attempt, in order, with where each got to), the transcript is the conversation, and the
+right dock panel is the run — pipeline, workspace boundary, sources read, files proposed. The
+panel MUST NOT scroll away: a CPU-bound generation takes minutes and for all of them the only
+question is what it is doing.
+
+The mode is **derived, not asked**: read-only permission means review; an empty folder means
+generate; a folder holding source means modify. Asking the user to describe what the folder
+already shows invites a wrong answer that decides whether existing code is read at all.
+
+A pasted brief can be hundreds of lines and MUST NOT own the viewport. Prompts clamp to eight
+lines with a fade; expanding gives a fixed height with its own scrollbar; and a full-screen
+dialog (`role="dialog"`, `aria-modal`, Escape and backdrop close, focus captured on open, copy
+button) exists for reading one closely.
+
+When the run panel is closed the header MUST carry a live stage counter and status. The pipeline
+must never be nowhere on the screen.
+
+Results show summary, plan, findings, per-file diff tabs, deploy steps, and an apply button
+enabled only when `can_apply` is true. A disabled apply button MUST explain itself in text:
+browsers suppress pointer events on a disabled control, so hover help never reaches the person
+who needs it. Apply requires a confirmation dialog and appends an `apply` evidence event.
 
 ### 12.5 Estimate Code UI
 
@@ -1402,9 +1621,34 @@ MUST display the adjustment it carries (`+2 emerging`, `+1 new test layer`) so t
 cost of a declaration before running. The maturity slider shows the level's name, definition, and
 point cap, sourced from the config endpoint.
 
-The UI MUST show the controlled pipeline progress list, errors, batch result selection with a per-row
-recommendation chip, a point hero with confidence, the Fibonacci scale, JSON download, and a
-conditional Jira write button.
+**Live Reasoning MUST be the single account of what is happening.** Status and narration are two
+different reading jobs and take two different shapes:
+
+- **Status is a wide, shallow grid** of the five phases — Evidence (6 stages), Independent
+  assessment (3), Challenge (6), Calculation (9), Your decision (1) — each with a completed
+  count and the live phase highlighted. Twenty-five rows in one column is a ~1,900px ribbon that
+  no layout can sit beside without leaving a hole, and it cannot be scanned.
+- **Narration is a feed**: one column, in pipeline order, capped and auto-followed. Every stage
+  states **what it found**, not what it is for. A label alone was equally true before the run
+  started.
+
+The workspace stacks rather than sitting in two columns. Two columns whose contents have
+unrelated intrinsic heights will always leave a hole beside the shorter one, and bounding the
+taller one only shrinks it. Order follows attention: while a run is in flight, or once there is
+a result to explain, the pipeline comes first; when the reader is filling the form in, the form
+does.
+
+The same event stream MUST NOT be narrated more than once at a time. The flow diagram and the
+evidence panel both narrate the same events the checklist narrates; during a run they are
+suppressed and live inside the finished result instead, where they are reference rather than
+progress. Each checklist step carries its stage's explanation as hover help, so nothing is lost.
+
+A stage that legitimately never runs — there is no debate when nothing is disputed — MUST NOT
+stall the checklist: the live step is the first one still outstanding, not an index into the
+list.
+
+The UI MUST also show errors, batch result selection with a per-row recommendation chip, a point
+hero with confidence, the Fibonacci scale, JSON download, and a conditional Jira write button.
 
 The primary result workspace MUST provide horizontally scrollable, keyboard-operable tabs for
 Final report, Readiness, Evidence, Specialists, Primary, Blind review, Critic & resolution,
@@ -1422,8 +1666,46 @@ including passing gates; risk flags; calibration anchors; effort envelope; hidde
 risks and assumptions; a filled-in **spike definition** when escalated; and **provenance** — the
 context manifest and the model-versus-calculated cross-check.
 
-A verdict banner carrying the recommendation sits above the point hero. Because a CPU run takes
-minutes, the evidence panel MUST be visible **during** the run, not only after the result arrives.
+A verdict banner carrying the recommendation sits above the point hero.
+
+The result page MUST answer its own closing claim. The decision panel (accept / override / spike
+/ decompose, with agreed points, note and post-delivery actual) and the re-estimation panel are
+mounted on the fresh result, not only in History — the pipeline declaring that the team owns the
+number, on a page with nowhere to say so, is a dead end.
+
+Primary content MUST NOT cost a click while secondary content sits open above it: the 16-factor
+scorecard and the calculation ledger are open by default. The raw run trajectory belongs in the
+appendix with the provenance, **after** the answer it produced, not above it.
+
+### 12.5.1 Stylesheet invariants
+
+Nine stylesheets load in a fixed order (`main.tsx`), with `design-system.css` acting as a
+refinement layer over the earlier files. That layering works, but it makes two failure modes easy
+and both have shipped. Every rule here was written after a defect.
+
+**No bare element selectors outside a scoped block.** `article`, `main`, `header` and `footer`
+were each styled unscoped for the Chat screen and reached every screen in the application. The
+`article` rule turned Smart Code's turns into a flex row, so the prompt and the answer rendered
+as two narrow side-by-side columns; the `footer` rule painted the chat composer's gradient onto
+the Home screen. Element selectors MUST be scoped (`.shell header`, `.messages > article`).
+
+**Specificity is the same trap by another route.** `.estimate-pipeline > div` — written for a
+flat checklist that no longer exists — is `(0,1,1)` and beat `.phase-grid` at `(0,1,0)`, forcing
+`display: flex` onto a grid. Rules belonging to a replaced design MUST be deleted with it.
+
+**A screen's height must be definite.** `.product-screen` sets `100vh`; a later `.code-screen`
+rule overrode it with `height: 100%`, and because `#root` has no height that resolved to `auto`.
+The screen then sized to its content instead of the window — 1329px on a 720px viewport — so the
+transcript never scrolled and the composer sat hundreds of pixels below the fold. Use `100vh`
+with a `100dvh` follow-up, never a percentage of an unsized ancestor.
+
+**Grid children must keep their column.** `display: none` on a grid child removes it from the
+track list and shifts every remaining child one column left. Collapse the track to `0px` instead.
+Likewise `align-items: start` inherited into a column flex container shrinks children to content
+width rather than filling.
+
+Layout claims MUST be verified against the built stylesheet in a container that supplies no
+height of its own. A test harness that provides the height hides exactly the class of bug above.
 
 ### 12.6 Evidence panel
 
@@ -1791,6 +2073,39 @@ cd frontend; npm run preview                             # serve dist/
     until every check passes; a round that improves nothing does not end the loop.
 83. The repair loop is bounded, never applies a change that still fails, and reports how many
     rounds were used and what is still failing.
+84. Every model-backed workflow carries all four grounding rules, and the exact
+    missing-information sentence is one unbroken line.
+85. Clearly different stories do not all receive the same points; a copy change is smaller than
+    an authentication rewrite, and base sums rise with the size of the work.
+86. The bottom of the Fibonacci scale is reachable — a specified trivial story scores 3, and at
+    least one factor can score 1.
+87. A story that does not bound its own scope scores 4 on what it does not say, is never
+    cheaper than a fully specified migration, and its reason states that the score is high
+    because scope is unstated rather than because evidence was found.
+88. An investigation is maximum uncertainty and reaches the spike gate; a merely vague change
+    does not.
+89. The estimation contract is frozen and hashed, is stable for the same story, and changes
+    when the story changes.
+90. A spread of 0 accepts, 1 accepts the median, 2 disputes — and an elevated score with no
+    evidence disputes even when every estimator agrees.
+91. A debate touches only disputed factors, is bounded by the contract, settles protected
+    factors conservatively, and escalates a blocker to human review.
+92. Every deterministic validation rule is reported whether or not it fired, and the applied
+    deltas reconcile to the adjusted score.
+93. The reference comparator ranks the structurally closest story first, breaks similarity into
+    its components, reports a weak match as weak, and reports no anchor rather than inventing
+    one when history is empty.
+94. Failure attribution routes a missing-evidence failure to retrieval and a single-pass run to
+    the reviewer, and attributes nothing on a healthy run.
+95. The decision panel and the re-estimation panel are reachable from a fresh result, and a
+    re-run carries no reference to the previous estimate.
+96. A side panel can be resized by keyboard, docked to either edge without remounting, and
+    collapsed to a labelled strip; the layout survives a reload and a drag writes to storage
+    once rather than once per frame.
+97. Live Reasoning narrates every stage that reported, exactly once, and a stage that never runs
+    does not stall the checklist.
+98. No stylesheet applies a bare element selector across screens, and every screen sizes itself
+    to the window rather than to its content.
 
 ### 15.2 Regression suite
 
@@ -1811,3 +2126,6 @@ that either is fixed.
 | `test_migrations.py` | An existing database gains columns and keeps its rows |
 | `test_estimate_history.py` | History outlives its job; aggregates computed in SQL |
 | `test_estimation_framework.py` | The four published §12 walkthroughs, and ledger reconciliation |
+| `test_estimation_spread.py` | The estimator can tell stories apart; the scale's floor is reachable; silence is read against specificity and says so in the reason |
+| `test_eagle.py` | Contract immutability and hashing; blackboard confidence; median aggregation; the spread rules; the three reviewers and their six required fields; bounded debate; the ten validation rules; the spike gate; reference similarity; snapshot and failure attribution |
+| `test_grounding_contract.py` | All four grounding rules reach every model-backed workflow, in both the full and brief forms |

@@ -66,21 +66,26 @@ export function EvidencePanel({ events, title = 'Run evidence', compact = false,
       <span className="evidence-local"><Database/> Local</span>
     </div>}
     {!events.length ? <div className="evidence-empty"><ShieldCheck/><p>Actions, context sources, validation loops, and approval gates will appear here. Hidden chain-of-thought is never shown or stored.</p></div>
-      : <div className="evidence-timeline">{events.map((event, index) => <details key={`${event.stage}-${index}`} open={event.status === 'running' || event.status === 'failed' || index === events.length - 1}>
+      : <div className="evidence-timeline">{events.map((event, index) => {
+        // Narrated once. It was called three times per event per render — in the guard, in the
+        // condition, and in the body — and this list redraws on every streamed event.
+        const narration = narrate(event)
+        return <details key={`${event.stage}-${index}`} open={event.status === 'running' || event.status === 'failed' || index === events.length - 1}>
         <summary><Tooltip label={STATUS_MEANING[event.status]?.label ?? event.status}
           detail={STATUS_MEANING[event.status]?.why ?? 'A stage of the run reported this state.'}>
           <span className={`evidence-icon ${event.status}`}><StatusIcon status={event.status}/></span></Tooltip><span><b>{event.label}</b><small>{event.stage.replaceAll('_', ' ')} · {(event.elapsed_ms / 1000).toFixed(1)}s</small></span><ChevronDown/></summary>
-        {(event.detail || event.evidence || narrate(event)) && <div className="evidence-detail">
+        {(event.detail || event.evidence || narration) && <div className="evidence-detail">
           {/* The narration comes first because it is what a reader needs: what this stage is
               doing and why. The measurements stay underneath — evidence is still evidence,
               it just no longer arrives as a bare key-value table nobody can interpret. */}
-          {narrate(event) && <p className="evidence-narration">{narrate(event)}</p>}
+          {narration && <p className="evidence-narration">{narration}</p>}
           {event.detail && <p>{event.detail}</p>}
           {event.evidence && Object.keys(event.evidence).length > 0 && <details className="evidence-values">
             <summary>Measurements</summary>
             {Object.entries(event.evidence).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><EvidenceValue value={value}/></div>)}
           </details>}
         </div>}
-      </details>)}</div>}
+      </details>
+      })}</div>}
   </Frame>
 }

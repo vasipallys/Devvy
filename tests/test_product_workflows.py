@@ -286,9 +286,12 @@ async def test_estimate_falls_back_to_heuristics_when_the_model_cannot_hold_the_
     by_factor = {item["factor"]: item for item in result["scorecard"]}
     assert by_factor["data_model_change"]["score"] > 2
     assert "schema" in by_factor["data_model_change"]["reason"].lower()
-    # Factors with no supporting evidence stay at the baseline rather than being inflated.
-    assert by_factor["regulatory_compliance"]["score"] == 2
-    assert "baseline" in by_factor["regulatory_compliance"]["reason"].lower()
+    # Factors with no supporting evidence are not inflated — and are read against the size of
+    # the story rather than pinned to a fixed floor. This story is short, so silence about
+    # compliance is evidence there is none; a fixed baseline of 2 on every unmatched factor put
+    # the smallest possible base sum at 32, which meant no story could ever score 3 points.
+    assert by_factor["regulatory_compliance"]["score"] == 1
+    assert "finished state" in by_factor["regulatory_compliance"]["reason"].lower()
 
 
 def test_estimate_csv_upload_mapping():
