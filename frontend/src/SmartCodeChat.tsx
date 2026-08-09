@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, ArrowLeft, Check, ChevronRight, Circle, Code2, Eye, FileCode2,
-  FolderOpen, History, LoaderCircle, Send, ShieldCheck, Sparkles, Square, Wrench,
+  Activity, AlertTriangle, ArrowLeft, Check, ChevronRight, Circle, Code2, Copy, Eye, FileCode2,
+  FolderOpen, History, LoaderCircle, Maximize2, Send, ShieldCheck, Sparkles, Square, Wrench, X,
 } from 'lucide-react'
 import { api, attachToJob } from './api'
 import { DockPane, DockToggle, useDock } from './Dock'
@@ -175,18 +175,88 @@ function Pipeline({ turn }: { turn: Turn }) {
   </ol>
 }
 
-/** A pasted brief can be a hundred lines. Shown whole it pushes the answer below the fold, so
- *  the screen shows only what the user already knows — their own message. */
+/**
+ * The full text of a prompt, in a dialog, when the transcript is the wrong place to read it.
+ *
+ * A brief long enough to need this is usually the specification for the whole run — it gets
+ * read closely, scrolled through, and compared against what came back. That deserves the
+ * window, not a column inside a message bubble.
+ */
+function PromptDialog({ text, onClose }: { text: string; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [copied, setCopied] = useState(false)
+
+  // Block body: a concise arrow returns its expression, and React calls an effect's return
+  // value as the cleanup function.
+  useEffect(() => {
+    // Focus moves into the dialog, or a keyboard user is left tabbing the transcript behind it.
+    ref.current?.focus()
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => { window.removeEventListener('keydown', onKey) }
+  }, [onClose])
+
+  const lines = text.split('\n')
+  return <div className="prompt-modal" onClick={onClose}>
+    <div
+      ref={ref}
+      className="prompt-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Full prompt"
+      tabIndex={-1}
+      onClick={event => event.stopPropagation()}
+    >
+      <div className="prompt-dialog-head">
+        <b>Full prompt</b>
+        <small>{lines.length} lines · {text.length.toLocaleString()} characters</small>
+        <button
+          className="prompt-copy"
+          onClick={() => {
+            navigator.clipboard?.writeText(text).then(() => {
+              setCopied(true)
+              window.setTimeout(() => setCopied(false), 1600)
+            }).catch(() => setCopied(false))
+          }}
+        >
+          {copied ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+        </button>
+        <button className="prompt-close" onClick={onClose} aria-label="Close">
+          <X size={16} />
+        </button>
+      </div>
+      <pre className="prompt-dialog-body">{text}</pre>
+    </div>
+  </div>
+}
+
+/**
+ * A pasted brief can be hundreds of lines. Shown whole it pushes the answer below the fold, so
+ * the screen shows only what the user already knows — their own message.
+ *
+ * Three states rather than two, because "expanded" was the broken one: it dropped the entire
+ * text into the transcript unbounded, which on a long brief is thousands of pixels of message
+ * bubble with the answer somewhere past it. Expanding now gives the prompt a fixed height and
+ * its own scrollbar, and anything worth actually reading opens in a window.
+ */
 function Prompt({ text }: { text: string }) {
   const [open, setOpen] = useState(false)
+  const [modal, setModal] = useState(false)
   const lines = text.split('\n')
   const long = lines.length > 8 || text.length > 600
   if (!long) return <p>{text}</p>
   return <>
-    <p className={open ? '' : 'clamped'}>{open ? text : lines.slice(0, 8).join('\n')}</p>
-    <button className="chat-prompt-toggle" onClick={() => setOpen(value => !value)}>
-      {open ? 'Show less' : `Show full prompt (${lines.length} lines)`}
-    </button>
+    <p className={open ? 'expanded' : 'clamped'}>{open ? text : lines.slice(0, 8).join('\n')}</p>
+    <span className="chat-prompt-actions">
+      <button className="chat-prompt-toggle" onClick={() => setOpen(value => !value)}
+        aria-expanded={open}>
+        {open ? 'Show less' : `Show more (${lines.length} lines)`}
+      </button>
+      <button className="chat-prompt-toggle" onClick={() => setModal(true)}>
+        <Maximize2 size={10} /> Open full prompt
+      </button>
+    </span>
+    {modal && <PromptDialog text={text} onClose={() => setModal(false)} />}
   </>
 }
 

@@ -200,7 +200,13 @@ button:disabled{cursor:not-allowed}
    is the session, the transcript is the conversation, and the panel is the run. The panel is
    held in place because "what is it doing right now" is the entire question while you wait.
    ------------------------------------------------------------------------------------------ */
-.code-screen{display:flex;flex-direction:column;height:100%;overflow:hidden;
+/* A definite height, not a percentage.
+   `.product-screen` sets 100vh, but this rule loads later and used to override it with
+   `height:100%` — and #root has no height of its own, so 100% resolved to `auto`. The screen
+   then grew to fit its content instead of fitting the window: the transcript never scrolled,
+   and the composer was pushed hundreds of pixels below the fold, so during a run there was
+   nowhere visible to type. dvh so mobile browser chrome does not clip it either. */
+.code-screen{display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden;
   background:radial-gradient(circle at 50% 0,#172018,#0b0d0e 34%)}
 .code-header-tools{display:flex;align-items:center;gap:10px}
 .icon-button{width:36px;height:36px;display:grid;place-items:center;border:1px solid #303833;
@@ -499,3 +505,41 @@ body.dock-resizing *{cursor:col-resize!important}
 /* Docked evidence: the panel keeps its timeline and drops its frame, because the frame — the
    width, the border, the heading, the controls — is now the dock's job. */
 .evidence-panel.docked{width:auto;flex:none;border:0;background:transparent;overflow:visible}
+
+/* ------------------------------------------------------------------------------------------
+   Long prompts.
+
+   A brief of a few hundred lines had exactly two states, and the second one was worse than the
+   first: collapsed to eight lines, or dumped into the transcript in full, unbounded, so the
+   answer sat somewhere thousands of pixels below the message that asked for it. Expanded now
+   means a fixed height with its own scrollbar, and a brief worth reading closely opens in a
+   window instead of a column inside a bubble.
+   ------------------------------------------------------------------------------------------ */
+.chat-message.user p.expanded{max-height:42vh;overflow:auto;padding-right:9px}
+.chat-prompt-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.chat-prompt-toggle{display:inline-flex;align-items:center;gap:5px}
+
+.prompt-modal{position:fixed;inset:0;z-index:60;display:grid;place-items:center;padding:4vh 4vw;
+  background:rgba(5,8,6,.72)}
+.prompt-dialog{display:flex;flex-direction:column;width:min(940px,100%);max-height:92vh;
+  border:1px solid #303833;border-radius:14px;background:#0f1412;
+  box-shadow:0 30px 90px rgba(0,0,0,.55);overflow:hidden}
+.prompt-dialog:focus{outline:none}
+.prompt-dialog:focus-visible{outline:3px solid #a8c7fa;outline-offset:-3px}
+.prompt-dialog-head{flex:none;display:flex;align-items:center;gap:10px;padding:12px 12px 12px 16px;
+  border-bottom:1px solid #232a25}
+.prompt-dialog-head b{font-size:12px;color:#e3eae4}
+.prompt-dialog-head small{flex:1;font-size:10px;color:#9aa59e}
+.prompt-copy,.prompt-close{display:inline-flex;align-items:center;gap:6px;min-height:32px;
+  padding:0 10px;border:1px solid #303833;border-radius:9px;background:#141a17;color:#b6c0b8;
+  font-size:10px;cursor:pointer}
+.prompt-close{padding:0;width:32px;justify-content:center}
+.prompt-copy:hover,.prompt-close:hover{border-color:#4a5850;color:#e3eae4}
+.prompt-dialog-body{flex:1;min-height:0;margin:0;padding:16px;overflow:auto;
+  white-space:pre-wrap;overflow-wrap:anywhere;
+  font:12px/1.7 'Cascadia Code',Consolas,monospace;color:#cbd4cd}
+
+@media(max-width:640px){
+  .prompt-modal{padding:0}
+  .prompt-dialog{width:100%;max-height:100vh;border:0;border-radius:0}
+}
