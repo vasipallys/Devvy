@@ -354,7 +354,9 @@ class FactorScore(BaseModel):
     #: ``model`` when the local model supplied a usable score, ``heuristic`` when the
     #: application had to derive one from story evidence. Surfaced in the UI so a reader
     #: can tell judgement apart from fallback.
-    provenance: Literal["model", "heuristic"] = "model"
+#: `repository` is a third kind of claim, not a variant of the other two: the score was
+#: read from the codebase rather than inferred from the story or guessed from keywords.
+    provenance: Literal["model", "heuristic", "repository"] = "model"
     stack_notes: list[str] = Field(default_factory=list)
 
 
@@ -410,7 +412,7 @@ class FactorContribution(BaseModel):
     group: Literal["scope", "delivery", "assurance", "risk"]
     score: Level
     reason: str
-    provenance: Literal["model", "heuristic"]
+    provenance: Literal["model", "heuristic", "repository"]
 
 
 class BandSensitivity(BaseModel):

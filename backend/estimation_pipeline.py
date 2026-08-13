@@ -84,7 +84,7 @@ class DimensionAssessment(BaseModel):
     why_not_lower: str
     why_not_higher: str
     confidence: Literal["High", "Medium", "Low"]
-    provenance: Literal["model", "heuristic"]
+    provenance: Literal["model", "heuristic", "repository"]
 
 
 class AgentAssessment(BaseModel):

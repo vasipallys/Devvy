@@ -431,3 +431,84 @@
 .reestimate-correction textarea:focus{border-color:#4a8a6b;outline:none}
 .reestimate-correction label>span{font-size:9px;line-height:1.6;color:#77867d}
 .reestimate-correction .estimate-action{align-self:flex-start}
+
+/* Repository — the workspace declaration, and what the codebase answered.
+   Placed with the stack profile because both describe the world the story lands in, and both
+   apply to every story in a batch. */
+.workspace-field{display:flex;flex-direction:column;gap:6px;margin-top:15px;padding-top:15px;
+  border-top:1px solid #eaefe6;font-size:11px;color:#415149}
+.workspace-field>span{display:flex;align-items:center;gap:7px;font-weight:600}
+.workspace-field em{font-style:normal;font-size:9px;font-weight:400;color:#7b8a80;
+  padding:2px 7px;border:1px solid #d8e2d4;border-radius:11px}
+.workspace-field input{height:36px;padding:0 11px;border:1px solid #d4ddd2;border-radius:8px;
+  background:#fbfcfa;color:#17251e;font-size:11px}
+.workspace-field input:focus{border-color:#4a8a6b;outline:none}
+.workspace-field small{font-size:10px;line-height:1.6;color:#66786d;max-width:76ch}
+
+.repo-panel{border-top:1px solid #e3e8e0;padding:19px 20px}
+.repo-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
+.repo-head>svg{flex:none;color:#28765a;margin-top:2px}
+.repo-head>span:nth-child(2){display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.repo-head b{font-size:12px;color:#1d3a2c}
+.repo-head small{font-size:10px;color:#66786d;font-family:'Cascadia Code',Consolas,monospace;
+  overflow-wrap:anywhere}
+.repo-scale{flex:none;font-size:9px;color:#66786d;text-align:right;line-height:1.5;max-width:22ch}
+
+.repo-stack{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
+.repo-chip{padding:3px 9px;border-radius:12px;background:#eef4ea;border:1px solid #d8e2d4;
+  font-size:9px;color:#3c6b55}
+.repo-chip.framework{background:#e8f1f8;border-color:#c9dcea;color:#2b5f80}
+
+.repo-block{margin-bottom:20px}
+.repo-block:last-child{margin-bottom:0}
+.repo-block h4{display:flex;align-items:center;gap:8px;margin:0 0 8px;font-size:10px;
+  letter-spacing:.07em;text-transform:uppercase;color:#3c6b55}
+.repo-block h4 svg{color:#28765a}
+.repo-count{margin-left:auto;font-family:'Cascadia Code',Consolas,monospace;font-size:9px;
+  color:#66786d;letter-spacing:0;text-transform:none}
+.repo-note{margin:0 0 10px;font-size:10px;line-height:1.65;color:#66786d;max-width:78ch}
+.repo-empty{margin:0;padding:12px 14px;border-radius:9px;background:#f7faf5;font-size:10px;
+  line-height:1.65;color:#5d6f63}
+
+.repo-answers{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.repo-answers li{display:flex;gap:12px;padding:9px 12px;border-radius:9px;background:#f7faf5;
+  border:1px solid #e3ebdf}
+.repo-answers li>span:last-child{display:flex;flex-direction:column;gap:3px;min-width:0}
+.repo-answers b{font-size:11px;color:#1d3a2c;text-transform:capitalize}
+.repo-answers small{font-size:10px;line-height:1.55;color:#54685c}
+.repo-delta{flex:none;display:flex;align-items:center;gap:5px;font-family:'Cascadia Code',
+  Consolas,monospace;font-size:12px}
+.repo-delta em{font-style:normal;color:#9aa89f;text-decoration:line-through}
+.repo-delta b{color:#1d6b4c;font-size:14px}
+.repo-delta svg{color:#9aa89f}
+.repo-cite{color:#617165!important;font-family:'Cascadia Code',Consolas,monospace;font-size:9px!important}
+
+.repo-changes{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.repo-changes li{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:9px;
+  background:#fff;border:1px solid #e0e7dc}
+.repo-changes li.create{border-left:3px solid #2f7d5c}
+.repo-changes li.modify{border-left:3px solid #8aa8c4}
+.repo-changes li>svg{flex:none;margin-top:2px;color:#5d7a68}
+.repo-changes li>span{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.repo-changes b{font-family:'Cascadia Code',Consolas,monospace;font-size:11px;color:#1d3a2c;
+  overflow-wrap:anywhere}
+.repo-changes small{font-size:10px;line-height:1.55;color:#54685c}
+.repo-action{flex:none;font-style:normal;font-size:8px;letter-spacing:.08em;text-transform:uppercase;
+  padding:3px 8px;border-radius:11px}
+.repo-action.modify{background:#eaf1f7;color:#2b5f80}
+.repo-action.create{background:#e7f3ea;color:#1d6b4c}
+
+.repo-rejected{display:flex;gap:9px;align-items:flex-start;margin:12px 0 0;padding:11px 13px;
+  border:1px solid #d89a8a;border-radius:9px;background:#fff4f1}
+.repo-rejected>svg{flex:none;margin-top:2px;color:#a2372b}
+.repo-rejected span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.repo-rejected b{font-size:11px;color:#8a3528}
+.repo-rejected small{font-size:10px;line-height:1.55;color:#8a5548;overflow-wrap:anywhere}
+
+.repo-signals{display:flex;flex-wrap:wrap;gap:5px}
+.repo-signal{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:12px;
+  font-size:9px}
+.repo-signal.present{background:#e7f3ea;border:1px solid #c4dfcc;color:#1d6b4c}
+.repo-signal.absent{background:#f4f5f3;border:1px solid #e0e4de;color:#636f68;
+  text-decoration:line-through}
+.repo-signal em{font-style:normal;font-family:'Cascadia Code',Consolas,monospace;opacity:.75}

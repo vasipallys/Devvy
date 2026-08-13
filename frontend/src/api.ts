@@ -219,13 +219,15 @@ export const api = {
     body: JSON.stringify({ preview_token: previewToken, approved: true }),
   }),
   estimateConfig: () => json<any>('/api/estimate-code/config'),
-  submitEstimate: (story: unknown) =>
+  submitEstimate: (story: unknown, workspace_root = '') =>
     json<{ job_id: string; count: number }>('/api/estimate-code/jobs', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ story }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ story, workspace_root }),
     }),
-  submitEstimateBatch: (stories: unknown[]) =>
+  submitEstimateBatch: (stories: unknown[], workspace_root = '') =>
     json<{ job_id: string; count: number }>('/api/estimate-code/batch-jobs', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stories }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stories, workspace_root }),
     }),
   estimateHistory: (params: {
     query?: string; source?: string; points?: number; recommendation?: string

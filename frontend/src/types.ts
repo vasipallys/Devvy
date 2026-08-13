@@ -191,7 +191,7 @@ export interface FactorScore {
   score: Level
   reason: string
   /** `heuristic` means the model skipped this factor and the app derived it from story text. */
-  provenance: 'model' | 'heuristic'
+  provenance: 'model' | 'heuristic' | 'repository'
   stack_notes: string[]
 }
 
@@ -250,7 +250,7 @@ export interface DetailedReasoning {
     group: 'scope' | 'delivery' | 'assurance' | 'risk'
     score: Level
     reason: string
-    provenance: 'model' | 'heuristic'
+    provenance: 'model' | 'heuristic' | 'repository'
   }[]
   applied_adjustments: CalculationStep[]
   gate_path: PolicyCheck[]
@@ -299,7 +299,7 @@ export interface AgenticDimensionAssessment {
   why_not_lower: string
   why_not_higher: string
   confidence: 'High' | 'Medium' | 'Low'
-  provenance: 'model' | 'heuristic'
+  provenance: 'model' | 'heuristic' | 'repository'
 }
 
 export interface AgenticAssessment {
@@ -583,6 +583,58 @@ export interface Eagle {
   failure_attribution: { layer: string; detail: string; remedy: string }[]
 }
 
+/** Repository intelligence — EAGLE §3/§4. Present only when a workspace was supplied. */
+export interface RepoSignal {
+  name: string
+  present: boolean
+  count: number
+  examples: string[]
+}
+export interface CandidateFile {
+  path: string
+  size: number
+  score: number
+  matched_terms: string[]
+  role: string
+}
+export interface PlannedChange {
+  path: string
+  action: 'modify' | 'create'
+  reason: string
+  detail: string
+  evidence: string[]
+  verified: boolean
+}
+export interface RepositoryReport {
+  evidence: {
+    root: string
+    commit: string | null
+    reachable: boolean
+    reason: string
+    languages: string[]
+    frameworks: string[]
+    manifests: string[]
+    total_files: number
+    total_bytes: number
+    modules: string[]
+    signals: RepoSignal[]
+    candidates: CandidateFile[]
+    related_tests: string[]
+  }
+  counts: Record<string, number>
+  summary: string
+  answered_factors: {
+    factor: string; was: number; now: number; reason: string; evidence: string[]
+  }[]
+  change_plan: {
+    changes: PlannedChange[]
+    modified: number
+    created: number
+    rejected_paths: string[]
+    note: string
+  }
+}
+
 export interface EstimateResult extends Record<string, unknown> {
   framework: { name: string; version: string; document: string; factor_count: number }
   story: Story
@@ -609,6 +661,8 @@ export interface EstimateResult extends Record<string, unknown> {
   agentic_pipeline: AgenticPipeline
   /** Present on estimates produced by the EAGLE harness. */
   eagle?: Eagle
+  /** Present when the estimate was made against a repository. */
+  repository?: RepositoryReport
   risk_flags: RiskFlag[]
   anchor_comparison: string
   anchors_considered: { points: number; title: string; stack: string }[]

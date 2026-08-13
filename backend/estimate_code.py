@@ -15,10 +15,12 @@ the output, so a reader can always tell judgement apart from a guess.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
 import re
+from collections import Counter
 from collections.abc import Callable
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -51,6 +53,15 @@ from backend.estimation_framework import (
     spike_template,
 )
 from backend.harness import ContextSource, assemble_context, GROUNDING_CONTRACT_BRIEF
+from backend.repo_evidence import (
+    RepositoryEvidence,
+    analyse_repository,
+    counts as repo_counts,
+    factor_findings,
+    fallback_plan,
+    prompt_block,
+    validate_paths,
+)
 from backend.eagle import (
     EAGLE_VERSION,
     adversarial_review,
@@ -115,10 +126,15 @@ class Story(BaseModel):
 
 
 class EstimateRequest(BaseModel):
+    #: Optional absolute path. When supplied, the repository answers questions the story left
+    #: open (EAGLE §6) and the estimate carries a verified change plan.
+    workspace_root: str = ""
     story: Story
 
 
 class BatchEstimateRequest(BaseModel):
+    #: Applies to every story in the batch, as the stack profile does.
+    workspace_root: str = ""
     stories: list[Story] = Field(min_length=1, max_length=100)
 
 
@@ -173,6 +189,9 @@ class EstimateDraft(BaseModel):
     risks: Any = Field(default_factory=list)
     assumptions: Any = Field(default_factory=list)
     proposed_stories: Any = Field(default_factory=list)
+    #: Per-file change detail, only requested when repository evidence is present. Paths
+    #: are validated against the repository before use; invented ones are discarded.
+    changes: Any = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -202,6 +221,12 @@ class EstimateDraft(BaseModel):
             "assumptions": pick("assumptions", default=[]),
             "proposed_stories": split_data.get(
                 "proposed_stories", pick("proposed_stories", "split_stories", default=[])
+            ),
+            # This validator returns a fixed shape, so a key absent from it is silently
+            # discarded however well the model answered. `changes` was added to the prompt and
+            # dropped here, and the change plan fell back to ranking every time.
+            "changes": pick(
+                "changes", "file_changes", "code_changes", "files", "affected_files", default=[]
             ),
         }
 
@@ -423,24 +448,32 @@ def _story_specified(story: Story, evidence: str) -> bool:
 
 
 def _story_scale(story: Story, evidence: str) -> int:
-    """0-3: how much work the *shape* of the story implies, before any factor is considered.
+    """0-4: how much work the *shape* of the story implies, before any factor is considered.
 
     Needed because an absence of evidence means opposite things at opposite sizes. A story of
     twelve words that never mentions testing probably has very little; a story with eight
     acceptance criteria across three components that never mentions testing has plenty — the
-    story just failed to say so. Scoring both at the same baseline is what made every estimate
-    land in the same band.
+    story just failed to say so.
+
+    The thresholds are deliberately dense at the bottom. An earlier version started counting at
+    220 characters and three acceptance criteria, which put a one-line typo fix and a described
+    API endpoint with two criteria on the same rung — so every unmatched factor scored 1 for
+    both, and every small story in a backlog came back at the same number. Most real stories
+    live between forty and two hundred characters; a scale that cannot separate them cannot
+    separate their estimates.
     """
     length = len(evidence.strip())
     signals = (
+        length >= 100,
         length >= 220,
         length >= 700,
+        len(story.acceptance_criteria) >= 1,
         len(story.acceptance_criteria) >= 3,
         len(story.acceptance_criteria) >= 6,
         bool(story.technical_breakdown),
         len(story.components) >= 2,
     )
-    return min(3, sum(signals))
+    return min(4, sum(signals))
 
 
 def _heuristic_score(factor_id: str, story: Story, evidence: str) -> tuple[int, str]:
@@ -551,7 +584,9 @@ def build_scorecard(draft: EstimateDraft, story: Story) -> list[FactorScore]:
     scorecard: list[FactorScore] = []
     for factor in FACTORS:
         provided = supplied.get(factor.id)
-        provenance: Literal["model", "heuristic"] = "model" if provided else "heuristic"
+        provenance: Literal["model", "heuristic", "repository"] = (
+            "model" if provided else "heuristic"
+        )
         if provided:
             score = int(provided["score"])
             # Small models often answer with a bare number. Rather than showing an empty
@@ -817,7 +852,9 @@ def _rubric(stack: StackProfile) -> str:
     return "\n".join(lines)
 
 
-def build_prompt(story: Story) -> tuple[str, list[dict]]:
+def build_prompt(
+    story: Story, repository: RepositoryEvidence | None = None
+) -> tuple[str, list[dict]]:
     """Assemble the estimation prompt and return it with its provenance manifest.
 
     Story text is marked untrusted in the context envelope: it arrives from Jira, a
@@ -863,7 +900,24 @@ def build_prompt(story: Story) -> tuple[str, list[dict]]:
             content=anchors,
         ),
     ]
+    # Repository evidence outranks the anchors and sits just under the story: it is the only
+    # source that can answer a question the story left open, and it is trusted because this
+    # application read it from disk rather than being handed it.
+    if repository is not None and (block := prompt_block(repository)):
+        sources.insert(1, ContextSource(
+            id="repository", label="Repository evidence (read from disk)", priority=95,
+            trusted=True, content=block,
+        ))
     context, manifest = assemble_context(sources, STORY_CONTEXT_BUDGET)
+    repo_rules = (
+        """- Repository evidence is present. Where it answers a question the story left open, use
+  it and cite the path: "orders/migrations holds 14 migrations" beats "the story does not say".
+- Under `changes`, list the files this story would touch. You MUST only name paths shown in the
+  change surface above, or a new file inside a directory shown there. Do not invent a path. For
+  each, say what changes inside it in one sentence."""
+        if repository is not None and repository.reachable and repository.total_files
+        else ""
+    )
     prompt = f"""Score the story below against all 16 factors of the estimation framework.
 
 {context}
@@ -885,8 +939,13 @@ Rules:
   names the files or screens involved, or the change is self-evidently closed.
 - Give each score a reason of at most 25 words, quoting or paraphrasing the story evidence, or
   naming exactly what the story failed to say.
+- These sixteen factors measure different things and are rarely the same size in one story.
+  Scoring most of them the same number says the story was not read factor by factor. Use 1
+  where a factor genuinely does not apply here, 4 where the story is silent, and the middle
+  only for work you can point at in the text.
 - Name the 2-3 factors that genuinely drive the size.
 - List hidden sub-tasks the story text omits but the work implies.
+{repo_rules}
 
 Return one JSON object with these keys:
   scores: object mapping each factor id to {{"score": 1-5, "why": "short reason"}}
@@ -896,8 +955,24 @@ Return one JSON object with these keys:
   risks: array of {{"risk": ..., "mitigation_or_assumption": ...}}
   assumptions: array of strings
   proposed_stories: array of smaller story titles, only if this should be split
+  changes: array of {{"path": ..., "detail": ...}} — only when repository evidence is present
 """
     return prompt, manifest
+
+
+#: A scorecard is degenerate when this share of the scored factors carry the same value. It is
+#: not a threshold anyone tuned — 12 of 16 is where "conservative" stops being a judgement and
+#: becomes a single answer repeated sixteen times.
+UNIFORM_SCORE_SHARE = 0.75
+
+
+def _uniformity(supplied: dict[str, dict[str, Any]]) -> tuple[int, int, float]:
+    """The modal score, how many factors carry it, and what share of the scorecard that is."""
+    if not supplied:
+        return 0, 0, 0.0
+    counts = Counter(int(item["score"]) for item in supplied.values())
+    value, count = counts.most_common(1)[0]
+    return value, count, count / len(supplied)
 
 
 def _validate_draft(draft: EstimateDraft) -> str | None:
@@ -907,14 +982,34 @@ def _validate_draft(draft: EstimateDraft) -> str | None:
     on a small model; a generic "try again" tends to reproduce the same omissions.
     """
     supplied = _model_scores(draft)
-    if len(supplied) >= MIN_MODEL_SCORED_FACTORS:
-        return None
-    missing = [factor_id for factor_id in FACTOR_IDS if factor_id not in supplied]
-    return (
-        f"Only {len(supplied)} of 16 factors were scored. Score at least "
-        f"{MIN_MODEL_SCORED_FACTORS}. These are still missing: {', '.join(missing)}. "
-        'Use the exact ids as keys, each mapping to {"score": 1-5, "why": "..."}.'
-    )
+    if len(supplied) < MIN_MODEL_SCORED_FACTORS:
+        missing = [factor_id for factor_id in FACTOR_IDS if factor_id not in supplied]
+        return (
+            f"Only {len(supplied)} of 16 factors were scored. Score at least "
+            f"{MIN_MODEL_SCORED_FACTORS}. These are still missing: {', '.join(missing)}. "
+            'Use the exact ids as keys, each mapping to {"score": 1-5, "why": "..."}.'
+        )
+
+    # A scorecard that answers the same number sixteen times is valid JSON carrying no
+    # information, and it is the single largest cause of clustered estimates: sixteen factors
+    # at 2 is a base sum of 32, which is the middle of one band, so every story scored that way
+    # returns the same points. Like schema echo, this passes every structural check and has to
+    # be caught on its own terms.
+    # Only the middle values are caught. A scorecard of all 1s is a coherent claim — nothing
+    # applies to this story — and lands in the smallest band; all 5s is also coherent and the
+    # spike gate answers it. It is 2, 3 and 4 repeated sixteen times that silently produce 5,
+    # 13 and 34 points while looking like an assessment.
+    value, count, share = _uniformity(supplied)
+    if value in {2, 3, 4} and share >= UNIFORM_SCORE_SHARE:
+        return (
+            f"{count} of {len(supplied)} factors were scored {value}. These sixteen factors "
+            f"measure different things — requirements clarity, data model change, security "
+            f"review and definition-of-done overhead are rarely the same size in one story. "
+            f"Scoring them all {value} says the story was not read factor by factor. Re-score, "
+            f"and where a factor genuinely does not apply to this story use 1, where the story "
+            f"is silent use 4, and reserve the middle for work you can point at in the text."
+        )
+    return None
 
 
 #: The blind reviewer runs warmer than the primary pass. At a shared low temperature both
@@ -990,6 +1085,7 @@ class EstimateService:
         story: Story,
         progress: Callable[[dict[str, Any]], None] | None = None,
         reference_history: list[dict[str, Any]] | None = None,
+        workspace_root: str = "",
     ) -> dict[str, Any]:
         # EAGLE §2: the contract is fixed before anything reads the story, and every later
         # stage works against it rather than against a story someone can still edit.
@@ -1012,6 +1108,43 @@ class EstimateService:
                     },
                 }
             )
+        # EAGLE §3/§4 — read the repository before scoring, so the first rung of the §6
+        # ladder ("can the repository answer?") is available to every later stage. Analysis is
+        # deterministic and file-system bound, so it runs off the event loop.
+        repository = (
+            await asyncio.to_thread(analyse_repository, workspace_root, _story_evidence(story))
+            if workspace_root.strip() else None
+        )
+        if progress and repository is not None:
+            progress(
+                {
+                    "stage": "repo_intelligence",
+                    "status": "completed" if repository.reachable else "failed",
+                    "label": (
+                        f"Read {repository.total_files} source files; "
+                        f"{len(repository.candidates)} rank as the change surface"
+                        if repository.reachable else "Repository could not be read"
+                    ),
+                    "detail": repository.summary(),
+                    "evidence": {
+                        "root": repository.root,
+                        "commit": repository.commit,
+                        "languages": repository.languages,
+                        "frameworks": repository.frameworks,
+                        "modules": repository.modules,
+                        "signals_present": [
+                            item.name for item in repository.signals if item.present
+                        ],
+                        "signals_absent": [
+                            item.name for item in repository.signals if not item.present
+                        ],
+                        "change_surface": [item.path for item in repository.candidates[:12]],
+                        "related_tests": repository.related_tests[:8],
+                        **repo_counts(repository),
+                    },
+                }
+            )
+
         canonical = canonical_story(story)
         readiness = evaluate_readiness(story, canonical)
         pipeline_mode, specialist_routes = route_specialists(story)
@@ -1057,7 +1190,7 @@ class EstimateService:
                     },
                 }
             )
-        prompt, manifest = build_prompt(story)
+        prompt, manifest = build_prompt(story, repository)
         if progress:
             progress(
                 {
@@ -1422,6 +1555,54 @@ class EstimateService:
                     }
                 )
             )
+        # A repository finding replaces "the story does not say" with a fact, and only there:
+        # a score the model actually grounded in the story is left alone. This is the §6 ladder
+        # in code — the repository is asked before uncertainty is raised.
+        repo_answers: list[dict[str, Any]] = []
+        if repository is not None and repository.reachable:
+            findings = {item.factor: item for item in factor_findings(repository, _story_evidence(story))}
+            resolved: list[FactorScore] = []
+            for item in final_scorecard:
+                finding = findings.get(item.factor)
+                if finding is not None and item.provenance == "heuristic":
+                    repo_answers.append({
+                        "factor": item.factor,
+                        "was": item.score,
+                        "now": finding.score,
+                        "reason": finding.reason,
+                        "evidence": finding.evidence,
+                    })
+                    resolved.append(item.model_copy(update={
+                        "score": finding.score,
+                        "reason": finding.reason[:300],
+                        "provenance": "repository",
+                    }))
+                else:
+                    resolved.append(item)
+            final_scorecard = resolved
+            if progress and repo_answers:
+                progress(
+                    {
+                        "stage": "repo_answers",
+                        "status": "completed",
+                        "label": (
+                            f"The repository answered {len(repo_answers)} factor(s) the story "
+                            f"left open"
+                        ),
+                        "detail": (
+                            "Each replaced an inferred score with a fact read from disk. Scores "
+                            "the model grounded in the story itself were left untouched."
+                        ),
+                        "evidence": {
+                            "factors": [item["factor"] for item in repo_answers],
+                            "changes": [
+                                f"{item['factor']}: {item['was']} → {item['now']}"
+                                for item in repo_answers
+                            ],
+                        },
+                    }
+                )
+
         result = build_result(final_draft, story, manifest, final_scorecard)
         final_scores = {item["factor"]: int(item["score"]) for item in result["scorecard"]}
         audit = consistency_audit(
@@ -1495,6 +1676,40 @@ class EstimateService:
                     },
                 }
             )
+        if repository is not None and repository.reachable:
+            proposed = [item for item in _items(draft.changes) if isinstance(item, dict)]
+            plan = validate_paths(Path(repository.root), proposed, repository) if proposed                 else fallback_plan(repository)
+            result["repository"] = {
+                "evidence": repository.model_dump(),
+                "counts": repo_counts(repository),
+                "summary": repository.summary(),
+                "answered_factors": repo_answers,
+                "change_plan": {
+                    "changes": [item.model_dump() for item in plan.changes],
+                    "modified": plan.modified,
+                    "created": plan.created,
+                    "rejected_paths": plan.rejected_paths,
+                    "note": plan.note,
+                },
+            }
+            if progress:
+                progress(
+                    {
+                        "stage": "change_plan",
+                        "status": "completed",
+                        "label": (
+                            f"{plan.modified} file(s) to change, {plan.created} to create"
+                            if plan.changes else "No change surface could be verified"
+                        ),
+                        "detail": plan.note,
+                        "evidence": {
+                            "modify": [i.path for i in plan.changes if i.action == "modify"][:10],
+                            "create": [i.path for i in plan.changes if i.action == "create"][:10],
+                            "rejected": plan.rejected_paths,
+                        },
+                    }
+                )
+
         result["eagle"] = {
             "version": EAGLE_VERSION,
             "contract": contract.model_dump(mode="json"),

@@ -5,6 +5,7 @@ import {
   Layers, ShieldCheck, Sigma, Target, X,
 } from 'lucide-react'
 import { api } from './api'
+import { ChangePlanPanel } from './ChangePlanPanel'
 import { DecisionPanel, ReEstimatePanel } from './DecisionPanel'
 import { EvidencePanel } from './EvidencePanel'
 import { Tooltip } from './Tooltip'
@@ -282,6 +283,10 @@ export function EstimateResultView({
 
         {/* The governance layer sits with the pipeline report rather than beside the number:
             it is the account of how the number survived challenge, not a competing verdict. */}
+        {/* The change surface comes before the governance detail: a team reads "which files"
+            long before it reads "how the number survived challenge". */}
+        {result.repository && <ChangePlanPanel report={result.repository} />}
+
         {result.eagle && <EaglePanel eagle={result.eagle} />}
 
         {/* The pipeline ends by saying the team owns the number. These are where they say so —

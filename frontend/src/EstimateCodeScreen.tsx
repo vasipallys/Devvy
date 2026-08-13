@@ -160,10 +160,12 @@ const emptyStory: Story = {
 
 /** The technology stack declaration (§3). Every control here changes the arithmetic, so
  *  each one shows the penalty it carries rather than hiding it behind the result. */
-function StackPanel({ stack, config, onChange }: {
+function StackPanel({ stack, config, onChange, workspace, onWorkspaceChange }: {
   stack: StackProfile
   config?: EstimateConfig
   onChange: (next: StackProfile) => void
+  workspace: string
+  onWorkspaceChange: (value: string) => void
 }) {
   const set = <K extends keyof StackProfile>(key: K, value: StackProfile[K]) =>
     onChange({ ...stack, [key]: value })
@@ -245,6 +247,32 @@ function StackPanel({ stack, config, onChange }: {
           onChange={event => set('additional_stacks', Math.max(0, Math.min(6, Number(event.target.value) || 0)))} />
       </label>
     </div>
+
+    <label className="workspace-field">
+      <Tooltip
+        label="Repository to estimate against"
+        detail="Optional, and the single biggest improvement available to an estimate. With a
+          repository, questions the story left open are answered by the codebase — whether
+          migrations exist, whether there are tests beside the files this touches, whether there
+          is a CI pipeline — instead of being scored as unbounded. The result also carries a
+          verified list of files to change."
+      >
+        <span>Repository <em>optional</em></span>
+      </Tooltip>
+      <input
+        value={workspace}
+        onChange={event => onWorkspaceChange(event.target.value)}
+        placeholder="D:\projects\my-app"
+        spellCheck={false}
+      />
+      <small>
+        {workspace.trim()
+          ? 'The codebase will answer what the story leaves open, and the result will name the '
+            + 'files this change touches.'
+          : 'Without one, every question the story leaves open is priced as unbounded. Nothing '
+            + 'outside this folder is read, and nothing is written.'}
+      </small>
+    </label>
   </section>
 }
 
@@ -275,6 +303,8 @@ export function EstimateCodeScreen({
   const [results, setResults] = useState<EstimateResult[]>([])
   const [error, setError] = useState('')
   const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
+  /** Optional repository. With one, the codebase answers what the story left open. */
+  const [workspace, setWorkspace] = useState('')
   /** Checklist step → the sentence describing what that step found, kept live as events land.
    *  Derived rather than stored, so a client reattaching mid-run rebuilds the same narration
    *  from the snapshot it is handed. */
@@ -428,9 +458,10 @@ export function EstimateCodeScreen({
   async function estimateOne(next: Story) {
     begin()
     try {
-      const { job_id } = await api.submitEstimate({
-        ...next, acceptance_criteria: next.acceptance_criteria.filter(Boolean), stack,
-      })
+      const { job_id } = await api.submitEstimate(
+        { ...next, acceptance_criteria: next.acceptance_criteria.filter(Boolean), stack },
+        workspace.trim(),
+      )
       await follow(job_id)
     } catch (cause) { setLoading(false); setError((cause as Error).message) }
   }
@@ -461,7 +492,9 @@ Additional detail supplied by the team: ${correction}` : ''),
     if (!items.length) return setError('Select at least one story.')
     begin()
     try {
-      const { job_id } = await api.submitEstimateBatch(items.map(item => ({ ...item, stack })))
+      const { job_id } = await api.submitEstimateBatch(
+        items.map(item => ({ ...item, stack })), workspace.trim(),
+      )
       await follow(job_id)
     } catch (cause) { setLoading(false); setError((cause as Error).message) }
   }
@@ -582,7 +615,8 @@ Additional detail supplied by the team: ${correction}` : ''),
         }}
       />}
 
-      {view === 'new' && <><StackPanel stack={stack} config={config} onChange={setStack} />
+      {view === 'new' && <><StackPanel stack={stack} config={config} onChange={setStack}
+        workspace={workspace} onWorkspaceChange={setWorkspace} />
 
       <div className="estimate-workspace">
         <section className="story-card">

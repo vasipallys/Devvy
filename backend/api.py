@@ -1700,7 +1700,9 @@ ESTIMATE_NODE_ORDER = (
 )
 
 
-async def estimate_one(story, context: JobContext, index: int, total: int) -> dict:
+async def estimate_one(
+    story, context: JobContext, index: int, total: int, workspace_root: str = ""
+) -> dict:
     """Estimate a single story, reporting progress against the shared job context."""
     run = run_ledger.start(
         "estimate-code", metadata={"source": story.source, "model": settings.model_id}
@@ -1715,7 +1717,9 @@ async def estimate_one(story, context: JobContext, index: int, total: int) -> di
     # than inside the service so the service stays free of database concerns, and scoped to the
     # owner because another team's velocity is not evidence about this one.
     history = await asyncio.to_thread(reference_corpus, engine, context.owner_id)
-    task = asyncio.create_task(estimate_service.estimate(story, progress, history))
+    task = asyncio.create_task(
+        estimate_service.estimate(story, progress, history, workspace_root)
+    )
     elapsed = 0
     emitted: set[str] = set()
     try:
@@ -1781,12 +1785,13 @@ async def estimate_one(story, context: JobContext, index: int, total: int) -> di
 async def run_estimate_job(request: dict, context: JobContext) -> dict:
     """One job covers a single story or a whole batch; stories run sequentially."""
     stories = [Story.model_validate(item) for item in request["stories"]]
+    workspace_root = str(request.get("workspace_root") or "")
     total = len(stories)
     results: list[dict] = []
     failures: list[dict] = []
     for index, story in enumerate(stories):
         try:
-            results.append(await estimate_one(story, context, index, total))
+            results.append(await estimate_one(story, context, index, total, workspace_root))
             # Publish after each story. Waiting for all of them means a long batch shows
             # nothing for half an hour despite having finished useful work minutes in.
             if total > 1:
@@ -1815,10 +1820,18 @@ async def run_estimate_job(request: dict, context: JobContext) -> dict:
 job_runner.register("estimate", run_estimate_job)
 
 
-def submit_estimate_job(stories: list, owner_id: UUID | None = None) -> dict:
+def submit_estimate_job(
+    stories: list, owner_id: UUID | None = None, workspace_root: str = ""
+) -> dict:
     title = stories[0].title if len(stories) == 1 else f"{len(stories)} stories"
     job = job_runner.submit(
-        "estimate", title, {"stories": [item.model_dump(mode="json") for item in stories]},
+        "estimate", title,
+        {
+            "stories": [item.model_dump(mode="json") for item in stories],
+            # Stored on the job so a reattaching client and a restored run see the same
+            # repository the estimate was made against.
+            "workspace_root": workspace_root,
+        },
         owner_id=owner_id,
     )
     return {"job_id": str(job.id), "count": len(stories)}
@@ -1828,14 +1841,14 @@ def submit_estimate_job(stories: list, owner_id: UUID | None = None) -> dict:
 def submit_estimate(payload: EstimateRequest, request: Request):
     owner = actor_id(request)
     ensure_job_capacity(owner)
-    return submit_estimate_job([payload.story], owner)
+    return submit_estimate_job([payload.story], owner, payload.workspace_root)
 
 
 @app.post("/api/estimate-code/batch-jobs", status_code=202)
 def submit_estimate_batch(payload: BatchEstimateRequest, request: Request):
     owner = actor_id(request)
     ensure_job_capacity(owner)
-    return submit_estimate_job(list(payload.stories), owner)
+    return submit_estimate_job(list(payload.stories), owner, payload.workspace_root)
 
 
 @app.get("/api/estimate-code/history")
