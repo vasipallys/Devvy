@@ -5,11 +5,19 @@ from backend.estimate_code import EstimateService, Story
 from backend.estimation_framework import FACTOR_IDS, StackProfile
 
 
+#: A plausible spread rather than one value repeated sixteen times. A scorecard where every
+#: factor carries the same middle score is rejected by `_validate_draft` — it is valid JSON
+#: carrying no information, and it is the single largest cause of clustered estimates. Fixtures
+#: that used one were not exercising the path a real model takes.
+_BASELINE = (2, 3, 2, 1, 2, 3, 3, 1, 2, 2, 1, 2, 2, 2, 2, 3)
+
+
 def scorecard(**overrides: int) -> dict[str, dict[str, object]]:
+    defaults = dict(zip(FACTOR_IDS, _BASELINE, strict=True))
     return {
         factor: {
-            "score": overrides.get(factor, 2),
-            "why": f"Evidence supports level {overrides.get(factor, 2)} for {factor}.",
+            "score": overrides.get(factor, defaults[factor]),
+            "why": f"Evidence supports level {overrides.get(factor, defaults[factor])} for {factor}.",
         }
         for factor in FACTOR_IDS
     }

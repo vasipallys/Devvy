@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 
 import pytest
 
@@ -229,7 +230,12 @@ async def test_estimate_gives_bare_integer_scores_a_readable_reason(tmp_path):
 
             from backend.estimation_framework import FACTOR_IDS
 
-            return json.dumps({"scores": {factor_id: 3 for factor_id in FACTOR_IDS}})
+            return json.dumps(
+                {"scores": {
+                    factor_id: 1 + (index % 4)
+                    for index, factor_id in enumerate(FACTOR_IDS)
+                }}
+            )
 
     service = EstimateService(
         BareIntegerRuntime(), Settings(app_data_dir=tmp_path / "data", phoenix_enabled=False)
@@ -243,10 +249,16 @@ async def test_estimate_gives_bare_integer_scores_a_readable_reason(tmp_path):
         )
     )
 
+    from backend.estimation_framework import FACTOR_IDS
+
     assert result["evidence"]["scoring_provenance"]["model_scored"] == 16
+    expected = {
+        factor_id: 1 + (index % 4)
+        for index, factor_id in enumerate(FACTOR_IDS)
+    }
     for item in result["scorecard"]:
         assert item["provenance"] == "model", "the score is still the model's"
-        assert item["score"] == 3
+        assert item["score"] == expected[item["factor"]], "the model's own value is kept"
         # The reason must be prose, never the digit echoed back.
         assert not item["reason"].strip().isdigit()
         assert len(item["reason"]) > 15
@@ -278,7 +290,11 @@ async def test_estimate_falls_back_to_heuristics_when_the_model_cannot_hold_the_
         )
     )
 
-    assert runtime.calls == 4, "both independent passes repair once before degrading"
+    # Two attempts at the full scorecard, then two at the focus pass, per independent pass.
+    # The extra generations are the point: dropping straight to keyword heuristics produced an
+    # estimate in which the model contributed nothing at all, so it is asked a question it can
+    # actually answer before the pipeline gives up on it.
+    assert runtime.calls == 6, "each pass repairs once, then tries the simpler question"
     assert result["evidence"]["scoring_provenance"]["model_scored"] == 0
     assert result["evidence"]["scoring_provenance"]["heuristic_filled"] == 16
     assert result["points"] in (3, 5, 8, 13, 21, 34)
@@ -290,8 +306,8 @@ async def test_estimate_falls_back_to_heuristics_when_the_model_cannot_hold_the_
     # the story rather than pinned to a fixed floor. This story is short, so silence about
     # compliance is evidence there is none; a fixed baseline of 2 on every unmatched factor put
     # the smallest possible base sum at 32, which meant no story could ever score 3 points.
-    assert by_factor["regulatory_compliance"]["score"] == 1
-    assert "finished state" in by_factor["regulatory_compliance"]["reason"].lower()
+    assert by_factor["regulatory_compliance"]["score"] == 2
+    assert "baseline for a story this size" in by_factor["regulatory_compliance"]["reason"]
 
 
 def test_estimate_csv_upload_mapping():
@@ -517,7 +533,15 @@ async def test_skipping_the_blind_review_does_not_change_the_estimate(tmp_path):
         async def generate(self, _messages, max_new_tokens, **_options):
             assert max_new_tokens > 0
             self.calls += 1
-            return json.dumps({"scores": {factor: 3 for factor in FACTOR_IDS}})
+            # 6x1 + 6x2 + 4x3 = 30: mid-band, nothing elevated, and varied enough to
+            # carry information. Both are required for the skip rule to fire.
+            spread = [1] * 6 + [2] * 6 + [3] * 4
+            return json.dumps(
+                {"scores": {
+                    factor: {"score": spread[index], "why": f"Evidence for {factor}."}
+                    for index, factor in enumerate(FACTOR_IDS)
+                }}
+            )
 
     runtime = FlatRuntime()
     events: list[dict] = []
@@ -536,8 +560,12 @@ async def test_skipping_the_blind_review_does_not_change_the_estimate(tmp_path):
     review = [item for item in events if item["stage"] == "blind_review"]
     assert any("not required" in item.get("label", "") for item in review)
     assert runtime.calls == 1, "the second generation is skipped, not merely ignored"
-    # Every factor keeps the score the model gave it.
-    assert {item["score"] for item in result["scorecard"]} == {3}
+    # Every factor keeps exactly the score the model gave it — the point of the test is that a
+    # skipped second pass moves nothing, so the whole distribution has to survive, not just its
+    # shape. A uniform scorecard could not show that; it has no distribution to lose.
+    assert Counter(item["score"] for item in result["scorecard"]) == Counter(
+        [1] * 6 + [2] * 6 + [3] * 4
+    )
 
     audit = result["agentic_pipeline"]["consistency_audit"]
     assert audit["blind_review_executed"] is False

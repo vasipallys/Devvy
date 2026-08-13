@@ -17,7 +17,7 @@ import type {
 
 const steps = [
   'contract', 'normalize', 'readiness', 'assemble_context', 'declare_stack', 'specialist_routing',
-  'primary_estimate', 'specialist_analysis', 'blind_review', 'disagreement', 'critic', 'arbitration',
+  'primary_estimate', 'focus_pass', 'specialist_analysis', 'blind_review', 'disagreement', 'critic', 'arbitration',
   'eagle_conflict', 'eagle_review', 'eagle_debate',
   'score_factors', 'apply_base_adjustments', 'apply_stack_adjustments', 'map_to_fibonacci',
   'evaluate_gates', 'decide', 'eagle_validation', 'eagle_reference', 'consistency_audit',
@@ -31,6 +31,7 @@ const labels: Record<string, string> = {
   declare_stack: 'Load stack calibration',
   specialist_routing: 'Route specialist lenses',
   primary_estimate: 'Run primary evidence assessment',
+  focus_pass: 'Ask the model the simpler question',
   specialist_analysis: 'Apply routed specialist lenses',
   blind_review: 'Run independent blind review',
   disagreement: 'Detect material disagreements',
@@ -62,6 +63,7 @@ const NODE_MAP: Record<string, string[]> = {
   declare_stack: ['declare_stack'],
   specialist_routing: ['specialist_routing'],
   primary_estimate: ['primary_estimate'],
+  focus_pass: ['focus_pass'],
   specialist_analysis: ['specialist_analysis'],
   blind_review: ['blind_review'],
   disagreement: ['disagreement'],
@@ -118,7 +120,7 @@ const PHASES: { id: string; title: string; blurb: string; steps: string[] }[] = 
   {
     id: 'independent', title: 'Independent assessment',
     blurb: 'Score the sixteen factors, twice, without either pass seeing the other.',
-    steps: ['primary_estimate', 'specialist_analysis', 'blind_review'],
+    steps: ['primary_estimate', 'focus_pass', 'specialist_analysis', 'blind_review'],
   },
   {
     id: 'reconcile', title: 'Challenge',

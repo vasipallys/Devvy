@@ -975,6 +975,144 @@ def _uniformity(supplied: dict[str, dict[str, Any]]) -> tuple[int, int, float]:
     return value, count, count / len(supplied)
 
 
+# ---------------------------------------------------------------------------------------
+# The focus pass — a question a 1B model can actually answer
+# ---------------------------------------------------------------------------------------
+
+
+class FactorFocus(BaseModel):
+    """Three short lists instead of sixteen scored objects.
+
+    Asking a 1B model to emit sixteen `{score, why}` objects in one response is asking for a
+    long, highly structured output, and long structured output is exactly where a model this
+    size degrades: it holds the shape and loses the content, answering "2" sixteen times. That
+    is valid JSON containing no judgement, and discarding it left the estimate running on
+    keyword matching with no model contribution at all.
+
+    So the question is decomposed into what the model is genuinely good at — reading a
+    paragraph and recognising what it is about — and the arithmetic stays in code, which is the
+    same division the rest of the pipeline already makes:
+
+        "Which of these does the story touch?"      recall, three or four words per answer
+        "Which of those are the biggest?"           comparison, one to three answers
+        "Which did the story leave unanswered?"     recognition of absence
+
+    Every one of those is a short list of ids. None requires the model to hold a rubric, invent
+    prose, or produce a number.
+    """
+
+    touched: list[str] = Field(default_factory=list)
+    largest: list[str] = Field(default_factory=list)
+    unclear: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_aliases(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = {
+            re.sub(r"[^a-z0-9]", "", str(key).lower()): item for key, item in value.items()
+        }
+
+        def pick(*names: str) -> list[str]:
+            for name in names:
+                found = normalized.get(re.sub(r"[^a-z0-9]", "", name))
+                if found is not None:
+                    return [
+                        _canonical_factor(item) or ""
+                        for item in _items(found)
+                        if isinstance(item, str)
+                    ]
+            return []
+
+        return {
+            "touched": [item for item in pick("touched", "affected", "involved") if item],
+            "largest": [item for item in pick("largest", "biggest", "drivers") if item],
+            "unclear": [item for item in pick("unclear", "unanswered", "missing", "silent") if item],
+        }
+
+    @model_validator(mode="after")
+    def require_a_reading(self) -> "FactorFocus":
+        if not self.touched and not self.unclear:
+            raise ValueError("Name at least one factor this story touches or leaves unanswered")
+        return self
+
+
+def _validate_focus(focus: FactorFocus) -> str | None:
+    """The focus pass fails only when it names nothing real."""
+    known = set(FACTOR_IDS)
+    if not (set(focus.touched) | set(focus.unclear)) & known:
+        return (
+            "None of the ids matched the sixteen factors. Use the exact ids listed above, for "
+            "example backend_effort or data_model_change."
+        )
+    return None
+
+
+def build_focus_prompt(story: Story, repository: "RepositoryEvidence | None" = None) -> str:
+    """A short prompt asking three recall questions rather than sixteen judgements."""
+    catalogue = "\n".join(
+        f"  {item.id} — {item.description}" for item in FACTORS
+    )
+    repo_line = ""
+    if repository is not None and repository.reachable and repository.total_files:
+        present = [item.name for item in repository.signals if item.present]
+        repo_line = (
+            f"\n"
+            f"The repository contains: {', '.join(present) or 'nothing identifiable'}. "
+            f"Likely files: {', '.join(item.path for item in repository.candidates[:6]) or 'none matched'}.\n"
+        )
+    return f"""Read the story and answer three questions about it.
+
+STORY
+title: {story.title}
+description: {story.user_story}
+acceptance criteria: {'; '.join(story.acceptance_criteria) or 'none supplied'}
+technical notes: {story.technical_breakdown or 'none supplied'}
+{repo_line}
+THE SIXTEEN FACTORS
+{catalogue}
+
+{GROUNDING_CONTRACT_BRIEF}
+
+QUESTIONS
+1. touched — which factors does this story actually involve? Most stories involve only a few.
+   Leave out anything the story gives you no reason to include.
+2. largest — of those, which one to three are the biggest piece of work?
+3. unclear — which factors did the story leave unanswered, so you cannot tell either way?
+
+Answer with ids only, no scores and no explanation:
+{{"touched": ["backend_effort", "test_effort"], "largest": ["backend_effort"], "unclear": ["data_model_change"]}}
+"""
+
+
+def scores_from_focus(focus: FactorFocus, story: Story) -> dict[str, dict[str, Any]]:
+    """Turn the model's reading into scores. The model judged; code does the arithmetic.
+
+    The mapping is the same rule the rest of the estimator uses, applied to the model's own
+    reading rather than to keyword matches: what the story rules out is small, what it names is
+    real work, what it leaves unanswered is unbounded and priced accordingly.
+    """
+    touched, largest, unclear = set(focus.touched), set(focus.largest), set(focus.unclear)
+    scores: dict[str, dict[str, Any]] = {}
+    for item in FACTORS:
+        if item.id in largest and item.id in unclear:
+            score, why = 5, "Named as a main driver, and the story does not say how far it goes."
+        elif item.id in largest:
+            score, why = 4, "Named as one of the largest pieces of work in this story."
+        elif item.id in unclear:
+            score, why = 4, (
+                "The story leaves this unanswered. Scored high because unstated scope is "
+                "unbounded, not because evidence was found."
+            )
+        elif item.id in touched:
+            score, why = 3, "Named as work this story involves."
+        else:
+            score, why = 1, "Not part of what this story describes."
+        scores[item.id] = {"score": score, "why": why}
+    return scores
+
+
 def _validate_draft(draft: EstimateDraft) -> str | None:
     """Semantic gate for the repair loop: name exactly what is missing, not just 'invalid'.
 
@@ -1241,22 +1379,87 @@ class EstimateService:
                 ),
             )
         except ValueError as exc:
-            # A small local model that cannot hold the contract must not cost the user their
-            # estimate. The heuristic scorecard still produces a defensible number, and the
-            # degradation is reported rather than hidden.
+            # The one-shot contract asks for sixteen scored objects in one response, and that
+            # is where a 1B model degrades: it holds the shape and loses the content. Before
+            # giving up on the model entirely, ask it something it can do — three short lists
+            # of factor ids — and let code turn that reading into scores. Dropping straight to
+            # keyword heuristics meant an "AI estimator" whose every number came from a
+            # keyword table, with the model contributing nothing at all.
             if progress:
                 progress(
                     {
                         "stage": "primary_estimate",
-                        "status": "failed",
-                        "label": "Model output unusable — falling back to evidence heuristics",
-                        "detail": str(exc)[:500],
+                        "status": "retrying",
+                        "label": "Full scorecard unusable — asking the model a simpler question",
+                        "detail": (
+                            "Sixteen scored objects in one response is where a small model "
+                            "loses the content and keeps the shape. The focus pass asks which "
+                            "factors the story touches, which are largest, and which it left "
+                            "unanswered — three short lists, no numbers."
+                        ),
+                        "evidence": {"first_attempt": str(exc)[:300]},
                     }
                 )
-            draft = EstimateDraft.model_construct(
-                scores={}, drivers=[], points=None, rationale="",
-                hidden_tasks=[], risks=[], assumptions=[], proposed_stories=[],
-            )
+            try:
+                focus = await generate_structured(
+                    self.runtime,
+                    FactorFocus,
+                    _SYSTEM,
+                    build_focus_prompt(story, repository),
+                    max_new_tokens=min(512, self.settings.estimate_max_output_tokens),
+                    validate_result=_validate_focus,
+                    on_attempt=(
+                        lambda event: progress({"stage": "focus_pass", **event})
+                        if progress else None
+                    ),
+                )
+            except ValueError as focus_error:
+                if progress:
+                    progress(
+                        {
+                            "stage": "focus_pass",
+                            "status": "failed",
+                            "label": "Model output unusable — falling back to evidence heuristics",
+                            "detail": str(focus_error)[:400],
+                        }
+                    )
+                draft = EstimateDraft.model_construct(
+                    scores={}, drivers=[], points=None, rationale="",
+                    hidden_tasks=[], risks=[], assumptions=[], proposed_stories=[],
+                    changes=[],
+                )
+            else:
+                draft = EstimateDraft.model_construct(
+                    scores=scores_from_focus(focus, story),
+                    drivers=list(focus.largest[:3]),
+                    points=None,
+                    rationale=(
+                        "Scored from the model's reading of which factors this story touches, "
+                        "which are largest, and which it left unanswered."
+                    ),
+                    hidden_tasks=[], risks=[], assumptions=[], proposed_stories=[], changes=[],
+                )
+                if progress:
+                    progress(
+                        {
+                            "stage": "focus_pass",
+                            "status": "completed",
+                            "label": (
+                                f"The model read {len(focus.touched)} factor(s) as involved, "
+                                f"{len(focus.largest)} as largest, "
+                                f"{len(focus.unclear)} as unanswered"
+                            ),
+                            "detail": (
+                                "The model judged; the arithmetic stays in code. Untouched "
+                                "factors score 1, involved 3, largest 4, unanswered 4."
+                            ),
+                            "evidence": {
+                                "touched": focus.touched,
+                                "largest": focus.largest,
+                                "unclear": focus.unclear,
+                            },
+                        }
+                    )
         primary_scorecard = build_scorecard(draft, story)
         primary_assessment = assessment("PRIMARY_ESTIMATOR", primary_scorecard, story)
         specialist_findings = specialist_analysis(specialist_routes, primary_assessment)

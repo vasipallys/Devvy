@@ -422,6 +422,22 @@ const NARRATION: Record<
       + `${range?.lower !== undefined ? `, implying ${range.lower}–${range.upper} points` : ''}.`
   },
 
+  focus_pass: (evidence, status) => {
+    if (status === 'failed') {
+      return 'The model could not answer the simpler question either, so the scorecard falls '
+        + 'back to keyword evidence from the story text. Every inferred factor is labelled as '
+        + 'such rather than presented as judgement.'
+    }
+    const touched = count(evidence.touched) ?? 0
+    const largest = count(evidence.largest) ?? 0
+    const unclear = count(evidence.unclear) ?? 0
+    return `Asked the model a question it can actually answer — which factors this story `
+      + `touches, which are biggest, which it left unanswered — rather than sixteen scored `
+      + `objects in one response. It read ${plural(touched, 'factor')} as involved, `
+      + `${largest} as largest and ${plural(unclear, 'as unanswered', 'as unanswered')}. `
+      + 'The model judged; the arithmetic stayed in code.'
+  },
+
   score_factors: evidence =>
     `Final scorecard assembled: ${count(evidence.model_scored) ?? 0} factors judged by the model and `
     + `${count(evidence.heuristic_filled) ?? 0} inferred from the story text. Every factor shows `
