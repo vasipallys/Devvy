@@ -14,6 +14,7 @@ rather than any particular value, so the rules can be tuned without rewriting th
 from __future__ import annotations
 
 import os
+import pathlib
 
 os.environ["PHOENIX_ENABLED"] = "false"
 
@@ -357,3 +358,169 @@ def test_an_unanswered_factor_still_says_why_it_scored_high():
         "data_model_change"]["why"].lower()
     assert "unstated scope is unbounded" in reason
     assert "not because evidence" in reason
+
+
+# -- Stages must report what they found, not only what they are for -----------------------
+#
+# A stage that explains its own purpose tells the reader something that was equally true
+# before they typed anything. These assert the *events* carry the story's own material, which
+# is what the narration renders.
+
+def _events_for(story_kwargs: dict, scores: dict[str, int] | None = None) -> list[dict]:
+    import asyncio
+    import json
+
+    from backend.config import get_settings
+    from backend.estimate_code import EstimateService
+    from backend.estimation_framework import FACTOR_IDS
+
+    values = scores or {factor: 1 + (index % 4) for index, factor in enumerate(FACTOR_IDS)}
+
+    class Runtime:
+        async def generate(self, *_args, **_kwargs):
+            return json.dumps({
+                "scores": {f: {"score": values[f], "why": f"read {f}"} for f in FACTOR_IDS}
+            })
+
+    events: list[dict] = []
+    asyncio.run(EstimateService(Runtime(), get_settings()).estimate(
+        Story(stack=STACK, **story_kwargs), events.append
+    ))
+    return events
+
+
+def _evidence(events: list[dict], stage: str) -> dict:
+    return next(
+        item.get("evidence") or {}
+        for item in reversed(events)
+        if item["stage"] == stage and item["status"] != "running"
+    )
+
+
+STORY = {
+    "title": "Add customer risk classification",
+    "user_story": "As a risk officer I need customers classified so exposure is visible.",
+    "acceptance_criteria": ["Risk category is persisted", "Audit events are generated"],
+    "components": ["crm"],
+}
+
+
+def test_the_contract_event_carries_what_it_sealed():
+    evidence = _evidence(_events_for(STORY), "contract")
+    assert evidence["objective"] == STORY["user_story"]
+    assert evidence["acceptance_criteria"] == STORY["acceptance_criteria"]
+    assert evidence["stack"]["backend"] == STACK.backend
+    assert evidence["affected_application"] == "crm"
+    assert evidence["contract_hash"].startswith("sha256:")
+
+
+def test_the_requirements_event_numbers_what_the_story_asked_for():
+    """Estimation and code generation read the same story through the same decomposition.
+
+    Scoring prose while the builder works from numbered requirements is how a factor gets
+    scored against a requirement nobody ever wrote down.
+    """
+    evidence = _evidence(_events_for(STORY), "requirements")
+    assert [item["id"] for item in evidence["functional"]][:1] == ["FR-001"]
+    assert all(item["source"] for item in evidence["functional"])
+    assert isinstance(evidence["assumptions"], list)
+    assert isinstance(evidence["open_questions"], list)
+
+
+def test_every_pipeline_checkpoint_has_a_stage_that_can_produce_it():
+    """The checklist and the pipeline are two lists that must not drift apart.
+
+    A checkpoint no stage emits sits permanently pending, which reads as a stalled run — and
+    that is exactly how `requirements` shipped: label, tooltip and narrator all present, and
+    nothing on the server ever sent the event.
+    """
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    screen = (root / "frontend" / "src" / "EstimateCodeScreen.tsx").read_text(encoding="utf-8")
+    node_map = re.search(r"const NODE_MAP[^{]*\{(.*?)^\}", screen, re.S | re.M).group(1)
+    checkpoints = {
+        stage: re.findall(r"'([a-z_]+)'", body)
+        for stage, body in re.findall(r"^  (\w+): \[([^\]]*)\]", node_map, re.M)
+    }
+    assert len(checkpoints) > 20, "NODE_MAP was not parsed"
+
+    source = (root / "backend" / "estimate_code.py").read_text(encoding="utf-8")
+    emitted = set(re.findall(r'"stage": "(\w+)"', source))
+    unreachable = sorted(set(checkpoints) - emitted)
+    assert not unreachable, f"checklist steps no stage emits: {unreachable}"
+
+    listed = set(re.findall(
+        r"'([a-z_]+)'", re.search(r"const steps = \[(.*?)\]", screen, re.S).group(1)))
+    unlisted = sorted({s for nodes in checkpoints.values() for s in nodes} - listed)
+    assert not unlisted, f"stages producing a step the checklist never shows: {unlisted}"
+
+
+def test_routing_names_the_roles_and_what_each_owns():
+    roles = _evidence(_events_for(STORY), "specialist_routing")["roles"]
+    assert roles
+    for item in roles:
+        assert item["role"] and item["owns"] and item["why"]
+
+
+def test_readiness_names_the_checks_that_were_not_ready():
+    evidence = _evidence(_events_for(STORY), "readiness")
+    assert isinstance(evidence["assumptions"], list)
+    assert isinstance(evidence["questions"], list)
+    for item in evidence["unready"]:
+        assert item["area"] and item["status"] != "ready" and item["detail"]
+
+
+def test_stack_calibration_names_the_anchors_it_loaded():
+    anchors = _evidence(_events_for(STORY), "declare_stack")["anchors"]
+    assert anchors and all("pts" in item for item in anchors)
+
+
+def test_the_scorecard_event_names_what_costs_most():
+    evidence = _evidence(_events_for(STORY), "score_factors")
+    assert evidence["highest"] and evidence["lowest"]
+    assert "/5" in evidence["highest"][0]
+
+
+def _spread(**pinned: int) -> dict[str, int]:
+    """A varied scorecard with named factors pinned.
+
+    A fixture that pins one factor and leaves the other fifteen identical is itself the
+    degenerate scorecard `_validate_draft` rejects, so it never reaches the stage under test.
+    """
+    from backend.estimation_framework import FACTOR_IDS
+
+    scores = {factor: 1 + (index % 4) for index, factor in enumerate(FACTOR_IDS)}
+    scores.update(pinned)
+    return scores
+
+
+def test_the_calculation_names_the_rules_that_fired():
+    # Uncertainty at 4 fires a base adjustment, so there is a rule to name.
+    evidence = _evidence(_events_for(STORY, _spread(uncertainty=4)), "calculate")
+    assert any("uncertainty" in item for item in evidence["applied"])
+
+
+def test_a_failed_gate_says_which_one_and_why():
+    evidence = _evidence(_events_for(STORY, _spread(uncertainty=5)), "policy_gate")
+    assert evidence["failed_detail"]
+    assert any("uncertainty" in item.lower() for item in evidence["failed_detail"])
+    assert evidence["confidence_detail"]
+
+
+def test_the_calculation_reports_its_three_parts_separately():
+    """Base adjustments, stack adjustments and the Fibonacci map are three checklist steps
+    driven by one event. Without separate content the same sentence prints three times."""
+    evidence = _evidence(_events_for(STORY, _spread(uncertainty=4, reversibility=4)), "calculate")
+    assert evidence["base_applied"], "no base rule fired, so the step has nothing to report"
+    assert evidence["base_skipped"], "rules that did not fire are evidence too"
+    assert "stack_applied" in evidence and "stack_skipped" in evidence
+    assert evidence["base_sum"] and evidence["band"] and evidence["points"]
+
+
+def test_the_gate_step_and_the_decision_step_carry_different_content():
+    evidence = _evidence(_events_for(STORY, _spread(uncertainty=5)), "policy_gate")
+    assert evidence["failed_detail"], "the gate step needs the failures"
+    assert evidence["gates_passed"], "and the gates that held"
+    assert evidence["recommendation"], "the decision step needs the recommendation"
+    assert evidence["recommendation_detail"]

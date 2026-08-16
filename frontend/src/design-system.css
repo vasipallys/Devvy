@@ -626,3 +626,99 @@ body.dock-resizing *{cursor:col-resize!important}
   .eagle-rules{grid-template-columns:1fr}
   .eagle-table{font-size:9px}
 }
+
+/* Same for the evidence timeline, which narrates the same events. */
+.evidence-narration{white-space:pre-line}
+
+/* ------------------------------------------------------------------------------------------
+   Engineering review — the account a reviewer needs that a diff cannot give: which requirement
+   made each file necessary, and what was considered and left alone.
+   ------------------------------------------------------------------------------------------ */
+.eng-panel{margin:14px 0;border:1px solid #2b332d;border-radius:12px;background:#101613;
+  overflow:hidden}
+.eng-head{display:flex;align-items:flex-start;gap:11px;padding:13px 15px;
+  border-bottom:1px solid #232a25;background:#131b16}
+.eng-head>svg{flex:none;color:#a9e68a;margin-top:2px}
+.eng-head>span{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.eng-head b{font-size:12px;color:#e3eae4}
+.eng-head small{font-size:10px;color:#8b968f}
+.eng-decision{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:2px;
+  padding:5px 11px;border-radius:8px;font-size:10px;letter-spacing:.06em;text-transform:uppercase}
+.eng-decision em{font-style:normal;font-size:9px;letter-spacing:0;text-transform:none;opacity:.85}
+.eng-decision.approved{background:#17240f;color:#b8f49b}
+.eng-decision.needs_fix{background:#241d12;color:#ffd38b}
+.eng-decision.blocked{background:#241715;color:#ffb4ab}
+
+.eng-block{padding:13px 15px;border-bottom:1px solid #1e2521}
+.eng-block:last-child{border-bottom:0}
+.eng-block h4{display:flex;align-items:center;gap:7px;margin:0 0 10px;font-size:10px;
+  letter-spacing:.08em;text-transform:uppercase;color:#9fb0a6}
+.eng-block h4 svg{color:#a9e68a}
+.eng-block h5{display:flex;align-items:center;gap:6px;margin:14px 0 6px;font-size:10px;
+  color:#c3cdc6}
+.eng-block p{margin:0 0 8px;font-size:10px;line-height:1.65;color:#8b968f;max-width:78ch}
+
+.eng-reqs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.eng-reqs li{display:flex;gap:10px;align-items:flex-start}
+.eng-reqs code{flex:none;font-family:'Cascadia Code',Consolas,monospace;font-size:10px;
+  padding:2px 7px;border-radius:4px;background:#1a231c;color:#a9e68a}
+.eng-reqs>li>span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.eng-reqs b{font-size:11px;line-height:1.55;color:#dfe5e0;font-weight:500}
+.eng-reqs small{font-size:10px;line-height:1.5;color:#8b968f}
+
+.eng-assumptions p{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;margin:0 0 5px;
+  color:#c8b78c}
+.eng-assumptions code{font-family:'Cascadia Code',Consolas,monospace;font-size:9px;
+  padding:1px 6px;border-radius:4px;background:#241d12;color:#ffd38b}
+.eng-assumptions b{color:#e0d3ae;font-weight:600}
+.eng-questions{margin-top:10px}
+.eng-questions summary{font-size:10px;color:#9fb0a6;cursor:pointer}
+.eng-questions ul{margin:7px 0 0;padding-left:18px;font-size:10px;line-height:1.7;color:#8b968f}
+
+.eng-table{width:100%;border-collapse:collapse;font-size:10px}
+.eng-table th{text-align:left;padding:0 12px 7px 0;border-bottom:1px solid #2b332d;
+  font-family:'Cascadia Code',Consolas,monospace;font-size:9px;letter-spacing:.08em;
+  text-transform:uppercase;color:#8b968f;font-weight:500;white-space:nowrap}
+.eng-table td{padding:7px 12px 7px 0;border-bottom:1px solid #1a211d;vertical-align:top;
+  line-height:1.55;color:#b6c0b8}
+.eng-table tr:last-child td{border-bottom:0}
+.eng-table code{display:block;font-family:'Cascadia Code',Consolas,monospace;font-size:10px;
+  color:#dfe5e0;overflow-wrap:anywhere}
+.eng-table small{display:block;margin-top:3px;font-size:9px;color:#8b968f;line-height:1.45}
+.eng-req{display:inline-block!important;padding:1px 6px;border-radius:4px;background:#1a231c;
+  color:#a9e68a!important}
+.eng-none{color:#7d8a82;font-style:italic}
+.eng-unmatched{color:#ffd38b}
+.eng-action{font-style:normal;font-size:8px;letter-spacing:.07em;text-transform:uppercase;
+  padding:2px 7px;border-radius:10px}
+.eng-action.replace{background:#141d27;color:#a8c7fa}
+.eng-action.create{background:#17240f;color:#b8f49b}
+.eng-status{font-style:normal;font-size:8px;letter-spacing:.07em;text-transform:uppercase;
+  padding:2px 7px;border-radius:10px}
+.eng-status.covered{background:#17240f;color:#b8f49b}
+.eng-status.untested{background:#241d12;color:#ffd38b}
+.eng-status.uncovered{background:#241715;color:#ffb4ab}
+
+.eng-dropped{margin-top:14px;padding:11px 13px;border:1px solid #4d3d20;border-radius:9px;
+  background:#1d1810}
+.eng-dropped h5{margin-top:0;color:#ffd38b}
+.eng-drop{display:flex;flex-direction:column;gap:2px;margin:0 0 8px!important}
+.eng-drop code{font-family:'Cascadia Code',Consolas,monospace;font-size:10px;color:#e8d5aa}
+.eng-drop small{font-size:9px;line-height:1.5;color:#a99a76}
+.eng-alt{color:#8b968f!important}
+.eng-unchanged{margin-top:12px}
+.eng-paths{display:flex;flex-wrap:wrap;gap:5px}
+.eng-paths code{font-family:'Cascadia Code',Consolas,monospace;font-size:9px;padding:3px 8px;
+  border-radius:11px;background:#161d19;color:#9fb0a6}
+
+.eng-reasoning{color:#c3cdc6!important;font-size:11px!important}
+.eng-evidence{list-style:none;margin:10px 0 0;padding:0;display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:5px}
+.eng-evidence li{display:flex;flex-direction:column;gap:2px;padding:8px 11px;border-radius:8px;
+  background:#141a17}
+.eng-evidence b{font-size:9px;letter-spacing:.07em;text-transform:uppercase;color:#8b968f}
+.eng-evidence span{font-size:10px;line-height:1.5;color:#dfe5e0}
+.eng-issues{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:5px}
+.eng-issues li{display:flex;gap:8px;align-items:flex-start;padding:8px 11px;border-radius:8px;
+  background:#241715;color:#ffb4ab;font-size:10px;line-height:1.55}
+.eng-issues svg{flex:none;margin-top:2px}

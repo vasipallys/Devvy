@@ -512,3 +512,8 @@
 .repo-signal.absent{background:#f4f5f3;border:1px solid #e0e4de;color:#636f68;
   text-decoration:line-through}
 .repo-signal em{font-style:normal;font-family:'Cascadia Code',Consolas,monospace;opacity:.75}
+
+/* Narration now carries the stage's own content — the objective it sealed, the criteria it
+   froze, the roles it routed — under the sentence explaining what the stage does. Those are
+   separated by blank lines, which need honouring rather than collapsing. */
+.pipeline-feed li span{white-space:pre-line}

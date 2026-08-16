@@ -97,13 +97,74 @@ from backend.smart_code import (
     SmartCodeApplyRequest, SmartCodeRequest, SmartCodeService, inspect_workspace,
 )
 from backend.tools import extract_document
+from backend.second_brain import (
+    detect_memory,
+    memory_context,
+    preferences,
+    recall,
+    remember,
+    search_notes,
+    vault_context,
+)
 from backend.voice_engine import VoiceEngine
+from backend.yukti import CAPABILITIES, honorific, speakable
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 settings = get_settings()
 runtime = GemmaRuntime(settings)
 agent = ChatAgent(runtime, settings)
+
+
+def _second_brain(owner_id: UUID | None):
+    """Bind a recall provider to one owner's notes vault and memory bank.
+
+    Returned as a closure per turn rather than held on the graph, because both halves are
+    per-user: another owner's memories must never surface in this turn's answer, and the
+    vault root is read fresh so changing it does not need a restart.
+    """
+
+    async def provide(query: str, *, briefing: bool = False) -> dict:
+        return await asyncio.to_thread(collect_second_brain, query, owner_id, briefing)
+
+    return provide
+
+
+def collect_second_brain(query: str, owner_id: UUID | None, briefing: bool) -> dict:
+    """Search the vault and the memory bank. Synchronous — always called off the loop.
+
+    Both halves are best-effort *individually*: a missing vault must not cost the user their
+    remembered preferences, and an unreadable memory bank must not hide their notes.
+    """
+    notes: list[dict] = []
+    memories: list[dict] = []
+    blocks: list[str] = []
+
+    # A briefing has no question in it, so searching the vault for its words finds nothing.
+    # What it wants is anything outstanding, which is a fixed query rather than the user's.
+    search_text = "todo pending due next action in progress blocked" if briefing else query
+    vault = search_notes(settings.yukti_vault_root, search_text, limit=5)
+    if vault.hits:
+        notes = [
+            {"path": item.path, "title": item.title, "score": item.score,
+             "matched": item.matched, "modified": item.modified}
+            for item in vault.hits
+        ]
+        blocks.append("FROM YOUR NOTES:\n" + vault_context(vault))
+    elif vault.reachable is False and settings.yukti_vault_root.strip():
+        raise RuntimeError(vault.note or "the notes vault could not be read")
+
+    with Session(engine) as session:
+        found = recall(session, query, owner_id=owner_id)
+        memories = [
+            {"kind": item.kind, "content": item.content, "source": item.source_text}
+            for item in found
+        ]
+        if found:
+            blocks.append("YOU ASKED ME TO REMEMBER:\n" + memory_context(found))
+    return {"context": "\n\n".join(blocks), "notes": notes, "memories": memories}
+
+
 talk_agent = TalkAgentGraph(runtime, settings)
 voice_engine = VoiceEngine(settings)
 animation_engine = AnimationEngine(settings)
@@ -712,6 +773,23 @@ def system_status():
             "context_characters": settings.document_max_chars,
             "smart_code_context_characters": settings.smart_code_max_context_chars,
         },
+        # YUKTI's faculties, both halves. The interface shows what is not connected as
+        # prominently as what is, because a voice assistant's limits are the one thing a
+        # listener cannot discover for themselves — there is no menu to find them missing from.
+        "yukti": {
+            "address": settings.yukti_address,
+            "vault_configured": bool(settings.yukti_vault_root.strip()),
+            "faculties": [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "summary": item.summary,
+                    "connected": item.wired,
+                    "why_not": item.refusal.format(address=settings.yukti_address),
+                }
+                for item in CAPABILITIES
+            ],
+        },
     }
 
 
@@ -1154,6 +1232,42 @@ async def stream_job(job_id: UUID, request: Request):
     )
 
 
+def _talk_preferences(owner_id: UUID | None) -> dict[str, str]:
+    """Standing preferences, falling back to the configured default address."""
+    try:
+        with Session(engine) as session:
+            stored = preferences(session, owner_id=owner_id)
+    except Exception:
+        # A preference is a courtesy. Losing it must never cost the user their answer.
+        logger.warning("Could not read YUKTI preferences", exc_info=True)
+        stored = {}
+    return {"address": stored.get("address") or settings.yukti_address}
+
+
+def _capture_memory(transcript: str, owner_id: UUID | None) -> dict | None:
+    """Store anything this turn explicitly asked YUKTI to remember.
+
+    Detection is deliberately literal — "remember that…", "call me…", "from now on…". An
+    assistant that decides on its own which of your remarks were worth filing will file the
+    wrong ones, and you will not find out until it recites one back at you months later.
+    """
+    found = detect_memory(transcript)
+    if not found:
+        return None
+    kind, content = found
+    try:
+        with Session(engine) as session:
+            item = remember(
+                session, content, kind=kind,
+                subject="address" if kind == "address" else "",
+                source_text=transcript, owner_id=owner_id,
+            )
+            return {"kind": item.kind, "content": item.content, "subject": item.subject}
+    except Exception:
+        logger.warning("Could not write to the YUKTI memory bank", exc_info=True)
+        return None
+
+
 async def run_talk_job(request: dict, context: JobContext) -> dict:
     """One spoken turn: generate, then produce optional audio and video.
 
@@ -1176,18 +1290,25 @@ async def run_talk_job(request: dict, context: JobContext) -> dict:
         },
     )
     try:
+        # Standing preferences before anything else: how YUKTI addresses the user is part of
+        # the very first token it emits, so it cannot be resolved after generation starts.
+        prefs = await asyncio.to_thread(_talk_preferences, context.owner_id)
         await context.event(
             "context", "completed", "Turn context prepared locally",
             evidence={
                 "history_messages": len(history),
                 "attachments": request.get("attachment_count", 0),
+                "address": honorific(prefs),
             },
         )
-        await context.event("generate", "running", "Devvy is composing a grounded response")
+        await context.event("generate", "running", "YUKTI is composing a grounded response")
         token_queue: asyncio.Queue[str] = asyncio.Queue()
         if mode == "talk":
             generation = asyncio.create_task(
-                talk_agent.invoke(history, transcript, {}, token_queue)
+                talk_agent.invoke(
+                    history, transcript, prefs, token_queue,
+                    recall_provider=_second_brain(context.owner_id),
+                )
             )
         else:
             generation = asyncio.create_task(
@@ -1205,6 +1326,33 @@ async def run_talk_job(request: dict, context: JobContext) -> dict:
                 evidence={
                     "research": bool(result.get("requires_research")),
                     "animation": bool(result.get("requires_animation")),
+                },
+            )
+        if result.get("refused"):
+            # The turn was declined in code, before generation. Recorded as its own event so
+            # the reason is visible rather than looking like an unusually short answer.
+            await context.event(
+                "faculty", "failed", "A faculty that is not connected was asked for",
+                detail=str(result["refused"]),
+                evidence={
+                    "connected": [item.id for item in CAPABILITIES if item.wired],
+                    "not_connected": [item.id for item in CAPABILITIES if not item.wired],
+                },
+            )
+        notes = result.get("notes") or []
+        memories = result.get("memories") or []
+        if notes or memories:
+            await context.event(
+                "second_brain", "completed",
+                f"{len(notes)} note(s) and {len(memories)} remembered fact(s) recalled",
+                detail=(
+                    "Your own material outranks the web: where a note and a search result "
+                    "disagree about your project, the note wins."
+                ),
+                evidence={
+                    "notes": [item["path"] for item in notes],
+                    "matched_terms": sorted({t for i in notes for t in i.get("matched", [])}),
+                    "memories": [item["content"][:120] for item in memories],
                 },
             )
         sources = result.get("sources") or []
@@ -1235,9 +1383,35 @@ async def run_talk_job(request: dict, context: JobContext) -> dict:
                 "truncated": bool(talk_completion.get("truncated")),
             },
         )
+        # What the speaker says is not what the screen shows. The screen keeps the answer's
+        # markup; the synthesiser is handed prose, because it reads `**` aloud as punctuation
+        # and a URL one character at a time.
+        spoken = result.get("spoken") or speakable(response)
+
+        stored_memory = None
+        if mode == "talk":
+            stored_memory = await asyncio.to_thread(
+                _capture_memory, transcript, context.owner_id
+            )
+            if stored_memory:
+                await context.event(
+                    "memory", "completed", f"Remembered: {stored_memory['content'][:80]}",
+                    detail=(
+                        "Stored because you asked for it explicitly. Nothing is inferred into "
+                        "the memory bank — a memory you did not state would be recalled later "
+                        "with all the authority of something you did."
+                    ),
+                    evidence=stored_memory,
+                )
+
         job_result: dict[str, Any] = {
             "response": response,
+            "spoken": spoken,
             "mode": mode,
+            "refused": result.get("refused") or "",
+            "notes": notes,
+            "memories": memories,
+            "remembered": stored_memory,
             "artifact_url": result.get("artifact_url"),
             "audio_url": None,
             "video_url": None,
@@ -1245,7 +1419,7 @@ async def run_talk_job(request: dict, context: JobContext) -> dict:
         }
 
         # Media is best-effort: a TTS or Manim failure MUST NOT discard completed text.
-        tts_task = asyncio.create_task(voice_engine.synthesize(response))
+        tts_task = asyncio.create_task(voice_engine.synthesize(spoken))
         animation_task = None
         if mode == "talk" and result.get("requires_animation"):
             animation_task = asyncio.create_task(

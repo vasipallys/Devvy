@@ -63,7 +63,12 @@ async def test_talk_router_reports_why_it_routed(monkeypatch):
 
     plain = await route("how was your day")
     assert plain["requires_research"] is False and plain["requires_animation"] is False
-    assert "No live-data or visual trigger matched" in plain["route_reason"]
+    assert "No second-brain, live-data or visual trigger matched" in plain["route_reason"]
+
+    # The second brain is its own route, and it says which words asked for it.
+    notes = await route("what did i write in my notes about the funnel")
+    assert notes["requires_recall"] is True and notes["requires_research"] is False
+    assert "'my notes'" in notes["route_reason"]
 
 
 async def test_talk_research_failure_degrades_honestly(monkeypatch):

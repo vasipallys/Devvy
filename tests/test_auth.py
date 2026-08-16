@@ -246,3 +246,32 @@ def test_the_local_default_is_clean():
         Settings(app_host="127.0.0.1", auth_enabled=True, phoenix_enabled=False)
     )
     assert fatal == [] and warnings == []
+
+
+def test_generated_media_is_reachable_only_with_the_session_cookie(authenticated_app):
+    """The Talk player must send credentials, and the API must permit them.
+
+    The voice element feeds an AnalyserNode, so it has to be a CORS request or the audio graph
+    is tainted and plays silence. `crossOrigin="anonymous"` is CORS with credentials *omitted*
+    — the cookie never goes, this route answers 401 with a JSON body, and the browser surfaces
+    that as "no supported source was found", which reads like a codec fault and sends you
+    looking at the wrong thing entirely. `use-credentials` is the only value that satisfies
+    both, and it only works while the origin is echoed back specifically rather than as `*`.
+    """
+    origin = "http://localhost:5173"
+    (api.settings.generated_dir).mkdir(parents=True, exist_ok=True)
+    (api.settings.generated_dir / "speech-regression.wav").write_bytes(b"RIFF....WAVEfmt ")
+    with TestClient(api.app) as client:
+        register(client, "owner@example.com", "Owner")
+
+        allowed = client.get("/generated/speech-regression.wav", headers={"Origin": origin})
+        assert allowed.status_code == 200
+        assert allowed.headers["content-type"] == "audio/wav"
+        # Credentialed CORS forbids a wildcard origin; the browser rejects the response.
+        assert allowed.headers["access-control-allow-origin"] == origin
+        assert allowed.headers["access-control-allow-credentials"] == "true"
+
+        client.cookies.clear()
+        anonymous = client.get("/generated/speech-regression.wav", headers={"Origin": origin})
+        assert anonymous.status_code == 401
+        assert "audio" not in anonymous.headers["content-type"]

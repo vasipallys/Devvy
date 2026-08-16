@@ -37,14 +37,34 @@ flowchart LR
     A --> B --> C --> D --> E
 ```
 
-25 checklist steps, driven by 22 events the service emits. Three steps
-(`apply_base_adjustments`, `apply_stack_adjustments`, `map_to_fibonacci`) come from one
-`calculate` event, and two (`evaluate_gates`, `decide`) from one `policy_gate` event, because
-the arithmetic is a single indivisible operation but reads better as its parts.
+30 checklist steps, of which 27 apply to a story estimated without a repository. Three of them
+(`apply_base_adjustments`, `apply_stack_adjustments`,
+`map_to_fibonacci`) come from one `calculate` event and two (`evaluate_gates`, `decide`) from
+one `policy_gate` event, because the arithmetic is a single indivisible operation but reads
+better as its parts — each is narrated separately, or four of the five would print another
+step's sentence.
 
-Not every stage runs on every story. `blind_review` and `eagle_debate` are conditional, and the
-checklist marks the *first outstanding* step rather than counting positions — a skipped stage
-must not stall the display.
+**Every stage reports what it found in *this* story**, not only what the stage is for. A stage
+that explains its own purpose tells the reader something that was equally true before they
+typed anything, so the contract quotes the objective it froze, readiness quotes the checks that
+came back unready, the gate quotes which gate failed and why.
+
+Not every stage runs on every story. `blind_review`, `focus_pass` and `eagle_debate` are
+conditional, and the checklist marks the *first outstanding* step rather than counting positions
+— a skipped stage must not stall the display.
+
+The three repository stages are conditional on something the reader controls, so they are
+handled differently again: with no workspace they are **removed from the checklist** rather than
+shown greyed. A step that cannot complete on this run reads as a stall, and three of them near
+the top of the list read as a broken pipeline — which is exactly the impression forming while
+someone waits two minutes on a CPU model. Removed, the counts stay true: *12 of 27* means twelve
+of the twenty-seven that apply.
+
+A checklist step with no stage behind it is the same failure with none of the excuse, and it
+shipped once: `requirements` had a label, a tooltip and a narrator, and nothing on the server
+ever sent the event, so it sat pending on every run. `tests/test_estimation_spread.py` now reads
+`NODE_MAP` out of the screen and the emitted stage names out of the service and fails if either
+list contains something the other does not.
 
 ---
 
@@ -70,6 +90,36 @@ Budget: `max_debate_rounds = 2`, `max_retrieval_rounds = 2`.
 
 The hash is `sha256` over the whole contract body. **Two runs with the same hash were given the
 same problem.** It is the first thing to check when two estimates disagree.
+
+### 1.1a `requirements` — Read the requirements from the story
+
+`engineering.analyse_requirement()`. Deterministic.
+
+Decomposes the story into numbered `FR-nnn` and `NFR-nnn` statements, each quoting the text it
+came from — a requirement with no source is an invention. Acceptance criteria attach to the
+requirement they verify. Anything the story did not define becomes an explicit
+`ASSUMPTION-nnn` or an open question, never a silent decision.
+
+This is what turns "the story is unclear" into a named gap: *the story does not define behaviour
+for partial failure* is actionable in a way that a low clarity score is not.
+
+It is the **same function code generation works from**, which is the point of it being here.
+Estimation and the builder read the same story, and while the builder worked from numbered
+requirements and the estimator from one block of prose, a factor could be scored against a
+requirement nobody ever wrote down.
+
+The story *title* is deliberately not part of the objective. It is a label, and read as a
+requirement it becomes an `FR-001` that restates the story and that nothing can implement
+distinctly — one permanently uncovered row in the traceability matrix, on every story. It is
+used only when there is no story text to read instead.
+
+### 1.1b `repo_intelligence` — Read the repository *(when a workspace is supplied)*
+
+`repo_evidence.analyse_repository()`. Deterministic, run off the event loop.
+
+Declared stack from manifests, thirteen structural signals present **and** absent, a change
+surface ranked on the story's own words, and the tests beside it. Without a repository the first
+rung of the §6 ladder is missing and every unanswered question is priced as unbounded.
 
 ### 1.2 `normalize` — Normalize evidence and create the input hash
 
@@ -167,6 +217,23 @@ The prompt is reproduced in full [below](#the-estimation-prompt). Its shape:
 Whatever the model does not score is filled by `_heuristic_score()` and **labelled
 `heuristic`** — never presented as model judgement. See
 [Reading silence](#reading-silence-the-rule-that-decides-most-estimates).
+
+### 2.1a `focus_pass` — Ask the model the simpler question *(conditional)*
+
+Runs when the full scorecard fails validation, including on a degenerate answer.
+
+Sixteen `{score, why}` objects in one response is where a 1B model degrades: it holds the shape
+and loses the content, answering "2" sixteen times. Sixteen factors at 2 is a base sum of 32 —
+the middle of one band — so **every story scored that way returns 5 points**. That is rejected as
+carrying no information.
+
+Rather than dropping the model entirely, it is asked three recall questions: which factors does
+this story touch, which are largest, which did it leave unanswered. Three short lists of ids, no
+rubric to hold and no numbers. Code then maps the reading onto scores — untouched 1, involved 3,
+largest 4, unanswered 4, both 5.
+
+Dropping straight to keyword heuristics produced an estimator whose every number came from a
+keyword table with the model contributing nothing at all.
 
 ### 2.2 `specialist_analysis` — Apply routed specialist lenses
 
@@ -426,6 +493,22 @@ Similarity is **three signals**, reported separately so a weak match is visibly 
 Returns the closest matches, their differences, an implied range, and whether this story reads
 as *smaller / similar / larger*. Below 50% similarity it says so and declines to anchor. With no
 history it says there is no anchor rather than inventing one.
+
+### 4.8a `repo_answers` — What the repository settled *(when a workspace is supplied)*
+
+Where the repository can answer a factor the story left open, the inferred score is replaced by
+a fact and relabelled `repository` — a third provenance beside `model` and `heuristic`. Scores
+the model grounded in the story itself are left untouched.
+
+### 4.8b `change_plan` — What would change *(when a workspace is supplied)*
+
+The model is never asked to name a file. It is shown the ranked change surface and asked what
+changes inside each; every path is then checked against disk. Existing file → `modify`, new file
+in an existing directory → `create`, anything else → **rejected and reported**.
+
+`engineering.assess_necessity` then applies **prove before modify**: an edit that cannot name the
+requirement it serves is dropped, and the files reviewed and deliberately left alone are listed.
+Relatedness is not necessity — it is how a two-line change becomes a diff nobody reviews.
 
 ### 4.9 `consistency_audit` — Replay and audit consistency
 

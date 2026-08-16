@@ -396,6 +396,8 @@ Copy `.env.example` to `.env`. The most commonly tuned values are:
 | `SMART_CODE_MAX_OUTPUT_TOKENS` | `4096` | Smart Code structured-output ceiling |
 | `ESTIMATE_MAX_OUTPUT_TOKENS` | `3072` | Estimation structured-output ceiling |
 | `AGENT_RUN_RETENTION_DAYS` | `30` | Privacy-safe trajectory ledger retention |
+| `YUKTI_ADDRESS` | `sir` | How YUKTI addresses you until you tell it otherwise |
+| `YUKTI_VAULT_ROOT` | empty | Your notes directory. Empty disables the second brain rather than guessing at a location |
 | `AUTH_ENABLED` | `true` | Require authenticated principals and ownership checks |
 | `AUTH_SECURE_COOKIES` | `false` | Enable behind HTTPS; required beyond loopback |
 | `AUTH_SESSION_HOURS` | `12` | Non-persistent session lifetime |

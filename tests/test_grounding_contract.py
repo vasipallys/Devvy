@@ -28,9 +28,15 @@ def chat_prompt() -> str:
 
 
 def talk_prompt() -> str:
-    from backend.agent_graph import TALK_SYSTEM_PROMPT
+    """Talk's prompt is assembled per turn, so it is built rather than read.
 
-    return TALK_SYSTEM_PROMPT
+    It carries the *brief* form of the contract deliberately: the persona, the capability
+    register and the speaking rules all have to fit alongside the turn's evidence, and the
+    budget spent restating the contract at length is budget taken from the user's own notes.
+    """
+    from backend.yukti import system_prompt
+
+    return system_prompt("sir", now="Monday, January 1, 2026, 9:00 AM")
 
 
 def estimate_prompt() -> str:
@@ -93,9 +99,11 @@ def test_every_prompt_names_the_strict_extractor_stance(name: str):
 
 def test_smart_code_carries_the_contract():
     """Checked at the source rather than the rendered prompt: the file prompt is assembled per
-    file inside a coroutine, and importing the model runtime to render one is not worth it."""
+    file inside a coroutine, and importing the model runtime to render one is not worth it.
+
+    Smart Code writes code, so it carries the build form rather than the extraction form."""
     source = smart_code_source()
-    assert "GROUNDING_CONTRACT_BRIEF" in source
+    assert "GROUNDING_CONTRACT_BUILD" in source
     assert "from backend.harness import" in source
 
 

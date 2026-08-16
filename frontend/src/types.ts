@@ -14,6 +14,58 @@ export interface SmartCodeRequest {
   framework?: string
   risk: 'low' | 'medium' | 'high'
 }
+/** The engineering gates — numbered requirements, prove-before-modify, traceability. */
+export interface EngineeringRequirement {
+  id: string
+  kind: 'functional' | 'non_functional'
+  statement: string
+  source: string
+  acceptance: string[]
+}
+export interface NecessityVerdict {
+  path: string
+  action: string
+  necessary: boolean
+  requirement: string | null
+  evidence: string
+  reason: string
+  alternative: string
+}
+export interface TraceRow {
+  requirement: string
+  statement: string
+  implementation: string[]
+  tests: string[]
+  evidence: string
+  status: 'covered' | 'untested' | 'uncovered'
+}
+export interface EngineeringReport {
+  requirements: {
+    functional: EngineeringRequirement[]
+    non_functional: EngineeringRequirement[]
+    assumptions: { id: string; about: string; assumed: string; because: string }[]
+    open_questions: string[]
+    summary: string
+  }
+  necessity: {
+    verdicts: NecessityVerdict[]
+    dropped: string[]
+    reviewed_unchanged: { path: string; reason: string }[]
+  }
+  traceability: TraceRow[]
+  decision: {
+    decision: 'APPROVED' | 'NEEDS_FIX' | 'BLOCKED'
+    requirement_coverage: number
+    build_status: string
+    test_status: string
+    critical_issues: string[]
+    remaining_assumptions: string[]
+    confidence: number
+    ready_for_pull_request: boolean
+    reasoning: string
+  }
+}
+
 export interface SmartCodePreview {
   preview_token: string
   summary: string
@@ -40,6 +92,8 @@ export interface SmartCodePreview {
     trust_policy: string
     write_policy: string
   }
+  /** Present on every preview: the engineering gates that ran over the diff. */
+  engineering?: EngineeringReport
 }
 
 /* Background jobs. Every model-backed request is a job that outlives the tab that made it. */
@@ -107,12 +161,22 @@ export interface AgentEvent {
   evidence?: Record<string, unknown>
 }
 
+/** One of YUKTI's faculties. `connected: false` carries the sentence it says instead. */
+export interface Faculty {
+  id: string
+  title: string
+  summary: string
+  connected: boolean
+  why_not: string
+}
+
 export interface SystemStatus {
   app: { name: string; version: string; deployment: string }
   model: { id: string; loaded: boolean; error?: string; device: string; dtype: string; generation: string }
   capabilities: Record<string, boolean>
   trust: { privacy: string; data_dir: string; network: string[]; run_ledger: string }
   limits: Record<string, number>
+  yukti?: { address: string; vault_configured: boolean; faculties: Faculty[] }
 }
 
 export type UserRole = 'owner' | 'admin' | 'member'

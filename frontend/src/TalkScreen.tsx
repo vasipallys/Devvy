@@ -1,7 +1,8 @@
-import { FormEvent, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Code2, FileText, Globe2, History, Image, MessageSquare, Mic, Paperclip, RotateCcw, Send, Sparkles, Square, Video, X } from 'lucide-react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, Brain, Code2, FileText, Globe2, History, Image, MessageSquare, Mic, NotebookPen, Paperclip, RotateCcw, Send, Sparkles, Square, Video, X } from 'lucide-react'
 import { api, API } from './api'
 import { EvidencePanel } from './EvidencePanel'
+import { FacultiesPanel } from './FacultiesPanel'
 import { Tooltip } from './Tooltip'
 import { isJobActive } from './types'
 import type { AgentEvent, Attachment, Mode } from './types'
@@ -24,9 +25,28 @@ function LinkedText({ text }: { text: string }) {
   )}</>
 }
 
+/** What actually went wrong with the voice, in words that point somewhere.
+ *
+ *  The browser's own text for a rejected fetch is "no supported source was found", which reads
+ *  as a codec problem and sends you looking at the WAV. It is far more often the response not
+ *  being audio at all — an expired session answering the media URL with JSON. */
+function mediaErrorMessage(error: MediaError | null): string {
+  switch (error?.code) {
+    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+      return 'The voice audio could not be loaded. This is usually an expired session — the '
+        + 'answer is above; reload the page to hear the next one.'
+    case MediaError.MEDIA_ERR_NETWORK:
+      return 'The connection dropped while loading the voice audio. The answer is above.'
+    case MediaError.MEDIA_ERR_DECODE:
+      return 'The generated audio file is corrupt and could not be decoded. The answer is above.'
+    default:
+      return 'The answer could not be spoken. It is shown above.'
+  }
+}
+
 function GeometricAgentFace({ mouthOpen, speaking }: { mouthOpen: number; speaking: boolean }) {
-  return <div className={`agent-portrait ${speaking ? 'portrait-speaking' : ''}`} role="img" aria-label="Devvy, your angelic voice companion">
-    <img src={robotGirl} alt="Devvy feminine robotic companion" draggable={false}/>
+  return <div className={`agent-portrait ${speaking ? 'portrait-speaking' : ''}`} role="img" aria-label="YUKTI, your executive AI butler">
+    <img src={robotGirl} alt="YUKTI, an AI butler" draggable={false}/>
     <span className="portrait-mouth" style={{ transform: `translate(-50%,-50%) scale(${1 + mouthOpen * .12},${.18 + mouthOpen * 1.3})`, opacity: .2 + mouthOpen * .75 }}/>
     <span className="portrait-halo"/>
   </div>
@@ -35,10 +55,10 @@ function GeometricAgentFace({ mouthOpen, speaking }: { mouthOpen: number; speaki
 /** The orbit is Talk's only status display, so each state says what is happening and why. */
 const STATE_WHY: Record<string, { label: string; why: string }> = {
   connecting: { label: 'Connecting', why: 'Opening the WebSocket to the local backend. Talk keeps its history in this connection only — nothing is written to disk.' },
-  idle: { label: 'Ready', why: 'Waiting for you. Speak by pressing Talk, or type — both take the same path through the agent.' },
+  idle: { label: 'Ready', why: 'At your service. Speak by pressing Talk, or type — both take the same path through the agent.' },
   listening: { label: 'Listening', why: 'Recording your turn. Transcription runs locally on this machine; no audio leaves it.' },
-  thinking: { label: 'Thinking', why: 'The agent is deciding whether this turn needs live research or a rendered animation, then generating. On a CPU model this is the slow part.' },
-  speaking: { label: 'Speaking', why: 'Reading the answer aloud with the local voice while the text streams alongside it.' },
+  thinking: { label: 'Thinking', why: 'YUKTI is deciding where this turn’s evidence comes from — your notes, the memory bank, the live web, or nothing — and then composing. On a CPU model this is the slow part.' },
+  speaking: { label: 'Speaking', why: 'Reading the answer aloud with the local voice. What is spoken is the answer with its markup stripped — the screen keeps the formatting, the speaker gets prose.' },
   error: { label: 'Error', why: 'Something in the turn failed. The reason is shown rather than hidden, and the session stays open so you can try again.' },
 }
 
@@ -55,7 +75,7 @@ export function TalkScreen({ onHome, initialJobId }: {
   const [state, setState] = useState<AgentState>('connecting')
   const [transcript, setTranscript] = useState('')
   const [response, setResponse] = useState('')
-  const [status, setStatus] = useState('Connecting to your local companion…')
+  const [status, setStatus] = useState('Connecting to your local butler…')
   const [error, setError] = useState('')
   const [videoUrl, setVideoUrl] = useState('')
   const [text, setText] = useState('')
@@ -68,6 +88,13 @@ export function TalkScreen({ onHome, initialJobId }: {
   const [runEvents, setRunEvents] = useState<AgentEvent[]>([])
   /** Set when this screen was opened on a past turn from Activity. */
   const [pastTurn, setPastTurn] = useState(false)
+  /** What the second brain contributed to the turn on screen, derived from the run's own
+   *  events so a client attaching mid-run rebuilds it from the snapshot alone. */
+  const recalled = useMemo(() => {
+    const event = [...runEvents].reverse().find(item => item.stage === 'second_brain')
+    const evidence = (event?.evidence ?? {}) as { notes?: string[]; memories?: string[] }
+    return { notes: evidence.notes ?? [], memories: evidence.memories ?? [] }
+  }, [runEvents])
 
   // Show the turn that was asked for. Talk holds its conversation in the socket only, so
   // there is nothing to "resume" — the honest thing is to show that turn's answer and
@@ -117,7 +144,18 @@ export function TalkScreen({ onHome, initialJobId }: {
 
   function playAgentAudio(url: string) {
     stopAgentAudio()
-    const audio = new Audio(API + url); audio.crossOrigin = 'anonymous'; audioRef.current = audio
+    // `use-credentials`, not `anonymous`. Generated media is owner-checked behind the session
+    // cookie, and `anonymous` is a CORS request with credentials *omitted* — the cookie never
+    // goes, the server answers 401 with a JSON body, and the browser reports it as the far
+    // less helpful "no supported source was found".
+    //
+    // Dropping crossOrigin entirely would send the cookie, but the element feeds an
+    // AnalyserNode: without CORS the graph is tainted and plays silence. So the request has to
+    // be CORS *and* credentialed, which the API allows (`allow_credentials=True` against a
+    // specific origin).
+    const audio = new Audio(API + url)
+    audio.crossOrigin = 'use-credentials'
+    audioRef.current = audio
     const context = new AudioContext(); audioContextRef.current = context
     const source = context.createMediaElementSource(audio); const analyser = context.createAnalyser()
     analyser.fftSize = 256; analyser.smoothingTimeConstant = 0.55
@@ -136,9 +174,23 @@ export function TalkScreen({ onHome, initialJobId }: {
       if (!audio.paused && !audio.ended) audioFrameRef.current = requestAnimationFrame(animate)
     }
     audio.onplay = () => { setState('speaking'); audioFrameRef.current = requestAnimationFrame(animate) }
-    audio.onended = () => { audioRef.current = null; stopAudioAnalysis(); setSubtitleWord(words.length); setState('idle'); setStatus('Ready when you are') }
-    audio.onerror = () => { audioRef.current = null; stopAudioAnalysis(); setError('The generated voice audio could not be played.') }
-    context.resume().then(() => audio.play()).catch(e => setError(`Audio playback failed: ${e.message}`))
+    audio.onended = () => { audioRef.current = null; stopAudioAnalysis(); setSubtitleWord(words.length); setState('idle'); setStatus('At your service') }
+    // A failure here must hand the session back. The socket announces `speaking` before the
+    // audio is fetched, and the Talk button is disabled in that state — so an unhandled media
+    // error left the UI reading "Speaking" with nothing playing and no way to continue short
+    // of a reload. The answer is already on screen; losing the voice must not also cost the
+    // conversation.
+    const failAudio = (message: string) => {
+      audioRef.current = null
+      stopAudioAnalysis()
+      setError(message)
+      setState('idle')
+      setStatus('At your service — the answer is above')
+    }
+    audio.onerror = () => failAudio(mediaErrorMessage(audio.error))
+    context.resume()
+      .then(() => audio.play())
+      .catch(e => failAudio(`The answer could not be spoken: ${e.message}. It is shown above.`))
   }
 
   useEffect(() => {
@@ -147,12 +199,12 @@ export function TalkScreen({ onHome, initialJobId }: {
     const connect = () => {
       if (disposed) return
       const socket = new WebSocket(endpoint); socketRef.current = socket
-      socket.onopen = () => { attempts = 0; setError(''); setState('idle'); setStatus('Ready when you are') }
+      socket.onopen = () => { attempts = 0; setError(''); setState('idle'); setStatus('At your service') }
       socket.onmessage = event => {
       const data = JSON.parse(event.data)
       if (data.type === 'state') {
         if (!(data.value === 'idle' && audioRef.current && !audioRef.current.paused)) setState(data.value)
-        if (data.value === 'thinking') { stopAgentAudio(); setStatus('Devvy is thinking locally…') }
+        if (data.value === 'thinking') { stopAgentAudio(); setStatus('YUKTI is thinking locally…') }
       }
       if (data.type === 'status') setStatus(data.content)
       if (data.type === 'agent_event') setRunEvents(current => [...current, data as AgentEvent])
@@ -223,7 +275,7 @@ export function TalkScreen({ onHome, initialJobId }: {
   function reset() { stopAgentAudio(); setTranscript(''); setResponse(''); setVideoUrl(''); setImageUrl(''); setAttachments([]); setRunEvents([]); setError(''); socketRef.current?.send(JSON.stringify({ type: 'reset' })) }
 
   return <div className="talk-screen">
-    <header className="talk-header"><button onClick={onHome}><ArrowLeft size={18}/> Home</button><div><Sparkles size={18}/><b>Talk with Devvy</b><span>Local voice companion</span></div><button onClick={reset}><RotateCcw size={16}/> Reset</button></header>
+    <header className="talk-header"><button onClick={onHome}><ArrowLeft size={18}/> Home</button><div><Sparkles size={18}/><b>YUKTI</b><span>Executive AI butler · your second brain</span></div><button onClick={reset}><RotateCcw size={16}/> Reset</button></header>
     <main className="talk-main">
       {/* Talk holds its conversation in the socket, so there is no old session to resume.
           Showing that turn's answer beside a live session is the honest presentation; staging
@@ -235,6 +287,8 @@ export function TalkScreen({ onHome, initialJobId }: {
           <small>
             Talk keeps each conversation in its live connection only, so this one cannot be
             resumed. Speak or type to start a new session — this answer stays until you do.
+            Anything YUKTI was asked to remember survives regardless; the memory bank is not
+            part of the connection.
           </small>
         </span>
       </div>}
@@ -250,23 +304,43 @@ export function TalkScreen({ onHome, initialJobId }: {
         <button className={`talk-button ${state === 'listening' ? 'recording' : ''}`} disabled={!['idle','listening','error'].includes(state)} onClick={state === 'listening' ? stopListening : beginListening}>{state === 'listening' ? <Square size={21}/> : <Mic size={23}/>}<span>{state === 'listening' ? 'Finish' : 'Talk'}</span></button></Tooltip>
       </section>
       <section className="talk-dialogue">
+        <FacultiesPanel/>
+        {/* What the turn actually drew on, named before the answer rather than after it. A
+            spoken answer sourced from the user's own notes and one invented wholesale sound
+            identical; this is the only thing that tells them apart. */}
+        {(recalled.notes.length > 0 || recalled.memories.length > 0) && <div className="recalled">
+          {recalled.notes.length > 0 && <p>
+            <NotebookPen size={14}/>
+            <span>
+              <b>Read from your notes</b>
+              {recalled.notes.map(path => <code key={path}>{path}</code>)}
+            </span>
+          </p>}
+          {recalled.memories.length > 0 && <p>
+            <Brain size={14}/>
+            <span>
+              <b>Recalled</b>
+              {recalled.memories.map(item => <small key={item}>{item}</small>)}
+            </span>
+          </p>}
+        </div>}
         <EvidencePanel events={runEvents} compact title="Conversation evidence"/>
-        {(transcript || response) && <div className="voice-conversation">{transcript && <div className="voice-turn user-turn"><small>YOU SAID</small><p>{transcript}</p></div>}{response && <div className="voice-turn agent-turn"><small>DEVVY</small><p><LinkedText text={response}/></p></div>}</div>}
+        {(transcript || response) && <div className="voice-conversation">{transcript && <div className="voice-turn user-turn"><small>YOU SAID</small><p>{transcript}</p></div>}{response && <div className="voice-turn agent-turn"><small>YUKTI</small><p><LinkedText text={response}/></p></div>}</div>}
         {videoUrl && <div className="visual-player"><div><Video size={16}/> Visual explanation</div><video src={videoUrl} controls autoPlay/></div>}
-        {imageUrl && <div className="talk-image"><div><Image size={16}/> Generated image</div><img src={imageUrl} alt="Generated by Devvy"/></div>}
+        {imageUrl && <div className="talk-image"><div><Image size={16}/> Generated image</div><img src={imageUrl} alt="Generated by YUKTI"/></div>}
         {error && <div className="talk-error">{error}</div>}
       </section>
     </main>
     <form className="talk-composer" onSubmit={submitText}>
       {attachments.length > 0 && <div className="talk-attachments">{attachments.map(item => <span key={item.id}><FileText size={13}/>{item.name}<button type="button" aria-label={`Remove ${item.name}`} onClick={() => setAttachments(current => current.filter(x => x.id !== item.id))}><X size={12}/></button></span>)}</div>}
-      <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Message Devvy…" rows={1} disabled={state === 'thinking'} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }}/>
+      <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Message YUKTI…" rows={1} disabled={state === 'thinking'} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }}/>
       <div className="talk-composer-actions">
         <input ref={fileRef} hidden type="file" multiple accept=".pdf,.docx,.txt,.md,.py,.js,.ts,.json,.csv" onChange={e => pickFiles(e.target.files)}/>
         <button type="button" className="talk-tool" title="Attach documents" aria-label="Attach documents" disabled={uploading || state === 'thinking'} onClick={() => fileRef.current?.click()}><Paperclip size={18}/></button>
         <div className="talk-modes" role="group" aria-label="Response mode">{modes.map(item => <button type="button" key={item.id} className={mode === item.id ? 'selected' : ''} aria-pressed={mode === item.id} onClick={() => setMode(item.id)}><item.icon size={14}/><span>{item.label}</span></button>)}</div>
         <span className="talk-grow"/><button className="talk-send" aria-label="Send message" disabled={!text.trim() || uploading || state === 'thinking' || state === 'connecting'}><Send size={17}/></button>
       </div>
-      <small>{uploading ? 'Uploading securely to the local workspace…' : 'Devvy runs locally and can make mistakes. Verify important information.'}</small>
+      <small>{uploading ? 'Uploading securely to the local workspace…' : 'YUKTI runs entirely on this machine and can make mistakes. Verify anything that matters.'}</small>
     </form>
   </div>
 }

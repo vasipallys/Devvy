@@ -73,7 +73,7 @@ def init_db() -> None:
     ``create_all`` would leave them untouched — including any column added since.
     """
     # Imported here so every table is registered on SQLModel.metadata before create_all.
-    from backend import auth, estimate_history, jobs  # noqa: F401
+    from backend import auth, estimate_history, jobs, second_brain  # noqa: F401
     from backend.migrations import run_migrations
 
     SQLModel.metadata.create_all(engine)

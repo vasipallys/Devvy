@@ -384,17 +384,17 @@
       <span>harness <b>EAGLE-1.0</b></span>
       <span>pipeline <b>agentic-local-1.0</b></span>
       <span>rubric <b>3.2</b></span>
-      <span>25 stages · 22 events</span>
+      <span>30 stages · 27 without a repository</span>
     </div>
   </header>
 
   <nav class="rail">
     <h2>Pipeline</h2>
     <ol>
-      <li class="p1"><a href="#evidence">Evidence <em>6</em></a></li>
-      <li class="p2"><a href="#independent">Independent assessment <em>3</em></a></li>
+      <li class="p1"><a href="#evidence">Evidence <em>8</em></a></li>
+      <li class="p2"><a href="#independent">Independent assessment <em>4</em></a></li>
       <li class="p3"><a href="#challenge">Challenge <em>6</em></a></li>
-      <li class="p4"><a href="#calculation">Calculation <em>9</em></a></li>
+      <li class="p4"><a href="#calculation">Calculation <em>11</em></a></li>
       <li class="p5"><a href="#decision">Your decision <em>1</em></a></li>
     </ol>
     <h2>Reference</h2>
@@ -433,12 +433,12 @@
         <li style="--c: var(--lime)">
           <span class="idx">01</span><b>Evidence</b>
           <span class="what">Freeze the problem, gather only what can be known</span>
-          <em>6 stages</em>
+          <em>8 stages</em>
         </li>
         <li style="--c: #4a86cd">
           <span class="idx">02</span><b>Independent assessment</b>
           <span class="what">Score sixteen factors, twice, blind</span>
-          <em>3 stages</em>
+          <em>4 stages</em>
         </li>
         <li style="--c: var(--warn)">
           <span class="idx">03</span><b>Challenge</b>
@@ -448,7 +448,7 @@
         <li style="--c: var(--moss)">
           <span class="idx">04</span><b>Calculation</b>
           <span class="what">Fixed arithmetic and gates, in code</span>
-          <em>9 stages</em>
+          <em>11 stages</em>
         </li>
         <li style="--c: var(--refuse)">
           <span class="idx">05</span><b>Your decision</b>
@@ -459,22 +459,40 @@
 
       <aside class="note">
         <p>
-          25 checklist steps driven by 22 emitted events: three steps come from one
-          <code>calculate</code> event and two from one <code>policy_gate</code> event, because
-          the arithmetic is indivisible but reads better as its parts.
+          30 checklist steps, of which 27 apply to a story estimated without a repository. Three
+          steps come from one <code>calculate</code> event and two from one
+          <code>policy_gate</code> event, because the arithmetic is indivisible but reads better
+          as its parts.
         </p>
         <p>
-          Not every stage runs on every story. <code>blind_review</code> and
-          <code>eagle_debate</code> are conditional, and the checklist marks the <em>first
-          outstanding</em> step rather than counting positions — a skipped stage must not stall
-          the display.
+          Not every stage runs on every story. <code>blind_review</code>,
+          <code>focus_pass</code> and <code>eagle_debate</code> are conditional, and the checklist
+          marks the <em>first outstanding</em> step rather than counting positions — a skipped
+          stage must not stall the display.
+        </p>
+        <p>
+          The three repository stages are conditional on something the <em>reader</em> controls,
+          so they are handled differently again: with no workspace they are <strong
+          class="lead">removed from the checklist</strong> rather than shown greyed. A step that
+          cannot complete on this run reads as a stall, and three of them near the top read as a
+          broken pipeline — which is exactly the impression forming while someone waits two
+          minutes on a CPU model. Removed, the counts stay true: <em>12 of 27</em> means twelve
+          of the twenty-seven that apply.
+        </p>
+        <p>
+          A checklist step with no stage behind it is the same failure with none of the excuse,
+          and it shipped once: <code>requirements</code> had a label, a tooltip and a narrator,
+          and nothing on the server ever sent the event, so it sat pending on every run. The
+          regression suite now reads <code>NODE_MAP</code> out of the screen and the emitted
+          stage names out of the service, and fails if either list contains something the other
+          does not.
         </p>
       </aside>
     </section>
 
     <!-- ============================ PHASE 1 ============================ -->
     <section id="evidence" style="--phase: var(--lime)">
-      <h2 class="phase"><span class="n">01</span> Evidence <span class="count">6 stages</span></h2>
+      <h2 class="phase"><span class="n">01</span> Evidence <span class="count">8 stages</span></h2>
       <p class="phase-lede">Freeze the problem, then gather only what can be known about it.</p>
 
       <article class="stage">
@@ -498,6 +516,52 @@
           The hash is <code>sha256</code> over the whole contract body. <strong class="lead">Two
           runs with the same hash were given the same problem.</strong> It is the first thing to
           check when two estimates disagree.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">requirements</code> Read the requirements from the story <span class="tag det">deterministic</span></h3>
+        <p class="runs"><b>engineering.analyse_requirement()</b></p>
+        <p>
+          Decomposes the story into numbered <code>FR-nnn</code> and <code>NFR-nnn</code>
+          statements, each quoting the text it came from — a requirement with no source is an
+          invention. Acceptance criteria attach to the requirement they verify. Anything the
+          story did not define becomes an explicit <code>ASSUMPTION-nnn</code> or an open
+          question, never a silent decision.
+        </p>
+        <p>
+          This is what turns "the story is unclear" into a named gap: <em>the story does not
+          define behaviour for partial failure</em> is actionable in a way that a low clarity
+          score is not.
+        </p>
+        <p>
+          It is the <strong class="lead">same function code generation works from</strong>, which
+          is the point of it being here. Estimation and the builder read the same story, and
+          while the builder worked from numbered requirements and the estimator from one block of
+          prose, a factor could be scored against a requirement nobody ever wrote down.
+        </p>
+        <p>
+          The story <em>title</em> is deliberately not part of the objective. It is a label, and
+          read as a requirement it becomes an <code>FR-001</code> that restates the story and that
+          nothing can implement distinctly — one permanently uncovered row in the traceability
+          matrix, on every story. It is used only when there is no story text to read instead.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">repo_intelligence</code> Read the repository <span class="tag det">deterministic</span> <span class="tag cond">needs a workspace</span></h3>
+        <p class="runs"><b>repo_evidence.analyse_repository()</b></p>
+        <p>
+          Declared stack read from manifests rather than guessed from file extensions, thirteen
+          structural signals recorded present <strong class="lead">and absent</strong>, a change
+          surface ranked on the story's own words, and the tests that sit beside it. Runs off the
+          event loop; it is file-system bound and touches no model.
+        </p>
+        <p>
+          Absence is the half that earns its place. A repository with no migration tooling makes
+          a data-model change cost more than one that has it, and that is a fact about this
+          codebase — not a guess about this story. Without a repository the first rung of the §6
+          ladder is missing entirely, and every unanswered question is priced as unbounded.
         </p>
       </article>
 
@@ -588,7 +652,7 @@
 
     <!-- ============================ PHASE 2 ============================ -->
     <section id="independent" style="--phase: #4a86cd">
-      <h2 class="phase"><span class="n">02</span> Independent assessment <span class="count">3 stages</span></h2>
+      <h2 class="phase"><span class="n">02</span> Independent assessment <span class="count">4 stages</span></h2>
       <p class="phase-lede">Score the sixteen factors, twice, without either pass seeing the other.</p>
 
       <article class="stage">
@@ -614,6 +678,32 @@
           Whatever the model does not score is filled by keyword heuristics and labelled
           <code>heuristic</code> — never presented as model judgement.
         </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">focus_pass</code> Ask the model the simpler question <span class="tag model">model call</span> <span class="tag cond">conditional</span></h3>
+        <p class="runs"><b>estimate_code.build_focus_prompt()</b> · runs when the full scorecard fails validation</p>
+        <p>
+          Sixteen <code>{score, why}</code> objects in one response is where a 1B model degrades:
+          it holds the shape and loses the content, answering "2" sixteen times. Sixteen factors
+          at 2 is a base sum of 32 — the middle of one band — so
+          <strong class="lead">every story scored that way returns 5 points</strong>. That is
+          rejected as carrying no information.
+        </p>
+        <p>
+          Rather than dropping the model entirely, it is asked three recall questions: which
+          factors does this story touch, which are largest, which did it leave unanswered. Three
+          short lists of ids, no rubric to hold and no numbers to compute. Code then maps the
+          reading onto scores — untouched 1, involved 3, largest 4, unanswered 4, both 5.
+        </p>
+        <aside class="note sharp">
+          <p>
+            Dropping straight to keyword heuristics was the first fix, and it was worse than the
+            bug: it produced an estimator whose every number came from a keyword table, with the
+            model contributing nothing at all. The failure was the question's shape, not the
+            model's reading.
+          </p>
+        </aside>
       </article>
 
       <article class="stage">
@@ -801,7 +891,7 @@
 
     <!-- ============================ PHASE 4 ============================ -->
     <section id="calculation" style="--phase: var(--moss)">
-      <h2 class="phase"><span class="n">04</span> Calculation <span class="count">9 stages</span></h2>
+      <h2 class="phase"><span class="n">04</span> Calculation <span class="count">11 stages</span></h2>
       <p class="phase-lede">Fixed arithmetic and gates, in code, replayable by hand.</p>
 
       <article class="stage">
@@ -884,6 +974,21 @@
       </article>
 
       <article class="stage">
+        <h3><code class="id">repo_answers</code> Replace inferred scores with repository facts <span class="tag det">deterministic</span> <span class="tag cond">needs a workspace</span></h3>
+        <p>
+          Where the repository can answer a factor the story left open, the inferred score is
+          replaced by a fact and relabelled <code>repository</code> — a third provenance
+          beside <code>model</code> and <code>heuristic</code>. Scores the model grounded in the
+          story itself are left untouched.
+        </p>
+        <p>
+          A factor the story never mentions is not automatically unknown.
+          <strong class="lead">A score that came from a file beats one that came from
+          silence</strong>, and reading the codebase is the only way to tell the two apart.
+        </p>
+      </article>
+
+      <article class="stage">
         <h3><code class="id">eagle_validation</code> Validation and spike gate <span class="tag det">deterministic</span></h3>
         <p class="runs"><b>eagle.validate()</b> · 10 rules, each reporting whether it fired</p>
         <ol class="numbered">
@@ -935,6 +1040,23 @@
           Returns the closest matches, their differences, an implied range, and whether this story
           reads as smaller, similar or larger. Below 50% similarity it says so and declines to
           anchor. With no history it says there is no anchor rather than inventing one.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">change_plan</code> Name what would actually change <span class="tag model">model call</span> <span class="tag cond">needs a workspace</span></h3>
+        <p>
+          The model is <strong class="lead">never asked to name a file</strong>. It is shown the
+          ranked change surface and asked what changes inside each; every path it returns is then
+          checked against disk. An existing file becomes <code>modify</code>, a new file inside an
+          existing directory becomes <code>create</code>, and anything else is rejected and
+          reported as rejected.
+        </p>
+        <p>
+          <b>engineering.assess_necessity()</b> then applies <em>prove before modify</em>: an edit
+          that cannot name the requirement it serves is dropped, and the files that were reviewed
+          and deliberately left alone are listed. Relatedness is not necessity — it is how a
+          two-line change becomes a diff nobody reviews.
         </p>
       </article>
 

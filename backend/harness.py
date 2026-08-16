@@ -224,3 +224,54 @@ GROUNDING_CONTRACT_BRIEF = (
     "that would have to be added to the story. Act as a strict extractor: process only the "
     "given words and numbers."
 )
+
+#: The same anti-fabrication rules, worded for a workflow that *writes* code rather than reads
+#: it.
+#:
+#: The extraction wording cannot simply be pasted here. "Act as a strict extractor, process only
+#: the given words and numbers" instructs a model not to produce anything that was not already
+#: in its input — which is the correct stance for scoring a story and the wrong one for a
+#: workflow whose entire job is to emit a file that did not exist a moment ago. Told that, a
+#: code generator returns the objective back.
+#:
+#: What carries across is every rule about *invention*: use what was stated, do not add
+#: requirements nobody asked for, say plainly when the information needed is missing rather
+#: than filling the gap with a plausible default, and never name a path that is not real. Those
+#: are the rules that stop fabrication; the extractor stance is not one of them.
+GROUNDING_CONTRACT_BUILD = (
+    "Use only the facts directly stated in the objective, the acceptance criteria and the "
+    "retrieved evidence above. Do not use outside facts or assumptions about how this is "
+    "usually done. Do not guess, extrapolate, or add requirements, endpoints, tables, screens, "
+    "libraries, configuration or behaviour that were not asked for — a feature nobody requested "
+    "is a defect, however well written. Every path you name must be a file listed in the "
+    "repository map, or a new file inside a directory that appears there; do not invent a "
+    f'location. If you need information the context does not contain, say exactly: '
+    f'"{NO_INFORMATION}" in your summary and name the specific fact that would have to be '
+    "specified, rather than choosing a plausible default and building on it."
+)
+
+
+#: The engineering discipline that governs a change to an existing repository.
+#:
+#: Distinct from the grounding contract, which is about not inventing facts. This is about not
+#: making unnecessary changes — a different failure, and on a real codebase a more expensive
+#: one. A model asked to satisfy a requirement will happily reformat, rename and "improve"
+#: everything it reads on the way, and the resulting diff is unreviewable long before it is
+#: wrong.
+#:
+#: The rule that does the work is the last one. Relatedness is not necessity: a file being
+#: about the same subject as the requirement is not a reason to modify it.
+ENGINEERING_CONTRACT = (
+    "Work to these engineering rules.\n"
+    "- Analyse before coding. Understand what already exists before proposing anything new.\n"
+    "- Reuse before creating. Search the supplied code for existing equivalent functionality, "
+    "and follow the patterns, naming and layering already in the repository.\n"
+    "- Make the minimum necessary change. Do not redesign unrelated code, do not introduce "
+    "abstractions nothing asks for, and do not reformat what you are not otherwise changing.\n"
+    "- Preserve backward compatibility unless the requirement explicitly asks otherwise. "
+    "Existing callers and existing data must keep working.\n"
+    "- Every modification must state which requirement makes it necessary. A file being "
+    "related to the subject is not a reason to modify it — prove before you modify.\n"
+    "- Never claim a build or a test passed. Nothing here is executed; say \"NOT EXECUTED\" "
+    "for anything you did not observe, and \"NOT VERIFIED\" for anything you could not confirm."
+)

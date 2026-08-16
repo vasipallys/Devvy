@@ -4,6 +4,7 @@ import {
   FolderOpen, History, LoaderCircle, Maximize2, Send, ShieldCheck, Sparkles, Square, Wrench, X,
 } from 'lucide-react'
 import { api, attachToJob } from './api'
+import { EngineeringPanel } from './EngineeringPanel'
 import { DockPane, DockToggle, useDock } from './Dock'
 import { narrate } from './evidenceNarration'
 import { SystemStatusChip } from './SystemStatusChip'
@@ -307,6 +308,11 @@ function RunResult({ turn, onApply, applying, openDiff, onOpenDiff }: {
     {preview.plan?.length > 0 && <ol className="chat-plan">
       {preview.plan.map(step => <li key={step}>{step}</li>)}
     </ol>}
+
+    {/* The engineering account sits before the diff: which requirement made each file
+        necessary, and what was deliberately left alone, are what decide whether the diff is
+        worth reading at all. */}
+    {preview.engineering && <EngineeringPanel report={preview.engineering} />}
 
     {preview.deploy_steps && preview.deploy_steps.length > 0 && <details className="chat-deploy">
       <summary>How to deploy this ({preview.deploy_steps.length} steps)</summary>

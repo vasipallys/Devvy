@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     #: and outputs of a run, not a library: without a sweep the data directory is the one
     #: part of the application that grows without bound for as long as it is used.
     upload_retention_days: int = 7
+    #: How YUKTI addresses the user by default. A stated preference ("call me Vikram") is
+    #: kept in the memory bank and always wins over this.
+    yukti_address: str = "sir"
+    #: The user's notes directory. Empty disables the second brain entirely rather than
+    #: guessing at a location — a butler rifling through directories nobody pointed him at is
+    #: not a feature.
+    yukti_vault_root: str = ""
     whisper_model: str = "base.en"
     whisper_compute_type: str = "int8"
     tts_rate: int = 170

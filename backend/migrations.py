@@ -104,6 +104,32 @@ def _add_multi_user_ownership(connection: Connection) -> None:
             )
 
 
+def _add_yukti_memory(connection: Connection) -> None:
+    """v4 — YUKTI's memory bank.
+
+    `create_all` builds this for a fresh database from SQLModel metadata; an existing one
+    needs the table created explicitly. Written as plain SQL rather than by importing the
+    model, so a later change to `Memory` cannot retroactively alter what v4 did.
+    """
+    if "memory" in _tables(connection):
+        return
+    connection.execute(text("""
+        CREATE TABLE memory (
+            id VARCHAR NOT NULL PRIMARY KEY,
+            owner_id VARCHAR,
+            kind VARCHAR NOT NULL DEFAULT 'fact',
+            subject VARCHAR NOT NULL DEFAULT '',
+            content VARCHAR NOT NULL DEFAULT '',
+            source_text VARCHAR NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL,
+            recalled INTEGER NOT NULL DEFAULT 0,
+            tags JSON
+        )
+    """))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_memory_owner_id ON memory (owner_id)"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_memory_kind ON memory (kind)"))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -119,6 +145,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=3,
         description="Users, sessions, invitations, sharing, and per-resource ownership",
         apply=_add_multi_user_ownership,
+    ),
+    Migration(
+        version=4,
+        description="YUKTI's memory bank: what the user asked the assistant to remember",
+        apply=_add_yukti_memory,
     ),
 )
 

@@ -2,7 +2,7 @@
 
 **Document status:** As-built implementation and reproducible rebuild specification
 **Application version:** 0.1.0
-**Last verified against source:** 2026-08-09
+**Last verified against source:** 2026-08-10
 **Repository:** `Devvy`
 **Product name:** Devvy — Evidence-Based Development
 
@@ -168,12 +168,16 @@ Backend modules and their responsibility:
 | --- | --- |
 | `api.py` | Composition root, HTTP and WebSocket surface |
 | `model.py` | The single shared `GemmaRuntime` |
-| `agent.py` / `agent_graph.py` | Chat and Talk LangGraph agents |
+| `agent.py` / `agent_graph.py` | Chat and Talk (YUKTI) LangGraph agents |
+| `yukti.py` | YUKTI's persona, capability register, and voice shaping |
+| `second_brain.py` | The notes vault (read-only) and the memory bank |
 | `smart_code.py` | Repository-aware preview and apply |
 | `estimate_code.py` | Story estimation: prompt, scorecard assembly, heuristic fallback |
 | `estimation_framework.py` | The deterministic v2 calculator — **owns every number** |
 | `estimation_pipeline.py` | Readiness, routing, comparison, arbitration, consistency audit |
 | `eagle.py` | EAGLE governance: contract, blackboard, reviewers, debate, validation, spike gate, references, snapshot, failure attribution |
+| `repo_evidence.py` | Repository intelligence: stack, signals, change surface, factor findings, verified change plan |
+| `engineering.py` | Requirement decomposition, the change-necessity gate, traceability, final decision |
 | `estimate_history.py` | Durable estimates, decisions, calibration stats, reference corpus |
 | `harness.py` | Context assembly, the grounding contract, the run ledger |
 | `structured_output.py` | The bounded repair loop and echo detection |
@@ -435,6 +439,52 @@ model that ignored the contract from one that ran out of room, and the two need 
 A run cut at the token ceiling MUST NOT have its truncated output replayed as a correction:
 that invites the same overflow. Ask for something smaller instead.
 
+### 4.6.1 Repository intelligence
+
+`backend/repo_evidence.py` reads a workspace when one is supplied, so the first rung of the
+missing-information ladder — *can the repository answer?* — is available before uncertainty is
+raised. Deterministic: same repository plus same story yields the same evidence.
+
+It produces the declared stack from manifests, thirteen structural signals (present **and**
+absent), a change surface ranked on the story's own words, and the tests sitting beside it.
+`factor_findings` then answers the factors the repository can genuinely speak to — existing
+migrations, tests beside the change, a CI pipeline — replacing an inferred score with a fact and
+labelling it `repository`, a third provenance alongside `model` and `heuristic`.
+
+Two rules are load-bearing:
+
+**Only real paths.** The model is never asked to name a file. It is shown a ranked candidate
+list and may only describe *what changes* in a file that exists, or propose a new file in a
+directory that exists. `validate_paths` discards anything else and **reports the rejection** —
+a model shown a repository listing will name `src/services/RiskClassifier.java` for a repository
+with no `src/services`, and that path is then read as a finding by someone who was not in the room.
+
+**Claims match what was inspected.** Signals are read from file and directory *names*, not file
+contents, so every reason says "no file or directory in the repository is named for X" rather
+than "no X exists". Overclaiming on absence is the same defect as fabricating on presence.
+
+### 4.6.2 Engineering discipline
+
+`backend/engineering.py` implements the parts of the enterprise pipeline specification that are
+decidable from evidence. The specification describes twenty-three agents in one prompt; a 1B
+model cannot execute that, and would return a plausible transcript of a pipeline that never ran
+— the exact failure its own anti-hallucination rules exist to prevent. So the discipline is
+deterministic gates, and the model is asked only what it can answer.
+
+| Rule | Enforcement |
+| --- | --- |
+| Numbered, traceable requirements | `analyse_requirement` — every FR/NFR quotes the text it came from; a requirement with no source is an invention |
+| Missing behaviour is never silently invented | Recorded as `ASSUMPTION-nnn`, visible in the output, overridable by a reader |
+| **Prove before modify** | `assess_necessity` drops any edit that cannot name the requirement it serves |
+| Minimum change is demonstrable | `reviewed_unchanged` reports what was considered and deliberately left alone |
+| Every requirement traces to code and a test | `traceability`, which lists uncovered requirements rather than omitting them |
+| Never claim what was not observed | `NOT_EXECUTED` / `NOT_VERIFIED` as fixed strings |
+
+`final_decision` **cannot return `APPROVED`**. The specification forbids approving without a
+green build; nothing generated here is ever executed; therefore the ceiling is `NEEDS_FIX` and
+the reasoning says why. A judge that approved without seeing a build would be doing the thing
+the rules forbid.
+
 ### 4.7 Grounding contract
 
 Every model-backed workflow — Chat, Talk, Smart Code, Estimate Code — MUST carry the same
@@ -459,9 +509,24 @@ X is split across a line break is not an exact instruction, and a fixed phrase i
 reader can recognise and a test can assert.
 
 `GROUNDING_CONTRACT` is the full form for Chat and Talk. `GROUNDING_CONTRACT_BRIEF` carries the
-same four rules in one paragraph for Estimate Code and Smart Code, whose prompts sit near their
-character budget — every character of policy there costs a character of evidence. Both forms
-MUST contain all four rules; `tests/test_grounding_contract.py` asserts this per workflow.
+same four rules in one paragraph for Estimate Code, whose prompt sits near its character budget
+— every character of policy there costs a character of evidence.
+
+`GROUNDING_CONTRACT_BUILD` carries the same rules to Smart Code, worded for a workflow that
+**writes** code. The extraction wording cannot be pasted there: *"act as a strict extractor,
+process only the given words and numbers"* instructs a model to produce nothing that was not
+already in its input, which is correct for scoring a story and exactly wrong for a workflow
+whose job is to emit a file. What carries across is every rule about invention, plus one Smart
+Code needs: every path must be a file in the repository map, or a new file in a directory that
+appears there.
+
+`ENGINEERING_CONTRACT` accompanies it and governs *unnecessary* change rather than invention —
+a different failure, and on a real codebase a more expensive one. Analyse before coding, reuse
+before creating, minimum necessary change, preserve backward compatibility, every modification
+names its requirement, and never claim a build or test passed.
+
+All forms MUST contain the four grounding rules; `tests/test_grounding_contract.py` asserts this
+per workflow and per call site.
 
 The rationale is specific to the runtime. A 1B model's failure mode is not refusing to answer,
 it is answering anyway: asked about a field the story never mentions it describes a plausible
@@ -728,14 +793,82 @@ safe. Output is written to the generated directory and referenced as `/generated
 
 ---
 
-## 9. Talk specification
+## 9. Talk specification — YUKTI
+
+Talk's assistant is **YUKTI** (Sanskrit: logic, strategy, resourceful means) — an executive AI
+butler and the keeper of the user's second brain. The persona, the capability register and the
+voice shaping live in `backend/yukti.py`; the stores live in `backend/second_brain.py`.
 
 ### 9.1 Graph
 
-`backend/agent_graph.py` `TalkAgentGraph`: `route_visual → (research →)? companion`.
+`backend/agent_graph.py` `TalkAgentGraph`:
+`gate → route_visual → (recall →)? (research →)? companion`.
 
-`route_visual` sets `requires_research` from news/weather/currency terms and `requires_animation`
-from math/visual terms, and MUST also produce a `route_reason` naming the matched phrases.
+`gate` runs before everything and MAY end the turn on its own. `route_visual` sets
+`requires_research` from news/weather/currency terms, `requires_recall` from second-brain terms,
+`requires_briefing` from briefing terms, and `requires_animation` from math/visual terms, and MUST
+also produce a `route_reason` naming the matched phrases.
+
+Recall MUST run before research. What the user already wrote is cheaper, more specific and more
+trustworthy than what the web says, and a turn answerable from their own notes MUST NOT also
+spend a network round trip.
+
+### 9.1.1 The capability register
+
+`yukti.py` `CAPABILITIES` records every faculty and **whether it is actually wired to anything**.
+Five are: the second brain, the memory bank, live web research, attached documents, and visual
+explanations. Four are not: screen vision, calendar, email, and cross-provider model swapping.
+
+A persona that lists faculties the application does not have produces an assistant that claims
+them, and by voice there is nothing for the listener to check against — no URL to open, no panel
+to inspect. So the register is data, not prose, and it governs three things:
+
+1. Every unwired faculty MUST carry the exact sentence YUKTI says instead, written in persona and
+   naming the reason. "I cannot do that" invites a rephrase; "I have no eyes on your screen — I
+   run on a text-only local model" does not.
+2. `gate` MUST refuse an unwired faculty **in code**, before the model sees the turn. A small model
+   instructed not to describe a screen it cannot see will still occasionally describe one.
+3. `GET /api/system/status` MUST publish both halves, and the interface MUST show what is missing
+   as prominently as what is present.
+
+YUKTI MUST NOT claim, simulate or improvise an unwired faculty under any framing.
+
+### 9.1.2 The second brain
+
+Two stores, deliberately separate.
+
+The **notes vault** (`YUKTI_VAULT_ROOT`) is the user's own files. YUKTI reads it and MUST NEVER
+write to it. Search is deterministic term-frequency ranking with the filename weighted heavily;
+dependency and tooling directories are skipped, non-note formats are excluded, traversal outside
+the vault is **refused rather than sanitised**, and the snippet shown MUST centre on the match
+rather than the file's opening. An unconfigured or unreadable vault is reported, never guessed at.
+
+The **memory bank** (`memory` table, migration 4) is YUKTI's own. It is written only on an
+explicit request — "remember that…", "call me…", "from now on…" — never on inference, because a
+memory the user did not state is recalled later with all the authority of one they did. Each entry
+keeps the sentence it came from. A newer statement of the same kind and subject supersedes rather
+than joins. Standing preferences (the chosen form of address, stated preferences) MUST be recalled
+on every turn regardless of term overlap. Memories are per-owner and MUST NOT cross owners.
+
+A second-brain failure MUST NOT end the turn: it is stated to the model as unavailable, and the
+answer says so rather than proceeding as though the notes had been read.
+
+### 9.1.3 Briefing
+
+The briefing protocol covers what exists — outstanding items in the notes and memory bank — and
+MUST state plainly that calendar and mail are not connected. It MUST NOT invent meetings, times or
+messages. A briefing that fabricates a schedule is worse than no briefing: it is a morning planned
+around meetings that do not exist.
+
+### 9.1.4 Voice shaping
+
+Everything YUKTI produces is spoken by a synthesiser, which reads Markdown as punctuation. The
+screen keeps the rich text; **the speaker gets `yukti.speakable()`**, which removes headings,
+emphasis, bullets, tables, rules and inline code, renders a link as its words, reduces a URL to
+its site, names a code block instead of reciting it, drops citation brackets, and repairs the
+spaces that removal leaves in front of punctuation. Shaping MUST be idempotent and MUST leave
+plain prose untouched. `voice_chunks()` splits at sentence boundaries but never after a bare
+number, which is a list marker rather than a sentence end.
 
 ### 9.2 WebSocket protocol
 
@@ -746,12 +879,18 @@ Server → client: `state` (`idle|listening|thinking|speaking|error`), `status`,
 `token`, `heartbeat`, `text_complete`, `agent_event`, `image_ready`, `audio_ready`, `video_ready`,
 `animation_state`, `media_warning`, `reset_complete`, `error`.
 
+Talk turns emit three further agent events: `faculty` when a turn was declined for an unwired
+capability, `second_brain` naming the notes and memories the answer drew on, and `memory` when
+something was stored. The first is how a listener learns why an answer was short; the second is
+the only thing distinguishing an answer sourced from their own notes from one invented wholesale.
+
 Talk modes other than `talk` reuse the Chat agent. Unsupported modes and more than 10 attachments
 MUST raise. Missing attachments MUST raise rather than silently degrading.
 
 ### 9.3 Media
 
-TTS and Manim rendering run after the text response is complete. A media failure MUST emit
+TTS synthesises the **shaped** text, not the raw answer. TTS and Manim rendering run after the
+text response is complete. A media failure MUST emit
 `media_warning` and MUST NOT discard the completed text. Whisper STT, pyttsx3 TTS, and Manim import
 lazily and run outside the event loop — Manim in a subprocess, STT/TTS in executors — so the
 backend works without the optional extras installed. Voice uploads are deleted after transcription.
@@ -1647,6 +1786,17 @@ A stage that legitimately never runs — there is no debate when nothing is disp
 stall the checklist: the live step is the first one still outstanding, not an index into the
 list.
 
+Stages that are conditional on the *reader's own input* MUST be removed from the checklist
+rather than shown outstanding. The three repository stages exist only when a workspace root was
+given, and listing them regardless leaves steps that can never complete near the top of the
+list, which reads as a stalled pipeline. Removed, the totals stay honest — "12 of 27" means
+twelve of the twenty-seven that apply to this run.
+
+Every checklist step MUST be produced by a stage the service actually emits, and every step a
+stage produces MUST appear in the checklist. A step with no stage behind it sits pending on
+every run; a stage whose step is unlisted reports into nothing. The regression suite reads both
+lists from source and fails on either kind of drift.
+
 The UI MUST also show errors, batch result selection with a per-row recommendation chip, a point
 hero with confidence, the Fibonacci scale, JSON download, and a conditional Jira write button.
 
@@ -2106,6 +2256,46 @@ cd frontend; npm run preview                             # serve dist/
     does not stall the checklist.
 98. No stylesheet applies a bare element selector across screens, and every screen sizes itself
     to the window rather than to its content.
+99. A repository, when supplied, answers factors the story left open — existing migrations,
+    tests beside the change surface, a CI pipeline — and the score is labelled `repository`.
+100. Every reported path was found on disk; a proposed path naming a directory that does not
+    exist is discarded and the rejection is reported.
+101. Repository claims state what was inspected: names, not file contents.
+102. A story whose words match no file in the repository raises uncertainty rather than
+    producing a confident change surface.
+103. A scorecard that repeats one middle value across three quarters of the factors is rejected
+    as carrying no information, and the model is asked a simpler question before the pipeline
+    falls back to keyword heuristics.
+104. Requirements are numbered, quote the text they came from, and anything the story did not
+    define is recorded as an assumption or an open question rather than decided silently.
+105. A proposed file change that cannot name the requirement it serves is dropped, and the files
+    reviewed and deliberately left unchanged are reported.
+106. Every requirement appears in the traceability matrix, including those nothing implements.
+107. The final decision never returns APPROVED while the build and tests are unexecuted, and
+    reports both as NOT EXECUTED rather than as passing.
+108. Every pipeline stage reports what it found in this story, not only what the stage is for,
+    and no checklist step repeats another step's sentence.
+109. Estimation and code generation decompose the story through the same requirement analysis,
+    so a factor cannot be scored against a requirement that was never written down. The story
+    title is a label and is not read as a requirement unless there is no story text.
+110. Every checklist step is produced by a stage the service emits, and every step a stage
+    produces appears in the checklist; neither list may contain what the other does not.
+111. Stages conditional on the reader supplying a workspace are removed from the checklist when
+    no workspace was given, rather than shown as outstanding steps that cannot complete.
+112. YUKTI never claims a faculty the application does not have. A request to read the screen,
+    the calendar, or the mailbox, or to switch to another provider's model, is declined in code
+    before generation, in persona, naming the reason.
+113. Every unwired faculty is published by the API and shown in the interface, carrying the exact
+    sentence YUKTI says when asked — what a user reads there is what they will hear.
+114. Spoken output carries no Markdown: no emphasis markers, headings, bullets, tables, code
+    fences or raw URLs reach the speech synthesiser, and shaping is idempotent.
+115. The notes vault is read-only and refuses traversal outside its root rather than sanitising
+    the path; an unconfigured or unreadable vault is reported rather than guessed at.
+116. Nothing enters the memory bank without an explicit request to remember it, every memory
+    keeps the sentence it came from, a newer statement supersedes the older one, and memories
+    never cross owners.
+117. A briefing states that calendar and mail are not connected and invents no meetings, times
+    or messages.
 
 ### 15.2 Regression suite
 
@@ -2126,6 +2316,9 @@ that either is fixed.
 | `test_migrations.py` | An existing database gains columns and keeps its rows |
 | `test_estimate_history.py` | History outlives its job; aggregates computed in SQL |
 | `test_estimation_framework.py` | The four published §12 walkthroughs, and ledger reconciliation |
-| `test_estimation_spread.py` | The estimator can tell stories apart; the scale's floor is reachable; silence is read against specificity and says so in the reason |
+| `test_yukti.py` | The register states both halves; unwired faculties are refused in code and answerable questions are not; spoken output carries no markup and shaping is idempotent; the vault skips tooling directories, ranks filenames, and refuses traversal; the memory bank stores only what was asked for, keeps provenance, supersedes, and never crosses owners |
+| `test_estimation_spread.py` | The estimator can tell stories apart; the scale's floor is reachable; silence is read against specificity and says so in the reason; every stage's event carries the story's own material; the checklist and the emitted stage list have not drifted apart |
 | `test_eagle.py` | Contract immutability and hashing; blackboard confidence; median aggregation; the spread rules; the three reviewers and their six required fields; bounded debate; the ten validation rules; the spike gate; reference similarity; snapshot and failure attribution |
-| `test_grounding_contract.py` | All four grounding rules reach every model-backed workflow, in both the full and brief forms |
+| `test_grounding_contract.py` | All four grounding rules reach every model-backed workflow, in the full, brief and build forms, per call site |
+| `test_repo_evidence.py` | Stack read from manifests; signals present and absent; change surface ranked on the story's words; repository answers factors; invented paths rejected; determinism |
+| `test_engineering.py` | Numbered requirements with sources; assumptions recorded not decided; prove-before-modify drops unjustified edits; reviewed-unchanged reported; traceability lists uncovered requirements; the decision never claims an unexecuted build |

@@ -39,6 +39,40 @@ const verb = (n: number, singular: string, plural_: string) => (n === 1 ? singul
 const text = (value: unknown): string =>
   typeof value === 'string' && value.trim() && value !== 'none' ? value.trim() : ''
 
+/**
+ * The story's own material, appended under the sentence that explains the stage.
+ *
+ * A stage that says what it is *for* tells the reader something that was equally true before
+ * they typed anything. What earns its place is what this stage found in *this* story — the
+ * criteria it froze, the checks that came back unready, the rules that fired. Every stage
+ * below appends through `detail`, so the shape is identical throughout.
+ */
+/** One evidence item as a phrase.
+ *
+ *  Structured evidence is the norm, not the exception — a numbered requirement arrives as
+ *  `{id, statement, source}`, an assumption as `{id, about, assumed, because}`. Filtering to
+ *  strings dropped every one of them, leaving the heading empty and the reader with the
+ *  generic sentence these details exist to replace. */
+const phrase = (item: unknown): string => {
+  if (typeof item === 'string') return item.trim()
+  if (!item || typeof item !== 'object') return ''
+  const row = item as Record<string, unknown>
+  const at = (key: string) => typeof row[key] === 'string' ? (row[key] as string).trim() : ''
+  const body = ['statement', 'assumed', 'label', 'name', 'why', 'reason', 'path', 'text']
+    .map(at).find(Boolean) ?? ''
+  const about = at('about')
+  return [at('id'), about && body ? `${about}: ${body}` : about || body]
+    .filter(Boolean).join(' ').trim()
+}
+
+const detail = (heading: string, value: unknown, limit = 6): string => {
+  const items = Array.isArray(value) ? value.map(phrase).filter(Boolean) : []
+  if (!items.length) return ''
+  const shown = items.slice(0, limit)
+  const rest = items.length - shown.length
+  return `\n\n${heading} — ${shown.join('   ')}${rest > 0 ? `   (+${rest} more)` : ''}`
+}
+
 const list = (value: unknown, limit = 3): string => {
   if (!Array.isArray(value) || !value.length) return ''
   const shown = value.slice(0, limit).map(String)
@@ -147,11 +181,19 @@ const NARRATION: Record<
   generate: (evidence, status) => {
     if (status === 'running') {
       const attempt = num(evidence.attempt)
-      return attempt && attempt > 1
-        ? `Asking the model again (attempt ${attempt} of ${num(evidence.max_attempts) ?? 2}) after `
-          + 'its previous answer did not fit the required shape.'
-        : 'Asking the local model for its answer in a fixed JSON shape. On a CPU this is the slow '
-          + 'part of the run — several minutes is normal, and it is not stuck.'
+      if (attempt && attempt > 1) {
+        return `Asking the model again (attempt ${attempt} of ${num(evidence.max_attempts) ?? 2}) `
+          + 'after its previous answer did not fit the required shape.'
+      }
+      // Chat and Talk share this stage name with the structured workflows but ask for nothing
+      // of the sort: they stream free-form prose. Telling a voice user their spoken answer is
+      // being requested "in a fixed JSON shape" describes a different product.
+      return evidence.attempt === undefined
+        ? 'Composing the answer, token by token, from the evidence gathered above. On a CPU '
+          + 'model this is the slow part of the turn — a minute or two is normal, and it is not '
+          + 'stuck.'
+        : 'Asking the local model for its answer in a fixed JSON shape. On a CPU this is the '
+          + 'slow part of the run — several minutes is normal, and it is not stuck.'
     }
     if (status === 'validated') {
       return 'The model returned output matching the required shape, so no repair was needed.'
@@ -211,6 +253,34 @@ const NARRATION: Record<
       ? 'No backups were needed — every file was new.'
       : `The previous versions were copied to ${String(evidence.backup)} first.`}`,
 
+  // -- YUKTI (Talk) -----------------------------------------------------------------------
+
+  faculty: (evidence, _status, event) =>
+    'This turn asked for something YUKTI is not wired to. It was declined in code, before the '
+    + 'model saw the question — a small model told not to describe a screen it cannot see will '
+    + 'still occasionally describe one, and spoken aloud there is nothing for you to check it '
+    + 'against.'
+    + detail('Said instead', [String(event.detail ?? '')])
+    + detail('Connected', evidence.connected, 8)
+    + detail('Not connected', evidence.not_connected, 8),
+
+  second_brain: evidence => {
+    const notes = count(evidence.notes) ?? 0
+    const memories = count(evidence.memories) ?? 0
+    return `Read your own material before answering: ${plural(notes, 'note')} and `
+      + `${plural(memories, 'remembered fact')}. Where a note and a web result disagree about `
+      + 'your project, the note wins — it is yours, and it is specific.'
+      + detail('Notes', evidence.notes, 5)
+      + detail('Matched on', evidence.matched_terms, 8)
+      + detail('Recalled', evidence.memories, 5)
+  },
+
+  memory: (evidence, _status, event) =>
+    'Stored this because you asked for it in so many words. Nothing is inferred into the '
+    + 'memory bank: a memory you did not state would be recalled months later with all the '
+    + 'authority of something you did.'
+    + detail('Remembered', [String(evidence.content ?? event.detail ?? '')]),
+
   // -- Chat and Talk ------------------------------------------------------------------
   context: evidence => {
     const history = count(evidence.history_messages) ?? 0
@@ -257,28 +327,44 @@ const NARRATION: Record<
     + `them) and fingerprinted it, so the same story always produces the same starting point. `
     + `${evidence.untrusted_instructions_detected
       ? 'Text that looked like instructions was found in the story and neutralised.'
-      : 'Nothing in the story text tried to give Devvy instructions.'}`,
+      : 'Nothing in the story text tried to give Devvy instructions.'}`
+    + detail('Not supplied', evidence.missing_fields),
 
   readiness: evidence =>
     `Checked whether the story is ready to estimate at all: ${plural(count(evidence.checks) ?? 0, 'check')}, `
     + `${plural(count(evidence.assumptions) ?? 0, 'assumption')} recorded, and `
-    + `${plural(count(evidence.questions) ?? 0, 'open question')} worth asking before committing.`,
+    + `${plural(count(evidence.questions) ?? 0, 'open question')} worth asking before committing.`
+    + detail('Not ready', Array.isArray(evidence.unready)
+      ? (evidence.unready as { area: string; status: string; detail: string }[])
+          .map(item => `${item.area} (${item.status}): ${item.detail}`)
+      : [])
+    + detail('Worth asking', evidence.questions),
 
-  specialist_routing: evidence =>
-    `Routed the story to ${plural(count(evidence.specialists) ?? 0, 'specialist lens', 'specialist lenses')}`
-    + `${list(evidence.specialists) ? ` (${list(evidence.specialists)})` : ''}, chosen from what the `
-    + 'story actually involves rather than applied to every story alike.',
+  specialist_routing: evidence => {
+    const roles = Array.isArray(evidence.roles)
+      ? (evidence.roles as { role: string; owns: string[]; why: string }[]) : []
+    return `Routed the story to `
+      + plural(count(evidence.specialists) ?? 0, 'specialist lens', 'specialist lenses')
+      + ', chosen from what the story actually involves rather than applied to every '
+      + 'story alike.'
+      + (roles.length
+        ? `\n\nRoles — `
+          + roles.map(item => `${item.role} owns ${item.owns.join(' and ')}`).join('   ')
+        : '')
+  },
 
   assemble_context: evidence =>
     `Bounded the story evidence to ${num(evidence.characters)?.toLocaleString() ?? '0'} characters `
     + `from ${plural(count(evidence.sources) ?? 0, 'source')}`
     + `${evidence.truncated ? ', trimming what did not fit' : ''}. `
-    + `${count(evidence.untrusted_sources) ? 'Third-party text is marked untrusted.' : ''}`,
+    + `${count(evidence.untrusted_sources) ? 'Third-party text is marked untrusted.' : ''}`
+    + detail('Included', evidence.included),
 
   declare_stack: evidence =>
     `Loaded the calibration for the declared stack — maturity ${String(evidence.maturity ?? '?')}, `
     + `team experience ${String(evidence.team_experience ?? '?')} of 5. The same work on a different `
-    + 'stack is deliberately a different number.',
+    + 'stack is deliberately a different number.'
+    + detail('Anchors', evidence.anchors),
 
   primary_estimate: (evidence, status) => {
     if (status === 'running') return undefined  // the generate narration covers the attempt
@@ -288,12 +374,15 @@ const NARRATION: Record<
       + `${filled ? `, and the ${filled} it skipped ${verb(filled, 'was', 'were')} filled from `
         + 'keyword heuristics and labelled as such' : ''}. `
       + 'It is never asked for the point value — that is arithmetic, not judgement.'
+      + detail('Cross-check', num(evidence.point_cross_check)
+        ? [`the model's own reading maps to ${num(evidence.point_cross_check)} points`] : [])
   },
 
   specialist_analysis: evidence =>
     `${plural(count(evidence.lenses) ?? 0, 'specialist lens', 'specialist lenses')} examined the `
     + `evidence, raising ${plural(count(evidence.material_risks) ?? 0, 'material risk')} and `
-    + `${plural(count(evidence.open_questions) ?? 0, 'open question')}.`,
+    + `${plural(count(evidence.open_questions) ?? 0, 'open question')}.`
+    + detail('Raised', evidence.risks),
 
   blind_review: evidence => {
     if (evidence.executed === false) {
@@ -314,13 +403,15 @@ const NARRATION: Record<
         ? ` and ${guarded} ${verb(guarded, 'touches', 'touch')} a protected risk dimension`
         : '')
       + '.'
+      + detail('Where they differ', evidence.where)
   },
 
   critic: evidence =>
-    count(evidence.challenges)
+    (count(evidence.challenges)
       ? `Challenged ${plural(count(evidence.challenges) ?? 0, 'dimension')} where the two passes `
         + 'disagreed materially, so the resolution is argued rather than averaged.'
-      : 'Found nothing worth challenging — the two passes substantially agreed.',
+      : 'Found nothing worth challenging — the two passes substantially agreed.')
+      + detail('Challenged', evidence.raised),
 
   arbitration: evidence =>
     `Resolved the differences using published rules rather than a judgement call: `
@@ -328,17 +419,90 @@ const NARRATION: Record<
     + `${count(evidence.human_approval_required)
       ? `, ${count(evidence.human_approval_required)} of which `
         + `${verb(count(evidence.human_approval_required) ?? 0, 'needs', 'need')} a person to confirm`
-      : ''}.`,
+      : ''}.`
+    + detail('Resolved', evidence.resolved),
 
   // -- EAGLE governance -------------------------------------------------------------------
 
-  contract: evidence =>
-    `Sealed the estimation contract for ${text(evidence.story_id) || 'this story'}: objective, `
-    + `acceptance criteria, stack and rules are now fixed for the run, so nothing can move `
-    + `underneath the estimate while it is being made. `
-    + `${plural(count(evidence.required_evidence) ?? 0, 'kind')} of evidence `
-    + `${verb(count(evidence.required_evidence) ?? 0, 'is', 'are')} required before publishing, `
-    + `and the run may spend at most ${num(evidence.max_debate_rounds) ?? 2} debate round(s).`,
+  requirements: evidence =>
+    `Read ${plural(count(evidence.functional) ?? 0, 'functional requirement')} and `
+    + `${plural(count(evidence.non_functional) ?? 0, 'non-functional requirement')} out of the `
+    + 'story, each numbered so a score can point at what asked for it. Anything the story did '
+    + 'not define becomes a named gap rather than a general complaint about clarity.'
+    + detail('Functional', evidence.functional)
+    + detail('Non-functional', evidence.non_functional)
+    + detail('Assumed', evidence.assumptions)
+    + detail('Not defined by the story', evidence.open_questions, 4),
+
+  // -- Repository evidence, when a workspace was supplied ---------------------------------
+
+  repo_intelligence: (evidence, status) => (status === 'failed'
+    ? 'Could not read the repository at the path given, so every question the story leaves '
+      + 'open stays open. Unanswered questions are priced as unbounded, which is why an '
+      + 'estimate without a codebase runs higher than one with it.'
+    : `Read the codebase this story lands in: `
+      + `${plural(count(evidence.source_files) ?? 0, 'source file')}`
+      + `${text(evidence.commit) ? ` at commit ${text(evidence.commit).slice(0, 8)}` : ''}, `
+      + `and ranked ${plural(count(evidence.change_surface) ?? 0, 'file')} as the surface this `
+      + 'story would touch. What the repository can answer, the model is not asked to guess.')
+    + detail('Stack', [...(evidence.languages as string[] ?? []),
+      ...(evidence.frameworks as string[] ?? [])])
+    + detail('Already present', evidence.signals_present, 8)
+    + detail('Not found in this repository', evidence.signals_absent, 8)
+    + detail('Change surface', evidence.change_surface, 8)
+    + detail('Tests beside it', evidence.related_tests, 5),
+
+  repo_answers: evidence =>
+    `Replaced ${plural(count(evidence.factors) ?? 0, 'inferred score')} with a fact read from `
+    + 'disk. A factor the story never mentions is not automatically unknown — the codebase may '
+    + 'already settle it, and a score that came from a file beats one that came from silence. '
+    + 'Scores the model grounded in the story itself were left alone.'
+    + detail('Now grounded in the repository', evidence.changes, 8),
+
+  change_plan: evidence => {
+    const modify = count(evidence.modify) ?? 0
+    const create = count(evidence.create) ?? 0
+    return (modify + create
+      ? `Named the work: ${plural(modify, 'existing file')} to change and `
+        + `${plural(create, 'new file')} to add. Every path was checked against disk before it `
+        + 'was allowed into the plan, so the estimate is sized against files that exist.'
+      : 'Could not verify a change surface for this story, so the estimate is sized from the '
+        + 'story text alone and the unknowns stay priced as unknowns.')
+      + detail('Change', evidence.modify, 8)
+      + detail('Create', evidence.create, 6)
+      + detail('Rejected — no such path', evidence.rejected, 5)
+  },
+
+  contract: evidence => {
+    // The generic sentence first, then what was actually sealed. A stage that explains what
+    // "sealing a contract" means without quoting the contract tells the reader something that
+    // was equally true before they typed anything.
+    const criteria = Array.isArray(evidence.acceptance_criteria)
+      ? (evidence.acceptance_criteria as string[]) : []
+    const stack = evidence.stack && typeof evidence.stack === 'object'
+      ? Object.entries(evidence.stack as Record<string, string>)
+          .map(([layer, value]) => `${layer} ${value}`).join(', ')
+      : ''
+    const objective = text(evidence.objective)
+    return `Sealed the estimation contract for ${text(evidence.story_id) || 'this story'}: `
+      + `objective, acceptance criteria, stack and roles are now fixed for the run, so nothing `
+      + `can move underneath the estimate while it is being made. `
+      + `${plural(count(evidence.required_evidence) ?? 0, 'kind')} of evidence `
+      + `${verb(count(evidence.required_evidence) ?? 0, 'is', 'are')} required before publishing, `
+      + `and the run may spend at most ${num(evidence.max_debate_rounds) ?? 2} debate round(s).`
+      + (objective ? `\n\nObjective — ${objective}` : '')
+      + (criteria.length
+        ? `\n\nAcceptance criteria (${criteria.length}) — `
+          + criteria.map((item, index) => `${index + 1}. ${item}`).join('   ')
+        : `\n\nAcceptance criteria — none were supplied, so there is nothing to `
+          + 'verify against.')
+      + (stack
+        ? `\n\nStack — ${stack}.`
+        : `\n\nStack — none declared, so no calibration applies.`)
+      + (text(evidence.affected_application)
+        && evidence.affected_application !== 'unspecified'
+        ? `\n\nApplication — ${text(evidence.affected_application)}.` : '')
+  },
 
   eagle_conflict: evidence => {
     const disputed = count(evidence.disputed) ?? 0
@@ -351,6 +515,8 @@ const NARRATION: Record<
       + `${plural(disputed, 'disputed factor')}${list(evidence.disputed) ? ` (${list(evidence.disputed)})` : ''}. `
       + `A spread of two or more disputes, and so does an elevated score with nothing behind it — `
       + `which is what stops a missing answer settling quietly on a middling number.`
+      + detail('Disputed', evidence.disputed)
+      + detail('Owed by', evidence.owners)
   },
 
   eagle_review: evidence => {
@@ -367,6 +533,8 @@ const NARRATION: Record<
       + `${blocker ? `, ${blocker} blocking` : ''}${material ? `, ${material} material` : ''}. `
       + 'The adversarial pass looks only for reasons this is too low; the optimistic pass only '
       + 'for complexity counted twice — so neither can inflate the number unopposed.'
+      + detail('Found', evidence.raised, 4)
+      + detail('Suggested', evidence.corrections, 4)
   },
 
   eagle_debate: (evidence, status) => {
@@ -379,8 +547,10 @@ const NARRATION: Record<
       return `${base} ${plural(unresolved, 'factor')} still `
         + `${verb(unresolved, 'has', 'have')} no agreed score; further rounds would not converge, `
         + 'so this goes to a human specialist.'
+        + detail('Debated', evidence.factors)
+        + detail('Unresolved', evidence.unresolved)
     }
-    return base
+    return base + detail('Debated', evidence.factors)
   },
 
   eagle_validation: evidence => {
@@ -396,8 +566,11 @@ const NARRATION: Record<
       return `${rules} The spike gate then fired on ${plural(triggers, 'rule')} and returned `
         + `${gate.replaceAll('_', ' ').toLowerCase()} — refusing to estimate is a valid answer, `
         + 'and a more honest one than a number nobody can support.'
+        + detail('Spike triggers', evidence.spike_triggers)
+        + detail('Failed rules', evidence.failed_rules)
     }
     return `${rules} No spike rule fired, so the story is safe to estimate as written.`
+      + detail('Failed rules', evidence.failed_rules)
   },
 
   eagle_reference: evidence => {
@@ -420,6 +593,10 @@ const NARRATION: Record<
         : 'T'}`
       + `his story reads as ${relative}`
       + `${range?.lower !== undefined ? `, implying ${range.lower}–${range.upper} points` : ''}.`
+      + detail('Compared against', Array.isArray(evidence.matches)
+        ? (evidence.matches as { title: string; points: number; similarity: number }[])
+            .map(item => `${item.title} — ${item.points} pts, ${(item.similarity * 100).toFixed(0)}%`)
+        : [])
   },
 
   focus_pass: (evidence, status) => {
@@ -441,7 +618,9 @@ const NARRATION: Record<
   score_factors: evidence =>
     `Final scorecard assembled: ${count(evidence.model_scored) ?? 0} factors judged by the model and `
     + `${count(evidence.heuristic_filled) ?? 0} inferred from the story text. Every factor shows `
-    + 'which it was, so you can tell judgement from a guess.',
+    + 'which it was, so you can tell judgement from a guess.'
+    + detail('Costs most', evidence.highest, 4)
+    + detail('Costs least', evidence.lowest, 3),
 
   calculate: evidence => {
     const score = num(evidence.adjusted_score)
@@ -454,21 +633,27 @@ const NARRATION: Record<
       + `maps to ${points} points. ${plural(count(evidence.rules_fired) ?? 0, 'adjustment rule')} `
       + 'applied; '
       + 'you can replay every step by hand.'
+      + detail('Adjustments that fired', evidence.applied)
   },
 
   policy_gate: evidence => {
     const failed = Array.isArray(evidence.gates_failed) ? evidence.gates_failed.length : 0
-    return failed
+    return (failed
       ? `${plural(failed, 'gate')} failed, which overrides the calculated number — the answer `
         + 'becomes an escalation rather than a smaller estimate.'
       : `All ${count(evidence.gates_evaluated) ?? 0} gates passed, so nothing overrides the `
-        + `calculated points. Confidence is ${String(evidence.confidence ?? 'unknown')}.`
+        + `calculated points. Confidence is ${String(evidence.confidence ?? 'unknown')}.`)
+      + detail('Failed', evidence.failed_detail)
+      + detail('Risk flags', evidence.flags)
+      + detail('Why that confidence', text(evidence.confidence_detail)
+        ? [text(evidence.confidence_detail)] : [])
   },
 
   consistency_audit: evidence =>
     `Replayed the whole run and checked it against itself: ${String(evidence.status ?? 'checked')
       .replaceAll('_', ' ')}. This is the step that would catch the arithmetic disagreeing with `
-    + 'the scorecard.',
+    + 'the scorecard.'
+    + detail('Warnings', evidence.warnings),
 
   human_review: () =>
     'Every AI-assisted estimate ends here by design. The team owns the final number and may '
@@ -481,6 +666,93 @@ const NARRATION: Record<
 }
 
 /** Stages whose own label already reads as a sentence and needs no second one. */
+/**
+ * Narration for a checklist *step*, where several steps share one event.
+ *
+ * The arithmetic is one indivisible operation and emits one event, but a reader thinks of it as
+ * three things: sum what the factors triggered, then what the stack triggered, then map the
+ * total onto the ladder. Rendering one sentence against all three says the pipeline has nothing
+ * to tell you about two of them — and the same applied to the two gate steps.
+ *
+ * Anything not split here falls through to the stage narration unchanged, which is true for
+ * twenty of the twenty-five steps.
+ */
+const STEP_NARRATION: Record<string, (evidence: Evidence) => string | undefined> = {
+  apply_base_adjustments: evidence => {
+    const applied = Array.isArray(evidence.base_applied) ? evidence.base_applied.length : 0
+    const total = num(evidence.base_total) ?? 0
+    return `The sixteen scores total ${num(evidence.base_sum) ?? 0}. `
+      + (applied
+        ? `${plural(applied, 'base rule')} then fired for ${total >= 0 ? '+' : ''}${total} — `
+          + 'these are compounding effects the framework prices explicitly, not extra judgement '
+          + 'about the story.'
+        : 'No base adjustment applied: nothing in the scorecard crossed a threshold.')
+      + detail('Fired', evidence.base_applied)
+      + detail('Evaluated and did not fire', evidence.base_skipped, 5)
+  },
+
+  apply_stack_adjustments: evidence => {
+    const applied = Array.isArray(evidence.stack_applied) ? evidence.stack_applied.length : 0
+    const total = num(evidence.stack_total) ?? 0
+    return (applied
+      ? `${plural(applied, 'stack rule')} fired for ${total >= 0 ? '+' : ''}${total}. The same `
+        + 'work costs differently on different stacks, and this is where that is applied — from '
+        + 'the profile you declared, not from an impression of it.'
+      : 'No stack adjustment applied: the declared profile carries no maturity, experience or '
+        + 'boundary penalty for this story.')
+      + detail('Fired', evidence.stack_applied)
+      + detail('Evaluated and did not fire', evidence.stack_skipped, 5)
+  },
+
+  map_to_fibonacci: evidence => {
+    const score = num(evidence.adjusted_score)
+    const points = num(evidence.points)
+    if (score === undefined || points === undefined) return undefined
+    return `${score} lands in band ${String(evidence.band ?? '?')}, which maps to ${points} `
+      + 'points. The ladder is deliberately coarse: the gap between 8 and 13 is where a team '
+      + 'should be arguing, and a scale offering 9, 10 and 11 would invite false precision.'
+      + (evidence.cap_exceeded
+        ? detail('Cap', [`the declared framework maturity caps this at ${num(evidence.cap) ?? '?'} `
+          + 'points; the mapped value is reported as-is and the recommendation escalates instead'])
+        : '')
+  },
+
+  evaluate_gates: evidence => {
+    const failed = Array.isArray(evidence.gates_failed) ? evidence.gates_failed.length : 0
+    return `${count(evidence.gates_evaluated) ?? 0} gates were evaluated on this run. `
+      + (failed
+        ? `${plural(failed, 'gate')} failed, and a failed gate overrides the calculated number `
+          + 'rather than adjusting it.'
+        : 'All passed, so nothing overrides the calculated points.')
+      + detail('Failed', evidence.failed_detail)
+      + detail('Passed', evidence.gates_passed, 8)
+  },
+
+  decide: evidence => {
+    const recommendation = text(evidence.recommendation)
+    if (!recommendation) return undefined
+    return `The framework's recommendation is ${recommendation}. It comes from the gates, the `
+      + 'points and the uncertainty score together, not from an opinion about the story.'
+      + detail('Why', text(evidence.recommendation_detail)
+        ? [text(evidence.recommendation_detail)] : [])
+      + detail('Confidence', text(evidence.confidence)
+        ? [`${text(evidence.confidence)} — ${text(evidence.confidence_detail)}`] : [])
+      + detail('Risk flags', evidence.flags)
+  },
+}
+
+/** One sentence for a checklist step, falling back to the stage narration where they are one. */
+export function narrateStep(step: string, event: AgentEvent): string | undefined {
+  const describe = STEP_NARRATION[step]
+  if (!describe) return narrate(event)
+  try {
+    return describe((event.evidence ?? {}) as Evidence)
+  } catch {
+    // Narration is commentary; a malformed payload must never cost the reader the step itself.
+    return undefined
+  }
+}
+
 const SELF_EXPLANATORY = new Set(['estimate'])
 
 /**

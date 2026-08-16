@@ -52,6 +52,7 @@ from backend.estimation_framework import (
     risk_flags,
     spike_template,
 )
+from backend.engineering import analyse_requirement
 from backend.harness import ContextSource, assemble_context, GROUNDING_CONTRACT_BRIEF
 from backend.repo_evidence import (
     RepositoryEvidence,
@@ -1239,10 +1240,67 @@ class EstimateService:
                         "conditions are frozen for the run."
                     ),
                     "evidence": {
+                        # The concrete content of the contract, not only its rules. A stage that
+                        # explains what sealing a contract means without showing what was sealed
+                        # tells a reader something that was equally true before the run started.
+                        "objective": contract.objective,
+                        "acceptance_criteria": list(contract.acceptance_criteria),
+                        "stack": contract.expected_stacks,
+                        "affected_application": contract.affected_application,
                         "story_id": contract.story_id,
+                        "contract_hash": contract.contract_hash,
                         "required_evidence": list(contract.required_evidence()),
                         "stop_conditions": contract.stop_conditions.model_dump(),
                         "max_debate_rounds": contract.max_debate_rounds,
+                    },
+                }
+            )
+        # Decompose the story into numbered requirements before anything is scored.
+        #
+        # Estimation and code generation read the same story and used to read it differently:
+        # the builder worked from numbered requirements with sources, and the estimator from
+        # one block of prose. That is how a factor gets scored against a requirement nobody
+        # ever wrote down. Sharing `analyse_requirement` makes the two agree on what the story
+        # actually asks for — and it turns "the story is unclear" into named gaps a writer can
+        # act on, which is the only form of that finding anyone can use.
+        # The title is deliberately not part of the objective. It is a label, and read as a
+        # requirement it becomes an FR that restates the story and that nothing can implement
+        # distinctly — one permanently uncovered row in the traceability matrix, on every
+        # story. It is used only when there is no story text to read instead.
+        objective = "\n".join(
+            part for part in (story.user_story, story.technical_breakdown) if (part or "").strip()
+        ) or story.title
+        spec = analyse_requirement(
+            objective, [item for item in story.acceptance_criteria if item.strip()]
+        )
+        if progress:
+            progress(
+                {
+                    "stage": "requirements",
+                    "status": "completed" if spec.functional else "degraded",
+                    "label": (
+                        f"{len(spec.functional)} functional and "
+                        f"{len(spec.non_functional)} non-functional requirement(s) read"
+                    ),
+                    "detail": spec.summary(),
+                    "evidence": {
+                        "functional": [
+                            {"id": item.id, "statement": item.statement, "source": item.source}
+                            for item in spec.functional
+                        ],
+                        "non_functional": [
+                            {"id": item.id, "statement": item.statement, "source": item.source}
+                            for item in spec.non_functional
+                        ],
+                        # Both halves matter to an estimate. What the story defined is what can
+                        # be scored on evidence; what it did not is exactly what drives the
+                        # unknowns, and naming those is more useful than a low clarity score.
+                        "assumptions": [
+                            {"id": item.id, "about": item.about, "assumed": item.assumed,
+                             "because": item.because}
+                            for item in spec.assumptions
+                        ],
+                        "open_questions": list(spec.open_questions),
                     },
                 }
             )
@@ -1265,6 +1323,10 @@ class EstimateService:
                     ),
                     "detail": repository.summary(),
                     "evidence": {
+                        # Counts first: the named lists below share two of its keys and are the
+                        # more useful form. Spread last, the integers replaced the names and the
+                        # narration had nothing to quote.
+                        **repo_counts(repository),
                         "root": repository.root,
                         "commit": repository.commit,
                         "languages": repository.languages,
@@ -1278,7 +1340,6 @@ class EstimateService:
                         ],
                         "change_surface": [item.path for item in repository.candidates[:12]],
                         "related_tests": repository.related_tests[:8],
-                        **repo_counts(repository),
                     },
                 }
             )
@@ -1309,8 +1370,13 @@ class EstimateService:
                     "label": f"Readiness: {readiness.decision.replace('_', ' ').title()}",
                     "evidence": {
                         "checks": len(readiness.checks),
-                        "assumptions": len(readiness.assumptions),
-                        "questions": len(readiness.targeted_questions),
+                        "assumptions": readiness.assumptions,
+                        "questions": readiness.targeted_questions,
+                        "unready": [
+                            {"area": item.area, "status": item.status, "detail": item.detail}
+                            for item in readiness.checks
+                            if item.status != "ready"
+                        ],
                     },
                 }
             )
@@ -1325,6 +1391,14 @@ class EstimateService:
                     "evidence": {
                         "mode": pipeline_mode,
                         "specialists": [route.label for route in specialist_routes],
+                        "roles": [
+                            {
+                                "role": route.label,
+                                "owns": [FACTOR_BY_ID[item].label for item in route.dimensions],
+                                "why": route.reason,
+                            }
+                            for route in specialist_routes
+                        ],
                     },
                 }
             )
@@ -1337,6 +1411,11 @@ class EstimateService:
                     "label": "Story evidence bounded and labelled",
                     "evidence": {
                         "sources": len(manifest),
+                        "included": [
+                            f"{item['label']} ({item['characters']} chars"
+                            + (", truncated)" if item.get("truncated") else ")")
+                            for item in manifest
+                        ],
                         "characters": sum(int(item["characters"]) for item in manifest),
                         "budget": STORY_CONTEXT_BUDGET,
                         "truncated": any(item["truncated"] for item in manifest),
@@ -1361,6 +1440,10 @@ class EstimateService:
                         "team_experience": story.stack.team_experience,
                         "scenario": story.stack.scenario,
                         "reference_anchors": len(story.stack.anchors()),
+                        "anchors": [
+                            f"{item['points']} pts ({item['stack']}): {item['title']}"
+                            for item in story.stack.anchors()
+                        ],
                     },
                 }
             )
@@ -1483,6 +1566,11 @@ class EstimateService:
                     "label": f"{len(specialist_findings)} specialist lenses assessed evidence",
                     "evidence": {
                         "lenses": [item.label for item in specialist_findings],
+                        "risks": [
+                            risk
+                            for item in specialist_findings
+                            for risk in item.material_risks
+                        ][:6],
                         "material_risks": sum(
                             len(item.material_risks) for item in specialist_findings
                         ),
@@ -1647,6 +1735,15 @@ class EstimateService:
                             name: sum(i.reviewer == name for i in eagle_findings)
                             for name in ("critic", "adversarial", "optimistic")
                         },
+                        "raised": [
+                            f"[{item.reviewer}] {item.finding}"
+                            for item in eagle_findings
+                            if item.severity in {"blocker", "material"}
+                        ],
+                        "corrections": [
+                            item.suggested_correction for item in eagle_findings
+                            if item.severity in {"blocker", "material"}
+                        ],
                     },
                 }
             )
@@ -1687,6 +1784,12 @@ class EstimateService:
                         "protected": sum(
                             item.material and item.protected for item in disagreements
                         ),
+                        "where": [
+                            f"{item.label}: {item.primary_score} vs {item.reviewer_score}"
+                            + (f" ({', '.join(item.reasons)})" if item.material else "")
+                            for item in disagreements
+                            if item.material
+                        ],
                     },
                 }
             )
@@ -1698,7 +1801,13 @@ class EstimateService:
                         f"Critic challenged {len(challenges)} material dimension(s)"
                         if challenges else "Critic found no material challenge"
                     ),
-                    "evidence": {"challenges": len(challenges)},
+                    "evidence": {
+                        "challenges": len(challenges),
+                        "raised": [
+                            f"{FACTOR_BY_ID[item.factor].label}: {item.challenge}"
+                            for item in challenges
+                        ],
+                    },
                 }
             )
             progress(
@@ -1708,6 +1817,12 @@ class EstimateService:
                     "label": "Disagreements resolved by explicit deterministic policy",
                     "evidence": {
                         "decisions": len(arbitration),
+                        "resolved": [
+                            f"{FACTOR_BY_ID[item.factor].label} {item.primary_score} vs "
+                            f"{item.reviewer_score} → {item.selected_score} ({item.policy})"
+                            for item in arbitration
+                            if item.primary_score != item.reviewer_score
+                        ],
                         "human_approval_required": sum(
                             item.human_approval_required for item in arbitration
                         ),
@@ -1913,6 +2028,9 @@ class EstimateService:
                     }
                 )
 
+        # The requirements the estimate was made against, so a reader can check the scorecard
+        # covers the story rather than a version of it that drifted during the run.
+        result["requirements"] = spec.model_dump()
         result["eagle"] = {
             "version": EAGLE_VERSION,
             "contract": contract.model_dump(mode="json"),
@@ -1995,7 +2113,21 @@ class EstimateService:
                     "stage": "score_factors",
                     "status": "completed",
                     "label": f"16 factors scored ({provenance['model_scored']} by model)",
-                    "evidence": provenance,
+                    "evidence": {
+                        **provenance,
+                        "highest": [
+                            f"{item['label']} {item['score']}/5 — {item['reason']}"
+                            for item in sorted(
+                                result["scorecard"], key=lambda row: -int(row["score"])
+                            )[:4]
+                        ],
+                        "lowest": [
+                            f"{item['label']} {item['score']}/5"
+                            for item in sorted(
+                                result["scorecard"], key=lambda row: int(row["score"])
+                            )[:3]
+                        ],
+                    },
                 }
             )
             calculation = result["calculation"]
@@ -2014,6 +2146,34 @@ class EstimateService:
                         "adjusted_score": calculation["adjusted_score"],
                         "band": calculation["band"],
                         "points": calculation["points"],
+                        "applied": [
+                            f"{step['rule'].replace('_', ' ')} {step['delta']:+d}"
+                            for step in calculation["steps"]
+                            if step["applied"] and step["rule"] not in {"base_sum", "fibonacci_map"}
+                        ],
+                        "base_applied": [
+                            f"{step['label']} {step['delta']:+d}"
+                            for step in calculation["steps"]
+                            if step["applied"] and step["reference"] == "§8.1"
+                        ],
+                        "base_skipped": [
+                            step["label"] for step in calculation["steps"]
+                            if not step["applied"] and step["reference"] == "§8.1"
+                        ],
+                        "stack_applied": [
+                            f"{step['label']} {step['delta']:+d}"
+                            for step in calculation["steps"]
+                            if step["applied"] and step["reference"] == "§8.2"
+                        ],
+                        "stack_skipped": [
+                            step["label"] for step in calculation["steps"]
+                            if not step["applied"] and step["reference"] == "§8.2"
+                        ],
+                        "base_sum": calculation["base_sum"],
+                        "base_total": calculation["base_adjustment_total"],
+                        "stack_total": calculation["stack_adjustment_total"],
+                        "cap": calculation.get("maturity_cap"),
+                        "cap_exceeded": calculation.get("cap_exceeded"),
                         "rules_fired": sum(
                             1 for step in calculation["steps"]
                             if step["applied"] and step["rule"] != "base_sum"
@@ -2033,8 +2193,22 @@ class EstimateService:
                     "detail": result["recommendation_detail"],
                     "evidence": {
                         "gates_evaluated": len(result["evidence"]["policy_checks"]),
+                        "gates_passed": [
+                            check["rule"].replace("_", " ")
+                            for check in result["evidence"]["policy_checks"]
+                            if check["passed"]
+                        ],
+                        "recommendation": result["recommendation"].replace("_", " "),
+                        "recommendation_detail": result["recommendation_detail"],
                         "gates_failed": failed or "none",
+                        "failed_detail": [
+                            f"{check['rule'].replace('_', ' ')}: {check['detail']}"
+                            for check in result["evidence"]["policy_checks"]
+                            if not check["passed"]
+                        ],
                         "confidence": result["confidence"],
+                        "confidence_detail": result["confidence_detail"],
+                        "flags": [item["label"] for item in result["risk_flags"]][:6],
                         "risk_flags": len(result["risk_flags"]),
                         "suggestions": len(result["suggestions"]),
                     },

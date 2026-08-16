@@ -6,7 +6,7 @@ import {
 import { STAGE_WHY } from './AgentFlowDiagram'
 import { Tooltip } from './Tooltip'
 import { api, attachToJob } from './api'
-import { narrate } from './evidenceNarration'
+import { narrateStep } from './evidenceNarration'
 import { EstimateHistoryPanel } from './EstimateHistoryPanel'
 import { EstimateResultView, RECOMMENDATIONS } from './EstimateResultView'
 import { SystemStatusChip } from './SystemStatusChip'
@@ -15,16 +15,29 @@ import type {
   AgentEvent, EstimateConfig, EstimateResult, Level, StackProfile, Story,
 } from './types'
 
+/** Steps that only exist when a repository was supplied.
+ *
+ *  They are held out of the checklist otherwise rather than shown greyed. A stage that can
+ *  never complete on this run reads as a stall, and three of them at the top of the list reads
+ *  as a broken pipeline — which is exactly the impression a reader forms while waiting on a
+ *  CPU model for two minutes. Held out, the counts stay true: "12 of 27" means twelve of the
+ *  twenty-seven that apply. */
+const REPO_STEPS = new Set(['repo_intelligence', 'repo_answers', 'change_plan'])
+
 const steps = [
-  'contract', 'normalize', 'readiness', 'assemble_context', 'declare_stack', 'specialist_routing',
+  'contract', 'requirements', 'repo_intelligence',
+  'normalize', 'readiness', 'assemble_context', 'declare_stack', 'specialist_routing',
   'primary_estimate', 'focus_pass', 'specialist_analysis', 'blind_review', 'disagreement', 'critic', 'arbitration',
   'eagle_conflict', 'eagle_review', 'eagle_debate',
   'score_factors', 'apply_base_adjustments', 'apply_stack_adjustments', 'map_to_fibonacci',
-  'evaluate_gates', 'decide', 'eagle_validation', 'eagle_reference', 'consistency_audit',
+  'evaluate_gates', 'decide', 'repo_answers', 'eagle_validation', 'eagle_reference',
+  'change_plan', 'consistency_audit',
   'human_review',
 ]
 const labels: Record<string, string> = {
   contract: 'Seal the estimation contract',
+  requirements: 'Read the requirements from the story',
+  repo_intelligence: 'Read the repository',
   normalize: 'Normalize evidence & create input hash',
   readiness: 'Evaluate story readiness',
   assemble_context: 'Bound the story evidence',
@@ -46,8 +59,10 @@ const labels: Record<string, string> = {
   map_to_fibonacci: 'Map to Fibonacci',
   evaluate_gates: 'Evaluate spike & split gates',
   decide: 'Reach framework recommendation',
+  repo_answers: 'Replace inferred scores with repository facts',
   eagle_validation: 'Enforce deterministic validation & spike gate',
   eagle_reference: 'Anchor against historical stories',
+  change_plan: 'Name what would actually change',
   consistency_audit: 'Replay and audit consistency',
   human_review: 'Hand off for human consensus',
 }
@@ -57,6 +72,10 @@ const labels: Record<string, string> = {
  *  reattaching client reconstructs the same progress from the snapshot alone. */
 const NODE_MAP: Record<string, string[]> = {
   contract: ['contract'],
+  requirements: ['requirements'],
+  repo_intelligence: ['repo_intelligence'],
+  repo_answers: ['repo_answers'],
+  change_plan: ['change_plan'],
   normalize: ['normalize'],
   readiness: ['readiness'],
   assemble_context: ['assemble_context'],
@@ -87,6 +106,23 @@ const EAGLE_WHY: Record<string, string> = {
   contract: 'The objective, acceptance criteria, stack and rules are frozen and hashed before '
     + 'anything is scored. Two runs with the same hash were given the same problem — which is '
     + 'the only way to explain why two estimates differ.',
+  requirements: 'The story is decomposed into numbered requirements, each quoting the text it '
+    + 'came from. It is what turns "the story is unclear" into a named gap a writer can act on '
+    + '— and it is the same decomposition code generation works from, so a score can never be '
+    + 'made against a requirement nobody wrote down.',
+  repo_intelligence: 'The codebase the story lands in is read before anything is scored: '
+    + 'declared stack, what is already present, what is absent, and the files this story would '
+    + 'touch. What the repository can answer, the model is never asked to guess.',
+  repo_answers: 'Where the repository settles a question the story left open, the inferred '
+    + 'score is replaced by a fact read from disk. A factor the story never mentions is not '
+    + 'automatically unknown — and a score from a file beats a score from silence.',
+  change_plan: 'The model is never asked to name a file. It is shown the ranked change surface '
+    + 'and asked what changes inside each, and every path is then checked against disk — so the '
+    + 'estimate is sized against files that exist rather than files that sounded plausible.',
+  focus_pass: 'Sixteen scored objects in one response is where a small model degrades: it holds '
+    + 'the shape and loses the content, answering the same number sixteen times. Asked instead '
+    + 'which factors the story touches, which are largest and which it left unanswered, it '
+    + 'answers with recall — and code turns the reading into scores.',
   eagle_conflict: 'The independent assessments are compared factor by factor. A spread of two '
     + 'or more disputes, and so does an elevated score with no evidence behind it, so a missing '
     + 'answer can never settle quietly on a middling number.',
@@ -114,7 +150,8 @@ const PHASES: { id: string; title: string; blurb: string; steps: string[] }[] = 
   {
     id: 'intake', title: 'Evidence',
     blurb: 'Freeze the problem and gather what can be known about it.',
-    steps: ['contract', 'normalize', 'readiness', 'assemble_context', 'declare_stack',
+    steps: ['contract', 'requirements', 'repo_intelligence', 'normalize', 'readiness',
+      'assemble_context', 'declare_stack',
       'specialist_routing'],
   },
   {
@@ -132,11 +169,16 @@ const PHASES: { id: string; title: string; blurb: string; steps: string[] }[] = 
     id: 'deterministic', title: 'Calculation',
     blurb: 'Fixed arithmetic and gates, in code — replayable by hand.',
     steps: ['score_factors', 'apply_base_adjustments', 'apply_stack_adjustments',
-      'map_to_fibonacci', 'evaluate_gates', 'decide', 'eagle_validation', 'eagle_reference',
-      'consistency_audit'],
+      'map_to_fibonacci', 'evaluate_gates', 'decide', 'repo_answers', 'eagle_validation',
+      'eagle_reference', 'change_plan', 'consistency_audit'],
   },
   { id: 'human', title: 'Your decision', blurb: 'The team owns the number.', steps: ['human_review'] },
 ]
+
+/** The phases with the repository steps removed when no repository was supplied. */
+const phasesFor = (hasRepo: boolean) => hasRepo ? PHASES : PHASES.map(phase => ({
+  ...phase, steps: phase.steps.filter(step => !REPO_STEPS.has(step)),
+}))
 
 /** Checklist step → the explanation for the stage that produces it. */
 const whyForStep = (step: string): string =>
@@ -313,9 +355,18 @@ export function EstimateCodeScreen({
   const currentStepRef = useRef<HTMLLIElement>(null)
   const feedEndRef = useRef<HTMLLIElement>(null)
 
+  /** The pipeline that applies to this run. Without a repository the three repository stages
+   *  do not exist, and a checklist that lists them anyway is describing a different run. */
+  const hasRepo = workspace.trim().length > 0
+  const runSteps = useMemo(
+    () => hasRepo ? steps : steps.filter(step => !REPO_STEPS.has(step)),
+    [hasRepo],
+  )
+  const phases = useMemo(() => phasesFor(hasRepo), [hasRepo])
+
   /** The stage in flight: the first that has not reported. Derived rather than counted, because
    *  some stages legitimately never run — there is no debate when nothing is disputed. */
-  const activeStep = loading ? steps.find(step => !stepsDone.includes(step)) : undefined
+  const activeStep = loading ? runSteps.find(step => !stepsDone.includes(step)) : undefined
 
   // Block body: a concise arrow returns its expression, and React calls that as the cleanup.
   //
@@ -327,10 +378,13 @@ export function EstimateCodeScreen({
   const narration = useMemo(() => {
     const spoken: Record<string, { text: string; status: string }> = {}
     for (const event of runEvents) {
-      const said = narrate(event)
-      if (!said) continue
+      // Narrated per *step*, not per stage. Five steps share two events — the three parts of
+      // the arithmetic, and the two halves of the gate — and narrating by stage printed one
+      // sentence against all of them, which says the pipeline has nothing to report about
+      // four of the five.
       for (const node of NODE_MAP[event.stage] ?? []) {
-        spoken[node] = { text: said, status: event.status }
+        const said = narrateStep(node, event)
+        if (said) spoken[node] = { text: said, status: event.status }
       }
     }
     return spoken
@@ -338,10 +392,10 @@ export function EstimateCodeScreen({
 
   /** Narration in pipeline order, for the stages that have reported. */
   const feed = useMemo(
-    () => steps
+    () => runSteps
       .filter(step => narration[step])
       .map(step => ({ step, ...narration[step] })),
-    [narration],
+    [narration, runSteps],
   )
   const [upload, setUpload] = useState<any>()
   const [mapping, setMapping] = useState<Record<string, string | null>>({})
@@ -692,17 +746,17 @@ Additional detail supplied by the team: ${correction}` : ''),
               waits for you in Activity.
             </p>}
             {result && <p className="pipeline-settled">
-              <Check size={13} /> {stepsDone.length} of {steps.length} stages completed. The full
+              <Check size={13} /> {stepsDone.length} of {runSteps.length} stages completed. The full
               account is in the report below.
             </p>}
             {!loading && !result && <p className="pipeline-note">
-              Five phases, {steps.length} stages. Nothing here is the model's opinion of a number
+              Five phases, {runSteps.length} stages. Nothing here is the model's opinion of a number
               — it scores evidence, and the arithmetic happens in code.
             </p>}
           </div>
 
           <div className="phase-grid">
-            {PHASES.map(phase => {
+            {phases.map(phase => {
               const done = phase.steps.filter(step => stepsDone.includes(step)).length
               const live = phase.steps.some(step => step === activeStep)
               return <div

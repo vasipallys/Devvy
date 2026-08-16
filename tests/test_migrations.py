@@ -5,7 +5,7 @@ specific and nasty: a released build gains a column, an existing user's database
 old table untouched, and queries fail only for the people who already had data.
 """
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from backend.estimate_history import EstimateRecord, record_decision, save_estimate
@@ -128,5 +128,27 @@ def test_pre_authentication_tables_gain_nullable_ownership_columns(tmp_path):
         assert "author_id" in columns(engine, "message")
         assert "owner_id" in columns(engine, "job")
         assert "owner_id" in columns(engine, "estimaterecord")
+    finally:
+        engine.dispose()
+
+
+def test_an_existing_database_gains_the_memory_table(tmp_path):
+    """`create_all` never alters an existing database, so the table has to be migrated in.
+
+    Without this, anyone who already had data would have a YUKTI that silently cannot
+    remember anything — the write fails, the failure is swallowed by design, and the only
+    symptom is an assistant that forgets your name every session.
+    """
+    engine = make_engine(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE conversation (id VARCHAR PRIMARY KEY)"))
+    try:
+        run_migrations(engine)
+        assert "memory" in inspect(engine).get_table_names()
+        assert {"kind", "subject", "content", "source_text", "recalled"} <= columns(
+            engine, "memory"
+        )
+        # A second run must be a no-op rather than a duplicate-table failure.
+        assert run_migrations(engine) == []
     finally:
         engine.dispose()
