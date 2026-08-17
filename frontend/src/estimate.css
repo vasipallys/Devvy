@@ -517,3 +517,76 @@
    froze, the roles it routed — under the sentence explaining what the stage does. Those are
    separated by blank lines, which need honouring rather than collapsing. */
 .pipeline-feed li span{white-space:pre-line}
+
+/* --- Estimation techniques: the picker, and the session it produced ----------------------
+   The picker shows precision and speed on every card because the five genuinely differ in
+   both, and on a CPU model "one call" versus "one per seat" is a minute against ten. Hiding
+   that would be choosing for the user by omission. */
+.technique-picker{display:flex;flex-direction:column;gap:12px;margin:0 0 16px}
+.technique-head{display:flex;flex-direction:column;gap:4px}
+.technique-head p{margin:0;font-size:11px;line-height:1.6;color:var(--muted,#93a0ab);max-width:78ch}
+.technique-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(184px,1fr));gap:9px}
+.technique-card{display:flex;flex-direction:column;gap:5px;align-items:flex-start;text-align:left;
+  padding:11px 13px;border-radius:11px;border:1px solid var(--line,#27313a);
+  background:var(--surface,#141a20);color:var(--text,#dbe4ec);cursor:pointer;transition:.15s}
+.technique-card:hover:not(:disabled){border-color:#4a6b8a;background:#18222b}
+.technique-card:disabled{opacity:.5;cursor:not-allowed}
+.technique-card.selected{border-color:#7fd4a8;background:#16241d;box-shadow:0 0 0 1px #7fd4a8 inset}
+.technique-card b{font-size:12px}
+.technique-card small{font-size:10px;line-height:1.5;color:#9fb0bd}
+.technique-meta{display:flex;flex-wrap:wrap;gap:5px;margin-top:2px}
+.technique-meta em{font-size:9px;font-style:normal;letter-spacing:.04em;text-transform:uppercase;
+  color:#a8bccb;background:#1d2831;border:1px solid #33434f;border-radius:999px;padding:2px 7px}
+.technique-card.selected .technique-meta em{color:#bde8cf;background:#1b2f24;border-color:#3f6b52}
+.technique-rule{border:1px solid #27313a;background:#12181e;border-radius:11px;padding:12px 14px}
+.technique-rule h4{margin:0 0 5px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#9fb0bd}
+.technique-rule p{margin:0;font-size:11.5px;line-height:1.65;color:#c6d3de}
+.technique-rule dl{display:flex;flex-wrap:wrap;gap:18px;margin:9px 0 0}
+.technique-rule dl>div{display:flex;flex-direction:column;gap:2px}
+.technique-rule dt{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#8b9bab}
+.technique-rule dd{margin:0;font-size:11px;color:#cdd9e3}
+
+.technique-panel{border:1px solid #27313a;background:#12181e;border-radius:14px;overflow:hidden;margin:0 0 16px}
+.technique-panel>header{display:flex;align-items:center;gap:10px;padding:13px 15px;border-bottom:1px solid #222c34}
+.technique-panel>header>svg{flex:none;color:#7fd4a8}
+.technique-panel>header>span{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.technique-panel>header b{font-size:13px}
+.technique-panel>header small{font-size:10.5px;line-height:1.55;color:#9fb0bd}
+.technique-points{flex:none;font-size:22px;font-weight:700;color:#a8e8c4;background:#16241d;
+  border:1px solid #3f6b52;border-radius:10px;padding:5px 14px;cursor:help}
+.technique-summary{display:flex;flex-wrap:wrap;gap:6px;padding:11px 15px}
+.technique-chip{display:inline-flex;align-items:center;gap:5px;font-size:10px;border-radius:999px;
+  padding:3px 10px;color:#bccbd7;background:#1a232b;border:1px solid #33434f;cursor:help}
+.technique-chip.unanimous,.technique-chip.consensus{color:#bde8cf;background:#17271e;border-color:#4a7a5c}
+.technique-chip.converged{color:#d8dcae;background:#26261a;border-color:#6d6a3c}
+.technique-chip.unresolved,.technique-chip.warn{color:#f0bdb6;background:#2b1c1a;border-color:#8a5850}
+.technique-chip.diverged{color:#e8d0a8;background:#2a2318;border-color:#7d6743}
+.technique-block{padding:0 15px 14px}
+.technique-block h4{margin:8px 0 6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#9fb0bd}
+.technique-note{margin:0 0 8px;font-size:10.5px;line-height:1.6;color:#93a3b1}
+.technique-note.facilitator{margin-top:9px;padding:9px 11px;border-left:2px solid #4a7a5c;
+  background:#141d18;border-radius:0 7px 7px 0;color:#c2d5c8}
+.technique-table{width:100%;border-collapse:collapse;font-size:11px}
+.technique-table th{text-align:left;font-size:9px;letter-spacing:.09em;text-transform:uppercase;
+  color:#8b9bab;font-weight:600;padding:6px 9px;border-bottom:1px solid #27313a}
+.technique-table td{padding:8px 9px;border-bottom:1px solid #1c242b;vertical-align:top;color:#c6d3de;line-height:1.55}
+.technique-table tr.absent td{opacity:.72}
+.technique-table td b{display:block;font-size:11.5px}
+.technique-table td small{font-size:9.5px;color:#8b9bab}
+.technique-table code{display:inline-block;font-family:ui-monospace,monospace;font-size:9.5px;
+  color:#bcd0de;background:#1a232b;border:1px solid #2d3945;border-radius:4px;padding:1px 5px;margin:1px 3px 1px 0}
+.technique-card-value{font-size:15px;font-weight:700;color:#a8e8c4}
+.technique-table td em{display:block;font-size:9.5px;font-style:normal;color:#c9a97e;margin-top:2px}
+.technique-absent{color:#c9a97e}
+.technique-steps{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.technique-steps li{display:flex;gap:7px;align-items:flex-start;font-size:11px;line-height:1.6;color:#c6d3de}
+.technique-steps li svg{flex:none;margin-top:3px;color:#7fd4a8}
+.dot-heatmap{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:5px}
+.dot-heatmap li{display:grid;grid-template-columns:minmax(120px,1fr) auto 22px;gap:10px;align-items:center}
+.dot-label{font-size:11px;color:#c6d3de}
+.dot-bar{display:flex;gap:3px}
+.dot-bar i{width:9px;height:9px;border-radius:50%;background:#7fd4a8}
+.dot-heatmap em{font-size:10px;font-style:normal;color:#9fb0bd;text-align:right}
+.dot-voices{margin-top:9px;display:flex;flex-direction:column;gap:5px}
+.dot-voices p{margin:0;font-size:10.5px;line-height:1.6;color:#a9b8c4}
+.dot-voices b{color:#c6d3de;margin-right:5px}

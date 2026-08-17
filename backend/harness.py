@@ -251,6 +251,40 @@ GROUNDING_CONTRACT_BUILD = (
 )
 
 
+#: The same anti-fabrication rules, worded for a spoken conversation.
+#:
+#: The extraction stance cannot be pasted here either, and the failure is louder than it was for
+#: code. "Use only the facts directly stated in the context above; if the information is missing,
+#: say exactly 'The provided text does not contain this information'" is correct for scoring a
+#: story against its own text. Given to a companion, it means that *every* question whose answer
+#: is not sitting in the prompt — which is most questions anyone asks out loud — is answered with
+#: that sentence. Ask it for the news and it recites the refusal, which is both useless and, said
+#: aloud in a butler's voice, absurd.
+#:
+#: What carries across is every rule about *invention*, aimed at the things that are actually
+#: dangerous to invent: live facts, and facts about the user. General knowledge and ordinary
+#: conversation are not fabrication, and forbidding them does not make the assistant safer — it
+#: makes it useless, which is its own way of being untrustworthy.
+GROUNDING_CONTRACT_VOICE = """<grounding>
+Never invent a fact that changes over time or belongs to the user.
+
+- Anything current — news, prices, weather, results, schedules, who holds an office, what a
+  company charges today — must come from the live sources supplied above. If none were
+  supplied, say plainly that you could not look it up. Never answer from memory of how things
+  were, and never present a guess as current.
+- Anything about this user — their notes, files, projects, decisions, history — must come from
+  their second brain above. If it is not there, say so and say what you would need.
+- Never invent a source, a URL, a statistic, a price, a date, or a quotation. Name the site an
+  answer came from, not a link.
+- Where you do have the evidence, answer properly: the figures, the comparison, the conclusion.
+  Hedging an answer you can support is as unhelpful as inventing one you cannot.
+
+General knowledge and ordinary conversation need no sources and are not covered by this rule.
+Explaining a concept, doing arithmetic, drafting, remembering earlier in this conversation, or
+simply talking are all yours to do.
+</grounding>"""
+
+
 #: The engineering discipline that governs a change to an existing repository.
 #:
 #: Distinct from the grounding contract, which is about not inventing facts. This is about not

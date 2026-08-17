@@ -384,7 +384,7 @@
       <span>harness <b>EAGLE-1.0</b></span>
       <span>pipeline <b>agentic-local-1.0</b></span>
       <span>rubric <b>3.2</b></span>
-      <span>30 stages · 27 without a repository</span>
+      <span>34 stages · 27 without a repository or a squad</span>
     </div>
   </header>
 
@@ -395,6 +395,7 @@
       <li class="p2"><a href="#independent">Independent assessment <em>4</em></a></li>
       <li class="p3"><a href="#challenge">Challenge <em>6</em></a></li>
       <li class="p4"><a href="#calculation">Calculation <em>11</em></a></li>
+      <li class="p45"><a href="#session">The session <em>4</em></a></li>
       <li class="p5"><a href="#decision">Your decision <em>1</em></a></li>
     </ol>
     <h2>Reference</h2>
@@ -450,8 +451,13 @@
           <span class="what">Fixed arithmetic and gates, in code</span>
           <em>11 stages</em>
         </li>
+        <li style="--c: var(--lime)">
+          <span class="idx">05</span><b>The session</b>
+          <span class="what">The technique you chose, run by a squad</span>
+          <em>4 stages</em>
+        </li>
         <li style="--c: var(--refuse)">
-          <span class="idx">05</span><b>Your decision</b>
+          <span class="idx">06</span><b>Your decision</b>
           <span class="what">The team owns the number</span>
           <em>1 stage</em>
         </li>
@@ -1071,9 +1077,98 @@
       </article>
     </section>
 
+    <!-- ============================ PHASE 4.5 =========================== -->
+    <section id="session" style="--phase: var(--lime)">
+      <h2 class="phase"><span class="n">05</span> The session <span class="count">4 stages</span></h2>
+      <p class="phase-lede">
+        Everything above is one estimator's reading. A technique is how a <em>team</em>
+        reconsiders it.
+      </p>
+
+      <aside class="note">
+        <p>
+          The technique runs last and starts from the scorecard already built, never from
+          scratch. Starting over would discard the evidence gathered and make the five
+          techniques incomparable — any difference between them would come from a different
+          starting point rather than from the technique.
+        </p>
+        <p>
+          All five obey the rule the rest of the pipeline runs on:
+          <strong class="lead">the squad votes, the code counts.</strong> No schema a seat
+          answers contains a story-point field.
+        </p>
+      </aside>
+
+      <article class="stage">
+        <h3><code class="id">technique_squad</code> Seat the squad <span class="tag det">deterministic</span> <span class="tag cond">poker &amp; dots</span></h3>
+        <p>
+          Nine disciplines, each answerable for an exclusive slice of the sixteen factors:
+          product, architecture, frontend, backend, data, test/automation, security, platform,
+          delivery risk. Ownership is exclusive because when the estimate is written down, one
+          person owned each call — shared ownership would give the assembled scorecard two
+          candidate values and a tie-break nobody published.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">technique_vote</code> Collect each discipline's estimate <span class="tag model">model call</span></h3>
+        <p>
+          Each seat scores only what it owns, without seeing the others — the same reason real
+          cards are played face down. A seat that does not answer is an empty chair, not a
+          failed session: the baseline stands in and the result says so, because an inferred
+          dimension must never wear a specialist's authority.
+        </p>
+        <aside class="note sharp">
+          <p>
+            A seat's <b>card</b> is the story sized as if all of it were as demanding as that
+            seat's part. The obvious implementation — laying a seat's one-to-three scores over
+            the baseline — moves the total by a handful of points, never crosses a band edge,
+            and returns an identical card from every seat: spread always zero, second round
+            never fires, and what is left is a scoring pass wearing Planning Poker's clothes.
+          </p>
+        </aside>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">technique_round</code> Re-poll the outliers <span class="tag det">deterministic</span> <span class="tag cond">conditional</span></h3>
+        <p>
+          A spread of two ladder steps or more means the room is not looking at the same story.
+          Only the seats holding the extreme cards are asked again, shown the reasoning they
+          disagreed with. Re-polling everyone when two people differ is how a short session
+          becomes a long one — and on a CPU model, minutes of wall clock for cards that will
+          not move.
+        </p>
+      </article>
+
+      <article class="stage">
+        <h3><code class="id">technique</code> Reach the technique's number <span class="tag det">deterministic</span></h3>
+        <p>
+          The number comes from the assembled scorecard — every factor taken from the seat that
+          owns it, never an average — mapped by §9. A spread still at two or more after the
+          second round is reported as <strong class="lead">unresolved</strong> and flagged for a
+          person: a persistent disagreement is information about the story, not an averaging
+          problem.
+        </p>
+        <div class="scroll"><table>
+          <thead><tr><th>Technique</th><th>How it reaches a number</th></tr></thead>
+          <tbody>
+            <tr><td><b>T-Shirt Sizing</b></td><td>One pass, one size, through a published table. Where the quick size and the scored one part company is where the story hides its work.</td></tr>
+            <tr><td><b>Dot Voting</b></td><td>Scarce dots concentrate on what will hurt. Dots only ever raise a score — nobody spends one to say something is easy.</td></tr>
+            <tr><td><b>Affinity Mapping</b></td><td>Grouped on all sixteen factor scores, never shared vocabulary. A weak match is reported as weak, not used as an anchor.</td></tr>
+            <tr><td><b>Bucket System</b></td><td>Placed against a calibration anchor. An anchor that is not on the list is refused, never substituted.</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          Those three arrive by comparison rather than by scoring, so the factor arithmetic
+          stands alongside them and <strong class="lead">any divergence is reported, never
+          reconciled</strong>.
+        </p>
+      </article>
+    </section>
+
     <!-- ============================ PHASE 5 ============================ -->
     <section id="decision" style="--phase: var(--refuse)">
-      <h2 class="phase"><span class="n">05</span> Your decision <span class="count">1 stage</span></h2>
+      <h2 class="phase"><span class="n">06</span> Your decision <span class="count">1 stage</span></h2>
       <p class="phase-lede">The team owns the number.</p>
 
       <article class="stage">

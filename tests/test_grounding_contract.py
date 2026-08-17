@@ -28,12 +28,7 @@ def chat_prompt() -> str:
 
 
 def talk_prompt() -> str:
-    """Talk's prompt is assembled per turn, so it is built rather than read.
-
-    It carries the *brief* form of the contract deliberately: the persona, the capability
-    register and the speaking rules all have to fit alongside the turn's evidence, and the
-    budget spent restating the contract at length is budget taken from the user's own notes.
-    """
+    """Talk's prompt is assembled per turn, so it is built rather than read."""
     from backend.yukti import system_prompt
 
     return system_prompt("sir", now="Monday, January 1, 2026, 9:00 AM")
@@ -55,9 +50,11 @@ def smart_code_source() -> str:
     return inspect.getsource(backend.smart_code)
 
 
+#: The prompts that *extract* from supplied text. Talk is deliberately not among them: see
+#: `test_talk_carries_the_voice_contract` for why a conversation cannot take the extraction
+#: stance, and what it carries instead.
 ALL_PROMPTS = {
     "chat": chat_prompt,
-    "talk": talk_prompt,
     "estimate": estimate_prompt,
 }
 
@@ -95,6 +92,32 @@ def test_every_prompt_asks_what_would_have_to_be_added(name: str):
 def test_every_prompt_names_the_strict_extractor_stance(name: str):
     text = ALL_PROMPTS[name]().lower()
     assert "given words and numbers" in text
+
+
+def test_talk_carries_the_voice_contract():
+    """A conversation cannot take the extraction stance, and this is the bug that proved it.
+
+    Asked "tell me the news today", YUKTI answered "The provided text does not contain this
+    information." — which is exactly what the extraction contract instructs, and useless. Most
+    questions asked out loud are not answerable from the prompt's own text, so the stance that
+    is right for scoring a story turns a companion into a machine that recites one sentence.
+
+    What must carry across is every rule about *invention*, aimed where invention is actually
+    dangerous: live facts, and facts about the user.
+    """
+    prompt = " ".join(talk_prompt().split())
+    assert "Never invent a fact that changes over time or belongs to the user" in prompt
+    # Live claims must come from retrieved sources, and their absence must be admitted.
+    assert "say plainly that you could not look it up" in prompt
+    assert "never present a guess as current" in prompt
+    # Facts about the user come from the second brain or not at all.
+    assert "must come from their second brain" in prompt
+    assert "Never invent a source, a URL, a statistic, a price, a date, or a quotation" in prompt
+    # And the part that fixes the reported bug: ordinary conversation is not fabrication.
+    assert "General knowledge and ordinary conversation need no sources" in prompt
+    # The extractor's fixed refusal must NOT be here; it is what produced the bug.
+    assert NO_INFORMATION not in talk_prompt()
+    assert "given words and numbers" not in prompt.lower()
 
 
 def test_smart_code_carries_the_contract():

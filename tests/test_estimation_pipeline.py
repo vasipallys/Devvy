@@ -35,8 +35,11 @@ class SequencedRuntime:
 
 
 async def test_agentic_pipeline_keeps_blind_review_independent_and_auditable(tmp_path):
+    # About the two core passes, so the session is pinned to the cheapest technique and its
+    # single call is accounted for rather than folded into the total. Planning Poker seats a
+    # whole squad; that behaviour is pinned in `test_estimation_techniques.py`.
     response = {"scores": scorecard(), "drivers": ["technical_complexity"]}
-    runtime = SequencedRuntime([response, response])
+    runtime = SequencedRuntime([response, response, {"size": "M", "why": "moderate"}])
     service = EstimateService(
         runtime, Settings(app_data_dir=tmp_path / "data", phoenix_enabled=False)
     )
@@ -44,6 +47,7 @@ async def test_agentic_pipeline_keeps_blind_review_independent_and_auditable(tmp
     result = await service.estimate(
         Story(
             title="Expose order status",
+            technique="tshirt",
             user_story="As a buyer, I can view order status from the existing API.",
             acceptance_criteria=["The current status is visible", "API failures are explained"],
             technical_breakdown="Add one FastAPI read endpoint and contract tests.",
@@ -52,7 +56,7 @@ async def test_agentic_pipeline_keeps_blind_review_independent_and_auditable(tmp
     )
 
     pipeline = result["agentic_pipeline"]
-    assert len(runtime.messages) == 2
+    assert len(runtime.messages) == 3  # primary, blind, and the one sizing call
     assert pipeline["reviewer"]["blind"] is True
     assert pipeline["specialist_findings"]
     assert all(item["evidence_ids"] for item in pipeline["specialist_findings"])

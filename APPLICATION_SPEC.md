@@ -805,9 +805,19 @@ voice shaping live in `backend/yukti.py`; the stores live in `backend/second_bra
 `gate → route_visual → (recall →)? (research →)? companion`.
 
 `gate` runs before everything and MAY end the turn on its own. `route_visual` sets
-`requires_research` from news/weather/currency terms, `requires_recall` from second-brain terms,
-`requires_briefing` from briefing terms, and `requires_animation` from math/visual terms, and MUST
-also produce a `route_reason` naming the matched phrases.
+`requires_recall` from second-brain terms, `requires_briefing` from briefing terms,
+`requires_animation` from math/visual terms, and `requires_research` from
+`research_trigger()`, and MUST also produce a `route_reason` naming the matched phrases.
+
+Research routing MUST NOT be a flat list of exact phrases. A **live topic** — one whose answer
+changes without anyone editing it (news, weather, prices, results, outages) — triggers on its
+own. A **recency marker** ("today", "latest", "right now") only triggers alongside a request for
+information, because "how are you today" is not a search. Explicit requests to search, and
+comparison-shopping phrasings, always trigger. Topics MUST match on word boundaries: "news" must
+not fire on "newsletter", nor "rain" on "training".
+
+The flat list is how the most obvious request anyone makes of a voice assistant went unsearched:
+it contained "today's news" and the user said "tell me the news today".
 
 Recall MUST run before research. What the user already wrote is cheaper, more specific and more
 trustworthy than what the web says, and a turn answerable from their own notes MUST NOT also
@@ -860,7 +870,26 @@ MUST state plainly that calendar and mail are not connected. It MUST NOT invent 
 messages. A briefing that fabricates a schedule is worse than no briefing: it is a morning planned
 around meetings that do not exist.
 
-### 9.1.4 Voice shaping
+### 9.1.4 Grounding
+
+Talk carries `GROUNDING_CONTRACT_VOICE`, the **third** form of the contract, and MUST NOT carry
+the extraction form. The extraction stance — "use only the facts directly stated above; if the
+information is missing, say exactly *The provided text does not contain this information*" — is
+correct for scoring a story against its own text and catastrophic for a companion: most questions
+asked out loud are not answerable from the prompt's own text, so the assistant answers nearly
+everything with that one sentence.
+
+The voice form keeps every rule about *invention* and aims it where invention is dangerous:
+
+- Anything current MUST come from the live sources supplied that turn. If none were retrieved,
+  YUKTI MUST say it could not look it up rather than answering from memory of how things were.
+- Anything about the user MUST come from their second brain.
+- Sources, URLs, statistics, prices, dates and quotations MUST NOT be invented; an answer names
+  the site it came from, not a link.
+- General knowledge, explanation, arithmetic, drafting and ordinary conversation need no sources
+  and are explicitly permitted. Refusing them does not make the assistant safer, only useless.
+
+### 9.1.5 Voice shaping
 
 Everything YUKTI produces is spoken by a synthesiser, which reads Markdown as punctuation. The
 screen keeps the rich text; **the speaker gets `yukti.speakable()`**, which removes headings,
@@ -2296,6 +2325,94 @@ cd frontend; npm run preview                             # serve dist/
     never cross owners.
 117. A briefing states that calendar and mail are not connected and invents no meetings, times
     or messages.
+118. A question about the current state of the world triggers live research regardless of how it
+    is phrased; ordinary conversation does not pay for a search; and topic matching respects word
+    boundaries.
+119. Talk carries the voice form of the grounding contract, never the extraction form: it must
+    not answer an ordinary question with the extractor's fixed missing-information sentence, and
+    must still refuse to invent live facts or facts about the user.
+120. The user chooses the estimation technique, and no technique lets a model name a
+    story-point value: every number comes from published arithmetic over the judgements the
+    squad supplied.
+121. Planning Poker cards can disagree, a spread of two ladder steps or more re-polls only the
+    outliers, and an unresolved room is flagged for a person rather than averaged away.
+122. The final scorecard takes each factor from the seat that owns it; a seat cannot write a
+    score for a dimension it does not own, and a seat that did not answer is named as absent.
+123. Dots only ever raise a score, and a technique that diverges from the factor arithmetic
+    reports both numbers rather than reconciling them silently.
+124. An affinity match below the similarity threshold, and a bucket anchor that is not on the
+    calibration list, are refused rather than used - neither may silently set an estimate.
+125. Every path that accepts bytes from a client carries a ceiling: uploads, request bodies, and
+    the voice socket's audio buffer. An oversized recording is refused with a message rather
+    than truncated, and the session stays usable afterwards.
+126. Nothing blocking runs on the event loop in a request path. File reads and writes that can
+    reach megabytes - voice audio, repository diffs, attachment extraction - run off it.
+127. The chat sanitiser is covered by an executable browser test, not an inspection: payloads
+    are placed in a real DOM and the assertion is about what survives serialise and re-parse.
+
+## 8.5 Estimation techniques
+
+The user chooses **how** a story is estimated. Five techniques are supported, defined in
+`backend/estimation_techniques.py` and served to the picker from `/api/estimate-code/config`
+so the interface can never offer one the service does not implement.
+
+Every technique obeys the same rule as the rest of the product: **the squad votes, the code
+counts.** No schema a model answers contains a story-point field. The model supplies the
+judgement its seat is qualified for; published arithmetic turns that into a number.
+
+### 8.5.1 The squad
+
+Nine seats, each answerable for an exclusive set of the sixteen factors: product/functional,
+architecture, frontend, backend, data, test/automation, security, DevOps, and delivery risk.
+Ownership MUST be exclusive and MUST cover all sixteen factors - shared ownership would give
+the assembled scorecard two candidate values and a tie-break nobody published.
+
+A seat that does not answer is an empty chair, not a failed session: the baseline scorecard
+stands in and the result MUST say so. An inferred dimension MUST NOT be presented as a
+specialist's first-hand judgement.
+
+### 8.5.2 Planning Poker
+
+Each seat scores only what it owns, without seeing the others. A seat's **card** is the story
+sized as if all of it were as demanding as that seat's part - which is what a person actually
+plays, and what makes cards able to disagree at all. Laying a seat's one-to-three scores over
+the baseline moves the total by a few points, never crosses a band edge, and produces a spread
+of zero on every story; a technique that cannot disagree is not Planning Poker.
+
+Cards measure disagreement only. A spread of two ladder steps or more MUST trigger a second
+round in which **only the outliers** are re-polled, shown the reasoning they disagreed with.
+The number comes from the assembled scorecard - every factor taken from the seat that owns it,
+never an average - mapped by the framework's band rule. A spread still at two or more after the
+second round MUST be reported as unresolved and flagged for a person rather than averaged away.
+
+### 8.5.3 T-Shirt Sizing
+
+One pass, one size, mapped through a published table (XS 3, S 5, M 8, L 13, XL 21, XXL 34).
+The factor arithmetic still runs, and any divergence MUST be reported rather than reconciled -
+that gap is the finding. An unusable size falls back to the arithmetic and says so.
+
+### 8.5.4 Dot Voting
+
+Each seat is given a small fixed number of dots and spends them on the dimensions it believes
+will dominate. Dots at or above a two-thirds majority raise a factor to at least 4; dots from
+every seat raise it to 5. **Dots MUST only ever raise a score** - nobody spends a scarce dot to
+say something is easy, so silence is not evidence of ease.
+
+### 8.5.5 Affinity Mapping
+
+The story is grouped with past stories by similarity across all sixteen factor scores, never by
+shared vocabulary. A cluster above the similarity threshold lends its median delivered size; a
+weak match MUST be reported as weak and MUST NOT be used as an anchor.
+
+### 8.5.6 Bucket System
+
+The squad places the story relative to one calibration anchor - smaller, similar, or larger -
+and the bucket is that anchor's band stepped one rung accordingly. An anchor named by
+paraphrase is matched; an anchor that is not on the list MUST be refused rather than
+substituted, because a quietly chosen replacement yields a confident bucket derived from a
+reference nobody picked.
+
+---
 
 ### 15.2 Regression suite
 
@@ -2303,7 +2420,7 @@ cd frontend; npm run preview                             # serve dist/
 harness context assembly and the ledger, structured-output repair, Smart Code preview/apply safety
 and prompt-injection marking, Estimate Code behaviour, the estimation framework's own worked
 examples, schema migrations, estimate history and calibration, and job durability. All tests,
-`ruff`, `eslint`, and `tsc -b && vite build` MUST pass before a change is considered complete.
+`ruff`, `eslint`, `npm test` (vitest), and `tsc -b && vite build` MUST pass before a change is considered complete.
 
 **The suite MUST be run more than once.** Concurrency defects here are timing-dependent by
 nature: the completion-versus-cancellation race and the unbounded shutdown wait both passed on
@@ -2316,6 +2433,8 @@ that either is fixed.
 | `test_migrations.py` | An existing database gains columns and keeps its rows |
 | `test_estimate_history.py` | History outlives its job; aggregates computed in SQL |
 | `test_estimation_framework.py` | The four published §12 walkthroughs, and ledger reconciliation |
+| `frontend/src/renderMarkdown.test.ts` | The chat sanitiser under vitest/jsdom: 22 injection payloads including mutation XSS, plus the ordinary formatting it must still render |
+| `test_estimation_techniques.py` | Every factor has exactly one owner; cards can disagree; a wide spread re-polls only the outliers; the scorecard takes each factor from its owner rather than averaging; dots only raise; a weak affinity match is not used as an anchor; an invented bucket anchor is refused; the techniques stay distinguishable |
 | `test_yukti.py` | The register states both halves; unwired faculties are refused in code and answerable questions are not; spoken output carries no markup and shaping is idempotent; the vault skips tooling directories, ranks filenames, and refuses traversal; the memory bank stores only what was asked for, keeps provenance, supersedes, and never crosses owners |
 | `test_estimation_spread.py` | The estimator can tell stories apart; the scale's floor is reachable; silence is read against specificity and says so in the reason; every stage's event carries the story's own material; the checklist and the emitted stage list have not drifted apart |
 | `test_eagle.py` | Contract immutability and hashing; blackboard confidence; median aggregation; the spread rules; the three reviewers and their six required fields; bounded debate; the ten validation rules; the spike gate; reference similarity; snapshot and failure attribution |

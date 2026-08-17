@@ -37,7 +37,9 @@ flowchart LR
     A --> B --> C --> D --> E
 ```
 
-30 checklist steps, of which 27 apply to a story estimated without a repository. Three of them
+34 checklist steps, of which 27 apply to a story estimated without a repository and without
+a squad — the counts move with the run, because a step that cannot happen is removed rather
+than left permanently outstanding. Three of them
 (`apply_base_adjustments`, `apply_stack_adjustments`,
 `map_to_fibonacci`) come from one `calculate` event and two (`evaluate_gates`, `decide`) from
 one `policy_gate` event, because the arithmetic is a single indivisible operation but reads
@@ -517,6 +519,66 @@ compares it to what was reported. Also reports the dimension stability index, po
 across both passes, and whether any protected disagreement remains.
 
 Status is `PASS`, `PASS_WITH_WARNINGS`, or `HUMAN_REVIEW_REQUIRED`.
+
+---
+
+## Phase 4.5 — The session
+
+Everything above is one estimator's reading of the story. A **technique** is how a *team*
+reconsiders that reading, so it runs last and starts from the scorecard already built rather
+than from scratch: starting over would discard the evidence gathered and make the five
+techniques incomparable, since any difference between them would come from a different starting
+point rather than from the technique itself.
+
+The user picks one of five, and they are genuinely different in cost, in precision, and in the
+answer they can reach. Every one obeys the rule the rest of the pipeline runs on: **the squad
+votes, the code counts.** No schema a seat answers contains a story-point field.
+
+### 4.10 `technique_squad` — Seat the squad *(Planning Poker and Dot Voting)*
+
+Nine disciplines, each answerable for an exclusive slice of the sixteen factors: product,
+architecture, frontend, backend, data, test/automation, security, platform, delivery risk.
+Ownership is exclusive because when the estimate is written down, one person owned each call —
+shared ownership would give the assembled scorecard two candidate values and a tie-break nobody
+published.
+
+### 4.11 `technique_vote` — Collect each discipline's estimate
+
+Each seat scores only what it owns, without seeing the others, which is why real cards are
+played face down. A seat that does not answer is an empty chair rather than a failed session:
+the baseline stands in for it, and the result says so — an inferred dimension is never presented
+as somebody's first-hand judgement.
+
+A seat's **card** is the story sized as if all of it were as demanding as that seat's part.
+This is not a detail. The obvious implementation — laying a seat's one-to-three scores over the
+baseline — moves the total by a handful of points, never crosses a band edge, and returns an
+identical card from every seat: spread always zero, second round never fires, and what is left
+is a scoring pass wearing Planning Poker's clothes.
+
+### 4.12 `technique_round` — Re-poll the outliers *(conditional)*
+
+A spread of two ladder steps or more means the room is not looking at the same story. Only the
+seats holding the extreme cards are asked again, and they are shown the reasoning they
+disagreed with. Re-polling everyone when two people differ is how a short session becomes a long
+one, and on a CPU model it is minutes of wall clock for cards that will not move.
+
+### 4.13 `technique` — Reach the technique's number
+
+The number comes from the assembled scorecard — every factor taken from the seat that owns it,
+never an average — mapped by §9. A spread still at two or more after the second round is
+reported as **unresolved** and flagged for a person; a persistent disagreement is information
+about the story, not an averaging problem.
+
+The other three techniques arrive at a number by comparison rather than by scoring, so the
+factor arithmetic stands alongside them and **any divergence is reported, never reconciled**:
+
+- **T-Shirt Sizing** — one pass, one size, through a published table. Where the quick size and
+  the scored one part company is where the story hides its work.
+- **Affinity Mapping** — grouped with past stories on all sixteen factor scores, never on shared
+  vocabulary. A weak match is reported as weak and is not used as an anchor.
+- **Bucket System** — placed against a calibration anchor, smaller/similar/larger. An anchor the
+  model names that is not on the list is refused rather than substituted; quietly picking a
+  plausible replacement yields a confident number derived from a reference nobody chose.
 
 ---
 

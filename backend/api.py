@@ -88,6 +88,7 @@ from backend.estimation_framework import (
     MATURITY_TAXONOMY,
     StackProfile,
 )
+from backend.estimation_techniques import DEFAULT_TECHNIQUE, SQUAD, TECHNIQUES
 from backend.harness import RunLedger, sweep_directory
 from backend.jobs import FINISHED as FINISHED_JOB_STATES, Job, JobContext, JobRunner
 from backend.model import GemmaRuntime
@@ -310,6 +311,37 @@ def _origin_allowed(origin: str | None) -> bool:
     return origin in settings.cors_origins or (
         parsed.scheme in {"http", "https"} and parsed.hostname in {"localhost", "127.0.0.1"}
     )
+
+
+#: Ceiling on any single request body. Generous — the largest legitimate payload is a batch of
+#: stories or a document upload — and far below the point where buffering one costs the process
+#: something it notices.
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
+
+
+@app.middleware("http")
+async def request_size_boundary(request: Request, call_next):
+    """Refuse a body larger than the ceiling before anything reads it.
+
+    Starlette buffers the whole body before FastAPI validates it, so a route that would reject
+    a payload as malformed has already paid to hold it in memory. Checking the declared length
+    here costs nothing and puts a bound on the one input every endpoint shares. A body with no
+    declared length still reaches the route — this is a cheap ceiling, not a guarantee — but a
+    client sending one is not the case this is protecting against.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_REQUEST_BYTES:
+        return JSONResponse(
+            {
+                "detail": (
+                    f"That request is larger than the "
+                    f"{MAX_REQUEST_BYTES // (1024 * 1024)} MB limit."
+                ),
+                "code": "request_too_large",
+            },
+            status_code=413,
+        )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -1469,6 +1501,12 @@ async def run_talk_job(request: dict, context: JobContext) -> dict:
 job_runner.register("talk", run_talk_job)
 
 
+#: Ceiling on one spoken turn's audio, matching the 25 MB HTTP upload limit. Roughly twenty
+#: minutes of Opus — far past any turn anyone means to record, and short of the point where
+#: buffering it costs the process anything it will miss.
+MAX_VOICE_BYTES = 25 * 1024 * 1024
+
+
 @app.websocket("/api/talk/ws")
 async def talk_socket(websocket: WebSocket):
     if not _origin_allowed(websocket.headers.get("origin")):
@@ -1591,6 +1629,23 @@ async def talk_socket(websocket: WebSocket):
             if message.get("type") == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
+                # Bounded, like every other ingest path. An HTTP upload is capped at 25 MB and
+                # this one was not, so a recording nobody stopped grew in server memory with no
+                # ceiling and no feedback — reachable by leaving the microphone on, not only by
+                # malice. Refusing the turn and saying so beats truncating the audio silently,
+                # which would transcribe half a sentence and answer it confidently.
+                if len(audio_buffer) + len(message["bytes"]) > MAX_VOICE_BYTES:
+                    audio_buffer.clear()
+                    await send(
+                        "error",
+                        message=(
+                            f"That recording is longer than this session accepts "
+                            f"({MAX_VOICE_BYTES // (1024 * 1024)} MB). Record a shorter turn, "
+                            "or type it instead."
+                        ),
+                    )
+                    await send("state", value="idle")
+                    continue
                 audio_buffer.extend(message["bytes"])
                 continue
             raw = message.get("text")
@@ -1611,7 +1666,10 @@ async def talk_socket(websocket: WebSocket):
                     continue
                 suffix = ".webm" if "webm" in command.get("mime", "") else ".wav"
                 path = settings.uploads_dir / f"voice-{uuid4()}{suffix}"
-                path.write_bytes(audio_buffer)
+                # Off the loop. This can be megabytes, and the loop it would otherwise block is
+                # the single thread serving every other socket, SSE stream and request — the
+                # same reason the attachment read a few lines above is already threaded.
+                await asyncio.to_thread(path.write_bytes, bytes(audio_buffer))
                 audio_buffer.clear()
                 await send("state", value="thinking")
                 await send("status", content="Transcribing locally with Whisper…")
@@ -1814,6 +1872,21 @@ def estimate_code_config():
             "fibonacci": list(FIBONACCI_POINTS),
         },
         "factors": [factor.model_dump() for factor in FACTORS],
+        # The estimation techniques, served from the same definitions the service runs, so the
+        # picker can never offer something the backend does not implement.
+        "techniques": [
+            {
+                "id": item.id, "name": item.name, "tagline": item.tagline,
+                "precision": item.precision, "speed": item.speed, "best_for": item.best_for,
+                "how": item.how, "rule": item.rule, "model_calls": item.model_calls,
+            }
+            for item in TECHNIQUES
+        ],
+        "default_technique": DEFAULT_TECHNIQUE,
+        "squad": [
+            {"role": m.role, "label": m.label, "discipline": m.discipline, "owns": list(m.owns)}
+            for m in SQUAD
+        ],
         "maturity_levels": [
             {"level": level, **{key: value for key, value in data.items()}}
             for level, data in sorted(MATURITY_TAXONOMY.items(), reverse=True)

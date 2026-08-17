@@ -9,10 +9,12 @@ import { api, attachToJob } from './api'
 import { narrateStep } from './evidenceNarration'
 import { EstimateHistoryPanel } from './EstimateHistoryPanel'
 import { EstimateResultView, RECOMMENDATIONS } from './EstimateResultView'
+import { TechniquePanel } from './TechniquePanel'
+import { TechniquePicker } from './TechniquePicker'
 import { SystemStatusChip } from './SystemStatusChip'
 import { isJobActive } from './types'
 import type {
-  AgentEvent, EstimateConfig, EstimateResult, Level, StackProfile, Story,
+  AgentEvent, EstimateConfig, EstimateResult, Level, StackProfile, Story, TechniqueId,
 } from './types'
 
 /** Steps that only exist when a repository was supplied.
@@ -24,6 +26,12 @@ import type {
  *  twenty-seven that apply. */
 const REPO_STEPS = new Set(['repo_intelligence', 'repo_answers', 'change_plan'])
 
+/** Steps that only exist for the techniques that seat a squad. T-shirt sizing, affinity
+ *  mapping and the bucket system are a single pass, so showing "collect each discipline's
+ *  estimate" for them would list a row that can never complete. */
+const SQUAD_STEPS = new Set(['technique_squad', 'technique_vote', 'technique_round'])
+const SQUAD_TECHNIQUES = new Set(['planning_poker', 'dot_voting'])
+
 const steps = [
   'contract', 'requirements', 'repo_intelligence',
   'normalize', 'readiness', 'assemble_context', 'declare_stack', 'specialist_routing',
@@ -32,6 +40,7 @@ const steps = [
   'score_factors', 'apply_base_adjustments', 'apply_stack_adjustments', 'map_to_fibonacci',
   'evaluate_gates', 'decide', 'repo_answers', 'eagle_validation', 'eagle_reference',
   'change_plan', 'consistency_audit',
+  'technique_squad', 'technique_vote', 'technique_round', 'technique',
   'human_review',
 ]
 const labels: Record<string, string> = {
@@ -64,6 +73,10 @@ const labels: Record<string, string> = {
   eagle_reference: 'Anchor against historical stories',
   change_plan: 'Name what would actually change',
   consistency_audit: 'Replay and audit consistency',
+  technique: 'Run the chosen estimation technique',
+  technique_squad: 'Seat the squad',
+  technique_vote: 'Collect each discipline’s estimate',
+  technique_round: 'Re-poll the outliers',
   human_review: 'Hand off for human consensus',
 }
 
@@ -97,6 +110,10 @@ const NODE_MAP: Record<string, string[]> = {
   calculate: ['apply_base_adjustments', 'apply_stack_adjustments', 'map_to_fibonacci'],
   policy_gate: ['evaluate_gates', 'decide'],
   consistency_audit: ['consistency_audit'],
+  technique: ['technique'],
+  technique_squad: ['technique_squad'],
+  technique_vote: ['technique_vote'],
+  technique_round: ['technique_round'],
   human_review: ['human_review'],
 }
 /** Why each EAGLE step exists. The rest come from the flow diagram's node definitions, so
@@ -172,13 +189,21 @@ const PHASES: { id: string; title: string; blurb: string; steps: string[] }[] = 
       'map_to_fibonacci', 'evaluate_gates', 'decide', 'repo_answers', 'eagle_validation',
       'eagle_reference', 'change_plan', 'consistency_audit'],
   },
+  {
+    id: 'session', title: 'The session',
+    blurb: 'The technique you chose, run by a squad that owns different parts of the work.',
+    steps: ['technique_squad', 'technique_vote', 'technique_round', 'technique'],
+  },
   { id: 'human', title: 'Your decision', blurb: 'The team owns the number.', steps: ['human_review'] },
 ]
 
-/** The phases with the repository steps removed when no repository was supplied. */
-const phasesFor = (hasRepo: boolean) => hasRepo ? PHASES : PHASES.map(phase => ({
-  ...phase, steps: phase.steps.filter(step => !REPO_STEPS.has(step)),
-}))
+/** The phases, minus any step that cannot apply to this run.
+ *
+ *  A step that can never complete reads as a stall, and the counts stop meaning anything:
+ *  "12 of 30" is only true if all thirty were ever going to happen. */
+const phasesFor = (hidden: Set<string>) => PHASES
+  .map(phase => ({ ...phase, steps: phase.steps.filter(step => !hidden.has(step)) }))
+  .filter(phase => phase.steps.length > 0)
 
 /** Checklist step → the explanation for the stage that produces it. */
 const whyForStep = (step: string): string =>
@@ -339,7 +364,21 @@ export function EstimateCodeScreen({
   const [view, setView] = useState<'new' | 'history'>(initialView)
   const [story, setStory] = useState<Story>(emptyStory)
   const [stack, setStack] = useState<StackProfile>(defaultStack)
+  /** Which technique runs the session. The five differ in precision and in wall clock, so
+   *  this is a real choice rather than a label on the same run. */
+  const [technique, setTechnique] = useState<TechniqueId>('planning_poker')
+
+  const techniqueChosen = useRef(false)
   const [config, setConfig] = useState<EstimateConfig>()
+
+  // The backend owns the default technique. Applied once, and never over a choice the user
+  // has already made — `config` arrives asynchronously, and overwriting a selection when it
+  // lands would silently undo a deliberate click.
+  useEffect(() => {
+    if (config?.default_technique && !techniqueChosen.current) {
+      setTechnique(config.default_technique)
+    }
+  }, [config?.default_technique])
   const [stepsDone, setStepsDone] = useState<string[]>([])
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(false)
@@ -358,11 +397,15 @@ export function EstimateCodeScreen({
   /** The pipeline that applies to this run. Without a repository the three repository stages
    *  do not exist, and a checklist that lists them anyway is describing a different run. */
   const hasRepo = workspace.trim().length > 0
-  const runSteps = useMemo(
-    () => hasRepo ? steps : steps.filter(step => !REPO_STEPS.has(step)),
-    [hasRepo],
-  )
-  const phases = useMemo(() => phasesFor(hasRepo), [hasRepo])
+  const seatsSquad = SQUAD_TECHNIQUES.has(technique)
+  const hidden = useMemo(() => {
+    const set = new Set<string>()
+    if (!hasRepo) REPO_STEPS.forEach(item => set.add(item))
+    if (!seatsSquad) SQUAD_STEPS.forEach(item => set.add(item))
+    return set
+  }, [hasRepo, seatsSquad])
+  const runSteps = useMemo(() => steps.filter(step => !hidden.has(step)), [hidden])
+  const phases = useMemo(() => phasesFor(hidden), [hidden])
 
   /** The stage in flight: the first that has not reported. Derived rather than counted, because
    *  some stages legitimately never run — there is no debate when nothing is disputed. */
@@ -515,7 +558,8 @@ export function EstimateCodeScreen({
     begin()
     try {
       const { job_id } = await api.submitEstimate(
-        { ...next, acceptance_criteria: next.acceptance_criteria.filter(Boolean), stack },
+        { ...next, acceptance_criteria: next.acceptance_criteria.filter(Boolean), stack,
+          technique },
         workspace.trim(),
       )
       await follow(job_id)
@@ -549,7 +593,7 @@ Additional detail supplied by the team: ${correction}` : ''),
     begin()
     try {
       const { job_id } = await api.submitEstimateBatch(
-        items.map(item => ({ ...item, stack })), workspace.trim(),
+        items.map(item => ({ ...item, stack, technique })), workspace.trim(),
       )
       await follow(job_id)
     } catch (cause) { setLoading(false); setError((cause as Error).message) }
@@ -671,7 +715,13 @@ Additional detail supplied by the team: ${correction}` : ''),
         }}
       />}
 
-      {view === 'new' && <><StackPanel stack={stack} config={config} onChange={setStack}
+      {view === 'new' && <><TechniquePicker
+        techniques={config?.techniques ?? []}
+        value={technique}
+        onChange={value => { techniqueChosen.current = true; setTechnique(value) }}
+        disabled={loading}
+      />
+      <StackPanel stack={stack} config={config} onChange={setStack}
         workspace={workspace} onWorkspaceChange={setWorkspace} />
 
       <div className="estimate-workspace">
@@ -815,6 +865,8 @@ Additional detail supplied by the team: ${correction}` : ''),
           <em className={`chip-${RECOMMENDATIONS[item.recommendation].tone}`}>{RECOMMENDATIONS[item.recommendation].label}</em>
         </button>)}
       </section>}
+
+      {result?.technique && <TechniquePanel outcome={result.technique} />}
 
       {result && <EstimateResultView
         result={result}

@@ -14,6 +14,7 @@ given the opportunity.
 """
 
 import asyncio
+import re
 from datetime import datetime
 from typing import Annotated, TypedDict
 
@@ -66,11 +67,52 @@ class TalkAgentGraph:
         "algorithm", "calculus", "physics", "matrix", "probability", "explain visually",
     }
 
-    RESEARCH_TERMS = {
-        "latest", "today's news", "todays news", "current news", "breaking news",
-        "search the web", "search internet", "look up", "recent news", "weather",
-        "current price", "current events", "this week", "this month", "this year",
-        "alternative to", "alternatives to", "cheaper than", "compare prices", "pricing for",
+    # Research routing, in three parts rather than one flat list.
+    #
+    # A single list of exact phrases is brittle in the way that matters most: "today's news"
+    # was in it and "tell me the news today" was not, so the most obvious request anyone makes
+    # of a voice assistant went unsearched — and then answered from an empty context.
+    #
+    # Instead: a **live topic** is one whose answer changes without anyone editing it, and it
+    # triggers on its own. A **recency** marker only triggers alongside a request for
+    # information, because "how are you today" is not a search.
+
+    #: Subjects that are current-state by nature. Matched on word boundaries — "news" must not
+    #: fire on "newsletter", nor "score" on "scorecard".
+    LIVE_TOPICS = {
+        "news", "headline", "headlines", "weather", "forecast", "temperature", "rainfall",
+        "rain", "snow", "humidity", "wind speed",
+        "stock", "stocks", "share price", "share prices", "exchange rate", "market",
+        "who won", "score", "scores", "fixtures", "standings", "election", "elections",
+        "traffic", "outage", "outages", "release date", "released", "announced",
+        "what happened", "what's happening", "whats happening", "going on in the world",
+    }
+
+    #: Time markers. These sharpen a request; they do not make one.
+    RECENCY = {
+        "today", "tonight", "this morning", "this afternoon", "this evening", "yesterday",
+        "tomorrow", "right now", "currently", "at the moment", "these days", "latest",
+        "recent", "recently", "current", "breaking", "up to date", "as of now", "so far",
+        "this week", "this month", "this year", "nowadays",
+    }
+
+    #: The shape of a request for information, for pairing with a recency marker.
+    ASKING = {
+        "what", "who", "when", "where", "which", "how much", "how many", "tell me",
+        "give me", "show me", "find", "any update", "updates", "price", "cost", "worth",
+        "status", "result", "results", "happening", "going on", "is there", "are there",
+    }
+
+    #: Asked for explicitly. Always searches, whatever the subject.
+    EXPLICIT_SEARCH = {
+        "search the web", "search the internet", "search internet", "search online",
+        "look it up", "look up", "google", "check online", "on the web", "browse for",
+    }
+
+    #: Comparison shopping: inherently about what things cost right now.
+    COMPARISON = {
+        "alternative to", "alternatives to", "cheaper than", "cheaper alternative",
+        "compare prices", "pricing for", "how much does", "competitors",
     }
 
     #: The second brain is asked for by name, or by asking about something that is the user's
@@ -142,10 +184,36 @@ class TalkAgentGraph:
             ),
         }
 
+    @classmethod
+    def research_trigger(cls, text: str) -> list[str]:
+        """The phrases that make this turn need live data, or [] if it does not.
+
+        Returned rather than a bool so the routing decision can be shown to the user with the
+        words that produced it — the same rule every other router in this application follows.
+        """
+        lowered = text.lower()
+
+        def present(terms: set[str]) -> list[str]:
+            # Word boundaries, so "news" does not fire on "newsletter". Multi-word phrases are
+            # escaped and matched whole.
+            return sorted(
+                term for term in terms
+                if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lowered)
+            )
+
+        explicit = present(cls.EXPLICIT_SEARCH)
+        topics = present(cls.LIVE_TOPICS)
+        comparison = present(cls.COMPARISON)
+        if explicit or topics or comparison:
+            return sorted({*explicit, *topics, *comparison})
+        # A time marker alone is not a search. Paired with a request for information it is.
+        recency = present(cls.RECENCY)
+        return sorted({*recency, *present(cls.ASKING)}) if recency and present(cls.ASKING) else []
+
     async def _route_visual(self, state: TalkState) -> dict:
         lowered = state["voice_input"].lower()
         visual = sorted(term for term in self.VISUAL_TERMS if term in lowered)
-        research = sorted(term for term in self.RESEARCH_TERMS if term in lowered)
+        research = self.research_trigger(state["voice_input"])
         recall = sorted(term for term in self.RECALL_TERMS if term in lowered)
         briefing = sorted(term for term in self.BRIEFING_TERMS if term in lowered)
         reasons = []

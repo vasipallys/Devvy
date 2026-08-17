@@ -498,6 +498,69 @@ export interface EstimateConfig {
     backend: { id: BackendStack; label: string }[]
     scenarios: { id: Scenario; label: string }[]
   }
+  techniques?: TechniqueDefinition[]
+  default_technique?: TechniqueId
+  squad?: SquadSeat[]
+}
+
+export type TechniqueId =
+  | 'planning_poker' | 'tshirt' | 'dot_voting' | 'affinity' | 'bucket'
+
+/** One estimation technique, as the backend defines it. The picker renders these rather than
+ *  a hardcoded list, so it can never offer something the service does not implement. */
+export interface TechniqueDefinition {
+  id: TechniqueId
+  name: string
+  tagline: string
+  precision: string
+  speed: string
+  best_for: string
+  how: string
+  /** The published rule that turns the squad's judgement into a number. */
+  rule: string
+  model_calls: string
+}
+
+export interface SquadSeat {
+  role: string
+  label: string
+  discipline: string
+  owns: string[]
+}
+
+/** One discipline's contribution to a session. */
+export interface MemberVote {
+  role: string
+  label: string
+  discipline: string
+  owns: string[]
+  /** The card played, where the technique produces one. */
+  points: number | null
+  scores: Record<string, number>
+  dots: string[]
+  reasoning: string
+  /** True when this seat did not answer and the baseline stood in for it. */
+  inferred: boolean
+  revised_from: number | null
+}
+
+export interface TechniqueOutcome {
+  technique: TechniqueId
+  name: string
+  points: Points
+  verdict: string
+  votes: MemberVote[]
+  spread: number
+  rounds: number
+  consensus: 'unanimous' | 'consensus' | 'converged' | 'unresolved' | 'n/a'
+  framework_points: Points
+  /** Ladder steps between this technique and the factor arithmetic. Reported, never hidden. */
+  divergence: number
+  detail: Record<string, any>
+  steps: string[]
+  needs_human: boolean
+  facilitator_note: string
+  definition: TechniqueDefinition
 }
 
 /** A previously completed estimate. Durable, searchable, and independent of job retention. */
@@ -568,6 +631,7 @@ export interface Story {
   key?: string
   source: 'manual' | 'jira' | 'upload'
   stack?: StackProfile
+  technique?: TechniqueId
 }
 
 /** EAGLE — the governance layer around the deterministic calculator. */
@@ -701,6 +765,8 @@ export interface RepositoryReport {
 
 export interface EstimateResult extends Record<string, unknown> {
   framework: { name: string; version: string; document: string; factor_count: number }
+  /** The session the chosen technique actually ran. */
+  technique?: TechniqueOutcome
   story: Story
   stack: StackProfile & {
     frontend_label: string

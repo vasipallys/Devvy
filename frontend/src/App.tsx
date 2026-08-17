@@ -26,7 +26,10 @@ const MODE_WHY: Record<Mode, string> = {
   document: 'Answers from your attached files. Their text is capped and marked untrusted evidence, so instructions inside a document cannot redirect the answer.',
 }
 
-function renderMarkdown(content: string): string {
+/** Exported for testing. This is the only place in the application that turns model or
+ *  document text into live HTML, so it is the only place an injection could land — which
+ *  makes it the one function most worth being able to attack directly. */
+export function renderMarkdown(content: string): string {
   // Generated files are served by FastAPI, not the Vite frontend origin.
   // Rewriting here also fixes images loaded later from persisted conversation history.
   const withBackendAssets = content.replace(

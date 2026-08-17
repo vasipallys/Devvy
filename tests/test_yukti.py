@@ -139,9 +139,19 @@ def test_the_prompt_tells_it_to_say_when_it_did_not_understand():
 
 def test_the_prompt_carries_the_grounding_contract_and_the_speaking_rules():
     prompt = system_prompt("sir", now="Monday")
-    assert "Do not guess, extrapolate" in prompt
+    # The *voice* form of the contract, not the extraction form. See
+    # `test_grounding_contract.test_talk_carries_the_voice_contract` for why.
+    assert "<grounding>" in prompt
+    assert "Never invent a fact that changes over time" in prompt
     assert "<speaking>" in prompt
     assert "No Markdown" in prompt
+
+
+def test_the_prompt_does_not_gag_ordinary_conversation():
+    """The bug this replaced: every question outside the prompt's own text got one sentence."""
+    prompt = " ".join(system_prompt("sir", now="Monday").split())
+    assert "General knowledge and ordinary conversation need no sources" in prompt
+    assert "The provided text does not contain this information" not in prompt
 
 
 def test_context_is_marked_as_data_not_instructions():
@@ -402,3 +412,63 @@ def test_memory_context_shows_the_provenance(session):
 def test_every_capability_is_renderable_by_the_interface():
     for item in CAPABILITIES:
         assert item.id and item.title and item.summary
+
+
+# -- Research routing -----------------------------------------------------------------------
+#
+# The reported failure: "tell me the news today" matched none of a flat list that contained
+# "today's news", so no search ran — and the answer came from an empty context.
+
+from backend.agent_graph import TalkAgentGraph  # noqa: E402
+
+
+@pytest.mark.parametrize("said", [
+    "Hey, tell me the news today, please",
+    "what's the news",
+    "give me the headlines",
+    "what's the weather like",
+    "will it rain tomorrow",
+    "who won the match last night",
+    "what happened in the election",
+    "search the web for rust jobs",
+    "look up the current bitcoin price",
+    "find me a cheaper alternative to Kit for email marketing",
+    "how much does Notion cost",
+    "what is the latest on the outage",
+])
+def test_a_question_about_the_world_right_now_searches(said):
+    assert TalkAgentGraph.research_trigger(said), f"no search for: {said}"
+
+
+@pytest.mark.parametrize("said", [
+    "how are you today",
+    "what did i write in my notes about the funnel",
+    "explain eigenvectors visually",
+    "remember that the mid tier is $29",
+    "call me Vikram",
+    "what is a monad",
+    "can you draft a short apology for me",
+])
+def test_conversation_does_not_pay_for_a_search(said):
+    """A false positive costs a thirty-second network round trip on every casual remark."""
+    assert TalkAgentGraph.research_trigger(said) == []
+
+
+@pytest.mark.parametrize("said", [
+    "I read the newsletter this morning",   # 'newsletter' must not fire 'news'
+    "check my scorecard formatting",        # 'scorecard' must not fire 'score'
+    "I've been training for a marathon",    # 'training' must not fire 'rain'
+    "the drain is blocked",                 # 'drain' must not fire 'rain'
+])
+def test_topics_match_whole_words_only(said):
+    assert TalkAgentGraph.research_trigger(said) == []
+
+
+def test_a_time_marker_alone_is_not_a_search():
+    """"Today" sharpens a request for information; it does not make one."""
+    assert TalkAgentGraph.research_trigger("today") == []
+    assert TalkAgentGraph.research_trigger("tell me the price today")
+
+
+def test_the_routing_reason_quotes_the_words_that_decided_it():
+    assert "news" in TalkAgentGraph.research_trigger("tell me the news today")

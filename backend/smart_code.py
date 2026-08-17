@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import difflib
 import hashlib
@@ -455,6 +456,24 @@ def _safe_path(root: Path, value: str, *, model_supplied: bool = False) -> Path:
 
 def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _build_diffs(root: Path, materialized: dict[Path, str]) -> dict[str, str]:
+    """Unified diffs for every proposed file. Synchronous — always called off the event loop."""
+    diffs: dict[str, str] = {}
+    for path, content in materialized.items():
+        old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        name = _relative(root, path)
+        diffs[name] = "".join(
+            difflib.unified_diff(
+                old.splitlines(keepends=True),
+                content.splitlines(keepends=True),
+                fromfile=f"a/{name}",
+                tofile=f"b/{name}",
+                n=3,
+            )
+        )
+    return diffs
 
 
 def _words(value: str) -> set[str]:
@@ -1586,18 +1605,11 @@ RETRIEVED EVIDENCE:
                     },
                 }
             )
-        diffs: dict[str, str] = {}
-        for path, content in materialized.items():
-            old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-            diffs[_relative(root, path)] = "".join(
-                difflib.unified_diff(
-                    old.splitlines(keepends=True),
-                    content.splitlines(keepends=True),
-                    fromfile=f"a/{_relative(root, path)}",
-                    tofile=f"b/{_relative(root, path)}",
-                    n=3,
-                )
-            )
+        # Reading every touched file and diffing it is bounded work, but it is one blocking
+        # read per file plus the diff itself, and it was running on the event loop that serves
+        # every other request. Threaded as one unit rather than per file: the switching cost of
+        # twenty hops would outweigh the reads it is trying to get out of the way.
+        diffs = await asyncio.to_thread(_build_diffs, root, materialized)
         token = str(uuid4())
         with self._lock:
             self._previews[token] = StoredPreview(

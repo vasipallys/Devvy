@@ -17,6 +17,14 @@ from backend.smart_code import (
 )
 
 
+#: Every estimate runs a technique. These tests are about the *core* pipeline — the repair
+#: loop, the blind pass, the heuristic fallback — so they pin the cheapest technique and count
+#: its cost explicitly rather than letting it drift into the totals. The techniques have their
+#: own suite in `test_estimation_techniques.py`.
+SESSION_TECHNIQUE = "tshirt"
+SESSION_CALLS = 1
+
+
 class RuntimeStub:
     pass
 
@@ -82,6 +90,7 @@ def test_estimate_explains_the_number_and_prioritizes_actions():
             }
         ),
         Story(
+            technique=SESSION_TECHNIQUE,
             title="Implement a novel scheduling algorithm",
             user_story="Schedule work fairly across competing queues.",
             acceptance_criteria=["No queue can starve"],
@@ -136,7 +145,8 @@ async def test_estimate_refuses_to_estimate_when_uncertainty_is_maximal(tmp_path
         RuntimeStub(), Settings(app_data_dir=tmp_path / "data", phoenix_enabled=False)
     )
     result = await service.estimate(
-        Story(title="Integrate vendor API", stack=StackProfile(backend="fastapi"))
+        Story(title="Integrate vendor API", technique=SESSION_TECHNIQUE,
+              stack=StackProfile(backend="fastapi"))
     )
 
     assert result["recommendation"] == "spike_first"
@@ -192,6 +202,7 @@ async def test_estimate_mixes_model_scores_with_heuristics_and_labels_the_differ
     )
     result = await service.estimate(
         Story(
+            technique=SESSION_TECHNIQUE,
             title="Add biometric login",
             user_story="Users authenticate with device biometrics through the existing service.",
             acceptance_criteria=["Authentication failures are handled securely"],
@@ -199,7 +210,9 @@ async def test_estimate_mixes_model_scores_with_heuristics_and_labels_the_differ
         )
     )
 
-    assert runtime.calls == 2, "primary and blind passes each accept a sufficient scorecard"
+    assert runtime.calls == 2 + SESSION_CALLS, (
+        "primary and blind passes each accept a sufficient scorecard"
+    )
     assert len(result["scorecard"]) == 16
     provenance = result["evidence"]["scoring_provenance"]
     assert provenance["model_scored"] == 9
@@ -242,6 +255,7 @@ async def test_estimate_gives_bare_integer_scores_a_readable_reason(tmp_path):
     )
     result = await service.estimate(
         Story(
+            technique=SESSION_TECHNIQUE,
             title="Publish order events to Kafka",
             user_story="Publish an event on order creation so downstream systems react.",
             acceptance_criteria=["Failures land in a dead letter queue"],
@@ -284,6 +298,7 @@ async def test_estimate_falls_back_to_heuristics_when_the_model_cannot_hold_the_
     )
     result = await service.estimate(
         Story(
+            technique=SESSION_TECHNIQUE,
             title="Migrate the reporting schema",
             user_story="Move reporting tables to the new warehouse with a backfill.",
             acceptance_criteria=["Existing dashboards keep working"],
@@ -294,7 +309,9 @@ async def test_estimate_falls_back_to_heuristics_when_the_model_cannot_hold_the_
     # The extra generations are the point: dropping straight to keyword heuristics produced an
     # estimate in which the model contributed nothing at all, so it is asked a question it can
     # actually answer before the pipeline gives up on it.
-    assert runtime.calls == 6, "each pass repairs once, then tries the simpler question"
+    assert runtime.calls == 6 + SESSION_CALLS, (
+        "each pass repairs once, then tries the simpler question"
+    )
     assert result["evidence"]["scoring_provenance"]["model_scored"] == 0
     assert result["evidence"]["scoring_provenance"]["heuristic_filled"] == 16
     assert result["points"] in (3, 5, 8, 13, 21, 34)
@@ -401,6 +418,7 @@ async def test_smart_code_repairs_empty_edit_response(tmp_path):
         )
     )
 
+    # Smart Code, not estimation: no session runs here, so no session cost to add.
     assert runtime.calls == 2
     assert preview["can_apply"] is True
     assert preview["edits"][0]["action"] == "replace"
@@ -549,6 +567,7 @@ async def test_skipping_the_blind_review_does_not_change_the_estimate(tmp_path):
         runtime, Settings(app_data_dir=tmp_path / "data", phoenix_enabled=False)
     ).estimate(
         Story(
+            technique=SESSION_TECHNIQUE,
             title="Publish order events to Kafka",
             user_story="Publish an event on order creation so downstream systems react.",
             acceptance_criteria=["Failures land in a dead letter queue"],
@@ -559,7 +578,9 @@ async def test_skipping_the_blind_review_does_not_change_the_estimate(tmp_path):
 
     review = [item for item in events if item["stage"] == "blind_review"]
     assert any("not required" in item.get("label", "") for item in review)
-    assert runtime.calls == 1, "the second generation is skipped, not merely ignored"
+    assert runtime.calls == 1 + SESSION_CALLS, (
+        "the second generation is skipped, not merely ignored"
+    )
     # Every factor keeps exactly the score the model gave it — the point of the test is that a
     # skipped second pass moves nothing, so the whole distribution has to survive, not just its
     # shape. A uniform scorecard could not show that; it has no distribution to lose.
@@ -579,7 +600,8 @@ async def test_blind_review_runs_when_a_second_opinion_could_change_the_answer(t
     from backend.estimation_pipeline import assessment
 
     def primary_for(**overrides):
-        story = Story(title="x", stack=StackProfile(backend="spring_boot", **overrides.pop("stack", {})))
+        story = Story(title="x", technique=SESSION_TECHNIQUE,
+                      stack=StackProfile(backend="spring_boot", **overrides.pop("stack", {})))
         scorecard = build_scorecard(
             EstimateDraft.model_validate({"scores": full_scorecard(**overrides)}), story
         )

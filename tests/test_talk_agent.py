@@ -58,7 +58,10 @@ async def test_talk_router_reports_why_it_routed(monkeypatch):
 
     both = await route("show me the latest news and visualize the algorithm")
     assert both["requires_research"] is True and both["requires_animation"] is True
-    assert "'latest'" in both["route_reason"]
+    # The reason names the *live topic* that decided it. "latest" is only a time marker: it
+    # sharpens a request for information and never makes one on its own, so quoting it here
+    # would credit the decision to the wrong word.
+    assert "'news'" in both["route_reason"]
     assert "'algorithm'" in both["route_reason"]
 
     plain = await route("how was your day")

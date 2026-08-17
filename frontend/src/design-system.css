@@ -722,3 +722,9 @@ body.dock-resizing *{cursor:col-resize!important}
 .eng-issues li{display:flex;gap:8px;align-items:flex-start;padding:8px 11px;border-radius:8px;
   background:#241715;color:#ffb4ab;font-size:10px;line-height:1.55}
 .eng-issues svg{flex:none;margin-top:2px}
+
+/* Wide content scrolls inside its own box, never by widening the page.
+   `.scroll` was being used as a wrapper in two panels while matching no rule at all, so a
+   table wider than its column was simply clipped and the far columns were unreachable. */
+.scroll{overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+.scroll>table{min-width:max-content}

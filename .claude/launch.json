@@ -4,21 +4,22 @@
     {
       "name": "backend",
       "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "backend"],
+      "runtimeArgs": [
+        "-m",
+        "backend"
+      ],
       "port": 8765
     },
     {
       "name": "frontend",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["frontend/node_modules/vite/bin/vite.js", "frontend", "--open", "false"],
+      "runtimeArgs": [
+        "frontend/node_modules/vite/bin/vite.js",
+        "frontend",
+        "--open",
+        "false"
+      ],
       "port": 5173
-    },
-    {
-      "name": "frontend-preview",
-      "runtimeExecutable": "node",
-      "runtimeArgs": ["frontend/node_modules/vite/bin/vite.js", "preview", "frontend",
-                      "--port", "4173"],
-      "port": 4173
     }
   ]
 }

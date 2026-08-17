@@ -445,8 +445,12 @@ def test_every_pipeline_checkpoint_has_a_stage_that_can_produce_it():
     }
     assert len(checkpoints) > 20, "NODE_MAP was not parsed"
 
+    # Two emission styles, both of which count. Matching only the dict literal left the
+    # technique stages invisible to this check the moment they were added through the `_emit`
+    # helper — a blind spot in the very test whose job is to have none.
     source = (root / "backend" / "estimate_code.py").read_text(encoding="utf-8")
     emitted = set(re.findall(r'"stage": "(\w+)"', source))
+    emitted |= set(re.findall(r'_emit\(\s*progress,\s*"(\w+)"', source))
     unreachable = sorted(set(checkpoints) - emitted)
     assert not unreachable, f"checklist steps no stage emits: {unreachable}"
 

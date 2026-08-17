@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import logging
 import io
 import json
 import re
@@ -53,6 +54,41 @@ from backend.estimation_framework import (
     spike_template,
 )
 from backend.engineering import analyse_requirement
+from backend.estimation_techniques import (
+    DEFAULT_TECHNIQUE,
+    DOTS_PER_MEMBER,
+    OWNER_OF,
+    TECHNIQUE_BY_ID,
+    TECHNIQUE_IDS,
+    MemberVote,
+    TechniqueOutcome,
+    affinity_outcome,
+    apply_dots,
+    bucket_outcome,
+    card_for,
+    dot_outcome,
+    dot_tally,
+    facilitator_note,
+    match_anchor,
+    outliers,
+    poker_outcome,
+    squad_for,
+    tshirt_outcome,
+)
+from backend.technique_prompts import (
+    AnchorVote,
+    ClusterVote,
+    DotVote,
+    SeatVote,
+    SizeVote,
+    anchor_prompt,
+    cluster_prompt,
+    dot_prompt,
+    seat_example,
+    seat_prompt,
+    seat_scores,
+    size_prompt,
+)
 from backend.harness import ContextSource, assemble_context, GROUNDING_CONTRACT_BRIEF
 from backend.repo_evidence import (
     RepositoryEvidence,
@@ -94,6 +130,8 @@ from backend.estimation_pipeline import (
 from backend.model import GemmaRuntime
 from backend.structured_output import generate_structured
 
+logger = logging.getLogger(__name__)
+
 #: How many of the 16 factors the model must score before its answer is accepted.
 #: Below this the repair loop runs with the specific missing factors named.
 MIN_MODEL_SCORED_FACTORS = 8
@@ -115,6 +153,18 @@ class Story(BaseModel):
     components: list[str] = Field(default_factory=list)
     source: Literal["manual", "jira", "upload"] = "manual"
     stack: StackProfile = Field(default_factory=StackProfile)
+    #: How the squad should estimate this story. The techniques genuinely differ in cost and
+    #: precision — see `estimation_techniques.TECHNIQUES` — so this is a real choice, not a
+    #: label on the same run.
+    technique: str = DEFAULT_TECHNIQUE
+
+    @field_validator("technique", mode="before")
+    @classmethod
+    def known_technique(cls, value: Any) -> str:
+        chosen = str(value or "").strip() or DEFAULT_TECHNIQUE
+        if chosen not in TECHNIQUE_IDS:
+            raise ValueError(f"Unknown estimation technique: {chosen}")
+        return chosen
 
     @field_validator("acceptance_criteria", mode="before")
     @classmethod
@@ -1214,10 +1264,303 @@ def _band_edges(score: int) -> tuple[int, int, int]:
     return 65, score, 80
 
 
+def _squad_factor(factor: str, score: int, *, owner: str, note: str) -> FactorScore:
+    """One factor of the squad's assembled scorecard, carrying who decided it.
+
+    Provenance is `model` only where a seat actually spoke for the dimension. A baseline score
+    that nobody at the table examined is `heuristic`, and mislabelling it would let an
+    unexamined number wear the authority of a specialist's judgement.
+    """
+    definition = FACTOR_BY_ID[factor]
+    if owner == "baseline":
+        reason = "No seat owned this dimension in this session; the baseline score stands."
+    else:
+        label = OWNER_OF[factor].label
+        reason = f"{label} owns this dimension. {note}".strip()
+    return FactorScore(
+        factor=factor,
+        number=definition.number,
+        label=definition.label,
+        group=definition.group,
+        score=score,
+        reason=reason[:300],
+        provenance="heuristic" if owner == "baseline" else "model",
+    )
+
+
+def _emit(progress, stage: str, status: str, label: str, *, detail: str = "", evidence=None):
+    """Report a stage if anyone is listening.
+
+    Every technique emits as it goes rather than in a burst at the end. A squad of nine on a
+    CPU model is minutes of wall clock, and a checklist that fills in only once the session is
+    over tells the person waiting nothing about whether it is working.
+    """
+    if progress is None:
+        return
+    event = {"stage": stage, "status": status, "label": label}
+    if detail:
+        event["detail"] = detail
+    if evidence:
+        event["evidence"] = evidence
+    progress(event)
+
+
 class EstimateService:
     def __init__(self, runtime: GemmaRuntime, settings: Settings):
         self.runtime = runtime
         self.settings = settings
+
+    # -- The estimation techniques ---------------------------------------------------------
+    #
+    # Each runs against the scorecard the main pipeline has already produced. That baseline is
+    # the story as read by one estimator; a technique is how a *team* reconsiders it, so
+    # starting from scratch would throw away work and, worse, would make the techniques
+    # incomparable — any difference between them would be noise from a different starting
+    # point rather than the technique doing its job.
+
+    async def _seat_vote(
+        self,
+        member,
+        story_block: str,
+        baseline: dict[str, int],
+        stack: StackProfile,
+        round_two: str = "",
+    ) -> MemberVote:
+        """Ask one discipline for its own dimensions. Never for a number."""
+        vote = MemberVote(
+            role=member.role, label=member.label, discipline=member.discipline,
+            owns=list(member.owns),
+        )
+        system, user = seat_prompt(member, story_block, round_two)
+        try:
+            answer = await generate_structured(
+                self.runtime, SeatVote, system, user,
+                max_new_tokens=min(384, self.settings.estimate_max_output_tokens),
+                example=seat_example(member).model_dump(),
+            )
+        except Exception as exc:
+            # A seat that cannot answer is an empty chair, not a failed session. The baseline
+            # stands in for it and the result says so — an inferred dimension must never be
+            # presented as somebody's first-hand judgement.
+            logger.warning("Seat %s did not vote: %s", member.role, exc)
+            vote.inferred = True
+            vote.reasoning = "This seat did not answer; the baseline scorecard stood in."
+            vote.scores = {factor: baseline[factor] for factor in member.owns}
+            vote.points = card_for(vote, baseline, stack)
+            return vote
+
+        owned = set(member.owns)
+        parsed = seat_scores(answer, owned)
+        for factor, packed in parsed.items():
+            value, _, _why = packed.partition("|")
+            vote.scores[factor] = int(value)
+        missing = owned - set(vote.scores)
+        for factor in missing:
+            vote.scores[factor] = baseline[factor]
+        # Inferred only when the seat contributed *nothing*. A partial answer is still that
+        # person's judgement on the dimensions they did reach.
+        vote.inferred = len(missing) == len(owned)
+        vote.reasoning = (answer.note or "").strip() or "; ".join(
+            f"{FACTOR_BY_ID[factor].label}: {packed.partition('|')[2]}"
+            for factor, packed in parsed.items() if packed.partition('|')[2]
+        )[:400]
+        vote.points = card_for(vote, baseline, stack)
+        return vote
+
+    async def _planning_poker(
+        self, story: Story, story_block: str, baseline: dict[str, int],
+        routed_roles: list[str], progress,
+    ) -> tuple[TechniqueOutcome, list[FactorScore] | None]:
+        squad = squad_for(_story_evidence(story), routed_roles)
+        _emit(progress, "technique_squad", "completed",
+              f"{len(squad)} discipline(s) at the table",
+              detail=(
+                  "Each scores only the dimensions it owns, without seeing the others — the "
+                  "same reason real cards are played face down."
+              ),
+              evidence={"squad": [
+                  {"role": m.role, "label": m.label, "discipline": m.discipline,
+                   "owns": list(m.owns)} for m in squad
+              ]})
+
+        # Sequentially, not concurrently: generation is already serialised by a lock in the
+        # runtime, so gathering would only queue the same work while making progress
+        # unreportable until the last seat finished.
+        votes: list[MemberVote] = []
+        for member in squad:
+            _emit(progress, "technique_vote", "running", f"{member.label} is estimating")
+            vote = await self._seat_vote(member, story_block, baseline, story.stack)
+            votes.append(vote)
+            _emit(progress, "technique_vote", "completed",
+                  f"{member.label} plays {vote.points}",
+                  detail=vote.reasoning,
+                  evidence={"role": vote.role, "points": vote.points,
+                            "scores": vote.scores, "inferred": vote.inferred})
+
+        rounds = 1
+        extremes = outliers(votes)
+        if extremes:
+            rounds = 2
+            table = "\n".join(
+                f"- {item.label} played {item.points}: {item.reasoning}"
+                for item in votes if item.role not in extremes and item.reasoning
+            )
+            _emit(progress, "technique_round", "running",
+                  f"Spread too wide — {len(extremes)} seat(s) re-play",
+                  detail=(
+                      "Only the extremes are re-polled. Re-asking the whole room when two "
+                      "people disagree is how a short session becomes a long one."
+                  ),
+                  evidence={"outliers": extremes})
+            for index, vote in enumerate(votes):
+                if vote.role not in extremes:
+                    continue
+                member = next(m for m in squad if m.role == vote.role)
+                revised = await self._seat_vote(
+                    member, story_block, baseline, story.stack, round_two=table
+                )
+                revised.revised_from = vote.points
+                votes[index] = revised
+                _emit(progress, "technique_round", "completed",
+                      f"{member.label}: {vote.points} → {revised.points}",
+                      detail=revised.reasoning,
+                      evidence={"role": revised.role, "from": vote.points,
+                                "to": revised.points})
+
+        outcome, calculation, scores = poker_outcome(votes, baseline, story.stack, rounds)
+        override = [
+            _squad_factor(
+                factor,
+                scores[factor],
+                owner=outcome.detail["attribution"].get(factor, "baseline"),
+                note=next(
+                    (v.reasoning for v in votes
+                     if v.role == outcome.detail["attribution"].get(factor)), ""
+                ),
+            )
+            for factor in FACTOR_IDS
+        ]
+        return outcome, override
+
+    async def _tshirt(self, story_block: str, framework) -> TechniqueOutcome:
+        system, user = size_prompt(story_block)
+        try:
+            answer = await generate_structured(
+                self.runtime, SizeVote, system, user, max_new_tokens=192,
+                example=SizeVote(size="M", why="one clause on why it is that size").model_dump(),
+            )
+            return tshirt_outcome(answer.size, (answer.why or "").strip(), framework)
+        except Exception as exc:
+            logger.warning("T-shirt sizing failed: %s", exc)
+            return tshirt_outcome("", f"The sizing pass failed: {exc}", framework, inferred=True)
+
+    async def _dot_voting(
+        self, story: Story, story_block: str, baseline: dict[str, int],
+        routed_roles: list[str], progress,
+    ) -> tuple[TechniqueOutcome, list[FactorScore] | None]:
+        squad = squad_for(_story_evidence(story), routed_roles)
+        catalogue = "\n".join(f"  {item.id} — {item.label}" for item in FACTORS)
+        _emit(progress, "technique_squad", "completed",
+              f"{len(squad)} discipline(s), {DOTS_PER_MEMBER} dots each",
+              detail=(
+                  "Scarcity is the mechanism: three dots force a ranking in a way that rating "
+                  "sixteen dimensions does not."
+              ),
+              evidence={"squad": [m.label for m in squad], "dots": DOTS_PER_MEMBER})
+        votes: list[MemberVote] = []
+        for member in squad:
+            vote = MemberVote(role=member.role, label=member.label,
+                              discipline=member.discipline, owns=list(member.owns))
+            system, user = dot_prompt(member, story_block, catalogue)
+            try:
+                answer = await generate_structured(
+                    self.runtime, DotVote, system, user, max_new_tokens=192,
+                    example=DotVote(dots=["uncertainty", "test_effort"],
+                                    why="one clause on what worries you").model_dump(),
+                )
+                vote.dots = [
+                    item for item in (str(x).strip() for x in answer.dots)
+                    if item in FACTOR_IDS
+                ][:DOTS_PER_MEMBER]
+                vote.reasoning = (answer.why or "").strip()
+            except Exception as exc:
+                logger.warning("Seat %s did not place dots: %s", member.role, exc)
+                vote.inferred = True
+                vote.reasoning = "This seat did not place its dots."
+            votes.append(vote)
+            _emit(progress, "technique_vote", "completed",
+                  f"{member.label} places {len(vote.dots)} dot(s)",
+                  detail=vote.reasoning,
+                  evidence={"role": vote.role, "dots": vote.dots})
+
+        tally = dot_tally(votes)
+        scores, steps = apply_dots(baseline, tally, len(squad))
+        calculation = calculate(scores, story.stack)
+        outcome = dot_outcome(votes, tally, calculation, steps)
+        override = [
+            _squad_factor(
+                factor,
+                scores[factor],
+                owner=OWNER_OF[factor].role if tally.get(factor) else "baseline",
+                note=(
+                    f"{tally[factor]} of {len(squad)} seat(s) spent a dot here."
+                    if tally.get(factor) else ""
+                ),
+            )
+            for factor in FACTOR_IDS
+        ]
+        return outcome, override
+
+    async def _affinity(
+        self, story_block: str, references, framework
+    ) -> TechniqueOutcome:
+        neighbours = [
+            {"title": item.get("title", ""), "points": item.get("points"),
+             "similarity": item.get("similarity", 0)}
+            for item in (references or [])
+        ]
+        reasoning = ""
+        if neighbours:
+            system, user = cluster_prompt(story_block, neighbours)
+            try:
+                answer = await generate_structured(
+                    self.runtime, ClusterVote, system, user, max_new_tokens=192,
+                    example=ClusterVote(why="one or two sentences on whether the grouping holds").model_dump(),
+                )
+                reasoning = (answer.why or "").strip()
+            except Exception as exc:
+                logger.warning("Affinity clustering commentary failed: %s", exc)
+                reasoning = "The grouping commentary could not be produced."
+        return affinity_outcome(neighbours, reasoning, framework)
+
+    async def _bucket(self, story_block: str, anchors: list[dict], framework) -> TechniqueOutcome:
+        if not anchors:
+            return bucket_outcome({}, "", "No calibration anchors were available.", framework, [])
+        system, user = anchor_prompt(story_block, anchors)
+        try:
+            answer = await generate_structured(
+                self.runtime, AnchorVote, system, user, max_new_tokens=192,
+                example=AnchorVote(anchor=str(anchors[0].get("label", "anchor")),
+                                   relative="similar",
+                                   why="one clause on the resemblance").model_dump(),
+            )
+        except Exception as exc:
+            logger.warning("Bucket placement failed: %s", exc)
+            return bucket_outcome({}, "", f"The placement pass failed: {exc}", framework, anchors)
+        chosen = match_anchor(answer.anchor, anchors)
+        if chosen is None:
+            # Refused, not substituted. Quietly falling back to some middle anchor produces a
+            # confident bucket derived from a reference nobody chose, and the number that comes
+            # out looks exactly like one that was reasoned about.
+            return bucket_outcome(
+                {}, "",
+                f"The comparison named \"{answer.anchor}\", which is not one of the "
+                f"{len(anchors)} calibration anchors for this stack.",
+                framework, anchors,
+            )
+        return bucket_outcome(
+            chosen, answer.relative, (answer.why or "").strip(), framework, anchors
+        )
 
     async def estimate(
         self,
@@ -1921,7 +2264,85 @@ class EstimateService:
                     }
                 )
 
+        # -- The chosen estimation technique ------------------------------------------------
+        #
+        # Everything above produced one estimator's reading of the story. A technique is how a
+        # *team* reconsiders that reading, so it runs last and starts from the baseline rather
+        # than from scratch: starting over would discard the evidence already gathered and make
+        # the five techniques incomparable, since any difference between them would come from a
+        # different starting point rather than from the technique.
+        baseline_scores = {item.factor: int(item.score) for item in final_scorecard}
+        baseline_calculation = calculate(baseline_scores, story.stack)
+        technique = TECHNIQUE_BY_ID[story.technique]
+        story_block = _story_evidence(story)[:STORY_CONTEXT_BUDGET]
+        _emit(progress, "technique", "running", f"{technique.name} session opening",
+              detail=technique.how,
+              evidence={"technique": technique.id, "rule": technique.rule,
+                        "precision": technique.precision, "speed": technique.speed,
+                        "model_calls": technique.model_calls,
+                        "baseline_points": baseline_calculation.points})
+
+        squad_override: list[FactorScore] | None = None
+        if technique.id == "planning_poker":
+            outcome, squad_override = await self._planning_poker(
+                story, story_block, baseline_scores, [r.role for r in specialist_routes], progress
+            )
+        elif technique.id == "dot_voting":
+            outcome, squad_override = await self._dot_voting(
+                story, story_block, baseline_scores, [r.role for r in specialist_routes], progress
+            )
+        elif technique.id == "tshirt":
+            outcome = await self._tshirt(story_block, baseline_calculation)
+        elif technique.id == "affinity":
+            preview = compare_references(
+                story, baseline_scores, baseline_calculation.points,
+                reference_history or [],
+            )
+            outcome = await self._affinity(
+                story_block, [item.model_dump() for item in preview.matches],
+                baseline_calculation,
+            )
+        else:
+            outcome = await self._bucket(
+                story_block,
+                [{"label": a["title"], "pts": a["points"], "detail": a.get("stack", "")}
+                 for a in story.stack.anchors()],
+                baseline_calculation,
+            )
+
+        # Poker and dot voting produce a *scorecard*, so the whole downstream — policy gates,
+        # confidence, reasoning — runs on the squad's numbers rather than on the baseline with
+        # the squad's answer bolted on beside it. The other three produce a point value by
+        # comparison instead, so the arithmetic stands and the two are reported side by side.
+        if squad_override is not None:
+            final_scorecard = squad_override
+        _emit(progress, "technique", "completed",
+              f"{technique.name}: {outcome.points} points",
+              detail=facilitator_note(outcome),
+              evidence={
+                  "technique": outcome.technique, "points": outcome.points,
+                  "framework_points": outcome.framework_points,
+                  "divergence": outcome.divergence, "spread": outcome.spread,
+                  "consensus": outcome.consensus, "rounds": outcome.rounds,
+                  "steps": outcome.steps,
+                  "votes": [
+                      {"label": v.label, "points": v.points, "dots": v.dots,
+                       "inferred": v.inferred, "why": v.reasoning[:200]}
+                      for v in outcome.votes
+                  ],
+              })
+
         result = build_result(final_draft, story, manifest, final_scorecard)
+        result["technique"] = {
+            **outcome.model_dump(),
+            "facilitator_note": facilitator_note(outcome),
+            "definition": {
+                "id": technique.id, "name": technique.name, "tagline": technique.tagline,
+                "precision": technique.precision, "speed": technique.speed,
+                "best_for": technique.best_for, "how": technique.how, "rule": technique.rule,
+                "model_calls": technique.model_calls,
+            },
+        }
         final_scores = {item["factor"]: int(item["score"]) for item in result["scorecard"]}
         audit = consistency_audit(
             primary_assessment,

@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from backend.harness import GROUNDING_CONTRACT_BRIEF
+from backend.harness import GROUNDING_CONTRACT_VOICE
 
 
 # ------------------------------------------------------------------------------------------
@@ -348,7 +348,7 @@ def system_prompt(
         PERSONA.format(address=address),
         capability_brief(address),
         VOICE_RULES,
-        GROUNDING_CONTRACT_BRIEF,
+        GROUNDING_CONTRACT_VOICE,
         f"Current local date and time: {now}. Never guess the current date from training data.",
     ]
     if briefing:
