@@ -157,3 +157,67 @@ def test_the_chat_sanitiser_is_covered_by_a_real_browser_test():
     # so the wrong one would make every payload "pass" by throwing before it was tested.
     config = (root / "vite.config.ts").read_text(encoding="utf-8")
     assert "jsdom" in config
+
+
+# -- Log discipline --------------------------------------------------------------------------
+
+def test_a_client_disconnect_is_not_reported_as_an_application_error():
+    """Closing a tab mid-stream leaves the transport shutting down an already-reset socket.
+
+    On Windows the Proactor loop raises out of that teardown callback and asyncio logs the
+    whole traceback at ERROR — for something that happens several times a session by design,
+    since Talk reconnects on its own and every SSE stream ends when its page does. An ERROR
+    that means nothing is worse than no log at all: it teaches the reader that ERROR is noise,
+    and the next real failure scrolls past unread.
+    """
+    import asyncio
+    import logging
+
+    from backend.api import _quiet_client_disconnects
+
+    seen: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            seen.append(record)
+
+    handler = Capture()
+    root = logging.getLogger()
+    root.addHandler(handler)
+    previous = root.level
+    root.setLevel(logging.DEBUG)
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        _quiet_client_disconnects(loop)
+        disconnect = {
+            "message": "Exception in callback _ProactorBasePipeTransport._call_connection_lost()",
+            "exception": ConnectionResetError(10054, "forcibly closed by the remote host"),
+            "handle": "<Handle _ProactorBasePipeTransport._call_connection_lost()>",
+        }
+        # Same error family, different origin: still a real event worth reporting.
+        elsewhere = {
+            "message": "Exception in callback Server._on_data_received()",
+            "exception": ConnectionResetError(10054, "forcibly closed by the remote host"),
+            "handle": "<Handle Server._on_data_received()>",
+        }
+        bug = {
+            "message": "Task exception was never retrieved",
+            "exception": ValueError("something is actually broken"),
+        }
+        results = []
+        for context in (disconnect, elsewhere, bug):
+            seen.clear()
+            loop.call_exception_handler(context)
+            results.append({record.levelname for record in seen})
+        return results
+
+    try:
+        quiet, other_origin, real_bug = asyncio.run(exercise())
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous)
+
+    assert "ERROR" not in quiet and "DEBUG" in quiet
+    assert "ERROR" in other_origin, "the filter must not silence a reset from anywhere else"
+    assert "ERROR" in real_bug, "the filter must never hide a genuine failure"

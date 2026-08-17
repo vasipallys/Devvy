@@ -175,6 +175,42 @@ run_ledger = RunLedger(settings.app_data_dir, settings.agent_run_retention_days)
 job_runner = JobRunner(engine, retention_days=settings.job_retention_days)
 
 
+#: Errors that mean "the client went away", not "something broke".
+#:
+#: Closing a tab, reloading mid-stream, or dropping a WebSocket leaves the transport to shut
+#: down a socket the peer has already reset. On Windows the Proactor loop raises out of that
+#: teardown callback, and asyncio has nowhere to return it to, so it logs the whole traceback
+#: at ERROR — for a disconnect that is not only harmless but expected several times per
+#: session, since Talk reconnects on its own and every SSE stream ends when its page does.
+_DISCONNECT_ERRORS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+
+def _quiet_client_disconnects(loop: asyncio.AbstractEventLoop) -> None:
+    """Log a routine disconnect as debug, and pass everything else to asyncio untouched.
+
+    Narrow on purpose. The temptation is to silence the whole handler and be rid of the noise,
+    which would also silence the next real bug to surface through it. This matches one error
+    family arising from one callback, and anything that does not match is handed to the default
+    handler exactly as before — an ERROR-level log for a routine event is a problem precisely
+    because it teaches the reader that ERROR does not mean anything, and a filter that hid real
+    failures would earn that lesson properly.
+    """
+    inherited = loop.get_exception_handler()
+
+    def handle(active: asyncio.AbstractEventLoop, context: dict) -> None:
+        exception = context.get("exception")
+        source = f"{context.get('message', '')} {context.get('handle', '')}"
+        if isinstance(exception, _DISCONNECT_ERRORS) and "_call_connection_lost" in source:
+            logger.debug("Client disconnected before the transport closed: %s", exception)
+            return
+        if inherited is not None:
+            inherited(active, context)
+        else:
+            active.default_exception_handler(context)
+
+    loop.set_exception_handler(handle)
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     # Before anything is served, not after. A deployment that is unsafe for its reachability
@@ -187,6 +223,7 @@ async def lifespan(application: FastAPI):
             logger.critical("Refusing to start: %s", message)
         raise RuntimeError(fatal[0])
     init_db()
+    _quiet_client_disconnects(asyncio.get_running_loop())
     if settings.app_host not in {"127.0.0.1", "localhost", "::1"}:
         if not settings.auth_enabled:
             raise RuntimeError("Authentication must be enabled for a non-loopback deployment.")
